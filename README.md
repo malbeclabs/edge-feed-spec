@@ -17,3 +17,9 @@ This repository is the home of wire-format specifications that data publishers a
 ## Status
 
 These specifications are drafts circulated for feedback from prospective publishers and subscribers. Field layouts and semantics may change between draft versions until a `v1.0.0` is declared stable.
+
+## License
+
+Licensed under the **Apache License 2.0**.
+
+See [LICENSE](./LICENSE) for details.
