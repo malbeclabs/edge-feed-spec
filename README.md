@@ -14,6 +14,12 @@ This repository is the home of wire-format specifications that data publishers a
 | [Reference Data Distribution](./reference-data/spec.md) | Shared supplement defining the two-port transport model and continuous in-band instrument definition retransmission used by the feed specs above |
 | [Source ID Registry](./sources/spec.md) | Canonical registry of `Source ID` values identifying the venues whose books feed messages are derived from |
 
+## Tooling
+
+| Tool | Description |
+|------|-------------|
+| [Hydromancer Bridge](./hydromancer-bridge/README.md) | Local service that arbitrates multiple Top-of-Book multicast feeds (first received quote wins) and republishes them over a websocket in the Hyperliquid / Hydromancer `bbo` schema, so a trader can consume the feed without integrating the binary wire format |
+
 ## Status
 
 These specifications are drafts circulated for feedback from prospective publishers and subscribers. Field layouts and semantics may change between draft versions until a `v1.0.0` is declared stable.
