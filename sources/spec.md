@@ -18,6 +18,7 @@ A Source ID identifies the venue whose order book a price message was derived fr
 | ID | Name | Kind | Notes |
 |----|------|------|-------|
 | `1` | Hyperliquid | Perpetual DEX | |
+| `2` | Phoenix | Perpetual DEX | |
 
 ## Adding a New Source
 
