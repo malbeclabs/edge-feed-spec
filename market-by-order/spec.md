@@ -127,6 +127,7 @@ Sharding the active instrument set across multiple publisher instances — each 
 | `0x05` | *(reserved)* | — | — | |
 | `0x06` | EndOfSession | 12 | mktdata | Inherited. No more data for this session. |
 | `0x07` | ManifestSummary | 24 | refdata | Active instrument set summary. Inherited; see the [Reference Data Distribution supplement](../reference-data/spec.md). |
+| `0x08` | Liquidation | 48 | mktdata | Trade-companion annotation. **Identical byte-for-byte to the top-of-book feed's Liquidation.** Emitted in the same frame as its `Trade`. |
 | `0x10` | OrderAdd | 52 | mktdata | A new resting order entered the book. |
 | `0x11` | OrderCancel | 32 | mktdata | An order left the book without further execution. |
 | `0x12` | OrderExecute | 56 | mktdata | A resting order was hit (partially or fully) by an aggressor. |
@@ -140,7 +141,7 @@ A decoder encountering an unknown type MUST skip the message using its `Message 
 
 ### Cross-Spec Type ID Policy
 
-A message Type ID that appears in more than one sibling feed MUST carry the same semantic meaning in each. The shared Type IDs at this writing are `0x01` (Heartbeat), `0x02` (InstrumentDefinition), `0x04` (Trade), `0x06` (EndOfSession), and `0x07` (ManifestSummary). Heartbeat, EndOfSession, and ManifestSummary are byte-for-byte identical across every sibling that carries them. Trade is byte-for-byte identical between the top-of-book feed and this feed (the midpoint feed leaves `0x04` reserved). InstrumentDefinition shares the Type ID but each sibling defines its own layout — market-by-order and top-of-book share the 80-byte layout; the midpoint feed carries a slimmed 64-byte variant. Feed-specific payloads live in `0x10` and above. A Type ID used by one sibling for a given payload MUST NOT be reassigned to a different payload in another sibling; where a sibling does not carry that payload, the slot is reserved.
+A message Type ID that appears in more than one sibling feed MUST carry the same semantic meaning in each. The shared Type IDs at this writing are `0x01` (Heartbeat), `0x02` (InstrumentDefinition), `0x04` (Trade), `0x06` (EndOfSession), `0x07` (ManifestSummary), and `0x08` (Liquidation). Heartbeat, EndOfSession, and ManifestSummary are byte-for-byte identical across every sibling that carries them. Trade is byte-for-byte identical between the top-of-book feed and this feed (the midpoint feed leaves `0x04` reserved). Liquidation is byte-for-byte identical between the top-of-book feed and this feed. InstrumentDefinition shares the Type ID but each sibling defines its own layout — market-by-order and top-of-book share the 80-byte layout; the midpoint feed carries a slimmed 64-byte variant. Feed-specific payloads live in `0x10` and above. A Type ID used by one sibling for a given payload MUST NOT be reassigned to a different payload in another sibling; where a sibling does not carry that payload, the slot is reserved.
 
 ---
 
