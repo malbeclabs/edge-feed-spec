@@ -207,7 +207,7 @@ The encoding of the Signer and Vault fields is a property of the **venue**, defi
 
 ## Enumerations and Flags
 
-- **Side** `u8`: `0` unknown, `1` buy, `2` sell. (Intentionally **not** the same encoding as the [Market-by-Order Feed](../market-by-order/spec.md), whose Side is `0` bid/buy, `1` ask/sell: this feed reserves `0` for *unknown* so the unknown-enum rule — treat an unrecognized value as `0` — cannot alias to a real side. Side is not harmonized across the family; a consumer reading more than one feed MUST decode Side per the feed it is reading.)
+- **Side** `u8`: `0` bid/buy, `1` ask/sell, `2` unknown — **harmonized with the [Market-by-Order Feed](../market-by-order/spec.md)** (`0` bid/buy, `1` ask/sell) so a consumer reading both feeds decodes Buy/Sell identically. Order-intent adds `2` unknown (the Market-by-Order feed has no unknown side, since a resting order always has one); in practice this feed always knows the side, so `2` is a forward-compatibility sentinel. Because `0` is a real side here, an **unrecognized** Side value maps to `2` (unknown), **not** to `0` — see the unrecognized-enum rule below.
 - **Order Type** `u8`: `0` unknown, `1` limit, `2` trigger-market, `3` trigger-limit.
 - **TIF** `u8` (time-in-force): `0` unknown, `1` GTC, `2` IOC, `3` ALO (post-only).
 - **Grouping** `u8`: `0` na, `1` normalTpsl, `2` positionTpsl.
@@ -228,7 +228,7 @@ Bits 1 and 2 (`trigger-is-tp` / `trigger-is-sl`) are **mutually exclusive**: at 
 
 These are the order-intent feed's **`Event Flags`**, a distinct field from the [Market-by-Order Feed](../market-by-order/spec.md)'s `Order Flags`; bit positions are **not** shared across feeds (for example `reduce-only` is bit 0 here but bit 1 in market-by-order). A cross-feed reader MUST apply each feed's own bit definitions and not reuse flag masks across feeds.
 
-Receivers MUST NOT reject a message over an unrecognized enum value: they treat the value semantically as `0`/unknown (the raw byte MAY be preserved for logging) and MUST ignore flag bits they do not recognize.
+Receivers MUST NOT reject a message over an unrecognized enum value: they treat it as the field's **unknown/unspecified** member — `2` for Side, `0` for Order Type, TIF, and Grouping (the raw byte MAY be preserved for logging) — and MUST ignore flag bits they do not recognize. (Side's unknown sentinel is `2` rather than `0` because `0` is the real Bid/Buy value, harmonized with the Market-by-Order feed.)
 
 ### Unused-Field Rule (normative)
 
@@ -458,7 +458,7 @@ The Schema Version byte in the frame header is `1` for this release (spec versio
 
 - Append new fields to existing messages (old decoders ignore trailing bytes within the declared Message Length).
 - Define new message types in currently-reserved Type ID ranges (old decoders skip unknown types using the Message Length field).
-- Define new values for enumerated fields such as Side, Order Type, TIF, and Grouping (decoders MUST accept any `u8` value and treat unknowns as `0`).
+- Define new values for enumerated fields such as Side, Order Type, TIF, and Grouping (decoders MUST accept any `u8` value and treat an unrecognized one as the field's unknown/unspecified member — `2` for Side, `0` for the others).
 - Define new Event Flag bits (decoders MUST ignore flag bits they do not recognize).
 
 Existing field layouts and semantics will not change within the v0.x line without a Schema Version bump.
