@@ -67,7 +67,7 @@ The `price`, `qty`, and `ts_ns` types are reused from the [Top-of-Book & Trades 
 | `0x07` | ManifestSummary | 24 | refdata | Active instrument set summary (see supplement) |
 | `0x30` | PerpStats | 124 | mktdata | Per-perpetual derived state snapshot |
 
-Type IDs `0x03`, `0x04`, `0x05`, and `0x08` are intentionally not carried on this feed. These are message types defined in the top-of-book feed (`Quote`, `Trade`, `EndOfSession` predecessor, `Liquidation`); leaving them absent here prevents accidental cross-decoding if a frame is misrouted between feeds.
+Type IDs `0x03`, `0x04`, `0x05`, and `0x08` are intentionally not carried on this feed. `0x03` (`Quote`), `0x04` (`Trade`), and `0x08` (`Liquidation`) are message types of the top-of-book and market-by-order feeds, and `0x05` is reserved there; leaving them absent here prevents accidental cross-decoding if a frame is misrouted between feeds.
 
 A decoder encountering an unknown type MUST skip the message using its Message Length field and continue parsing the frame.
 
