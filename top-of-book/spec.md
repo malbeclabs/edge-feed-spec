@@ -103,6 +103,7 @@ Every application message begins with:
 | `0x04` | Trade | 52 | mktdata | Last trade report |
 | `0x06` | EndOfSession | 12 | mktdata | No more data for this session |
 | `0x07` | ManifestSummary | 24 | refdata | Active instrument set summary (see supplement) |
+| `0x08` | Liquidation | 48 | mktdata | Annotation for a forced (liquidation/ADL) `Trade`, keyed on `Trade ID` |
 
 A decoder encountering an unknown type MUST skip the message using its Message Length field and continue parsing the frame.
 
@@ -254,6 +255,21 @@ Periodic summary of the active instrument set on this channel. Carried on the re
 | 12 | Instrument Count | `u32` | Number of instruments currently in the active set |
 | 16 | Timestamp | `ts_ns` | When the publisher emitted this summary |
 
+### 0x08 Liquidation (48 bytes)
+
+Annotates a `Trade` that resulted from a forced liquidation or auto-deleveraging (ADL). It carries no size or price of its own — those live on the paired `Trade` — so subscribers computing volume from the tape are not double-counted. A publisher that emits a `Liquidation` MUST emit it in the **same frame** as the `Trade` it annotates; subscribers join the two on `Trade ID`.
+
+| Offset | Field | Type | Description |
+|--------|-------|------|-------------|
+| 0 | Header | 4B | Type=`0x08`, Length=48 |
+| 4 | Instrument ID | `u32` | Instrument liquidated |
+| 8 | Source ID | `u16` | Upstream venue (see Source ID Registry) |
+| 10 | Liquidation Flags | `u8` | Bit 0: liquidated side (0 = long liquidated, 1 = short liquidated). Bit 1: ADL. |
+| 11 | Method | `u8` | Liquidation mechanism. 0 = market, 1 = backstop, 0xFF = unknown. |
+| 12 | Trade ID | `u64` | Venue trade ID of the paired `Trade` |
+| 20 | Mark Price | `price` | Mark price at liquidation |
+| 28 | Liquidated User | 20B | Liquidated account address |
+
 ---
 
 ## Session Lifecycle
@@ -289,3 +305,5 @@ The Schema Version byte in the frame header is `1` for this release. Future vers
 - Define new values for enumerated fields such as Asset Class and Market Model (decoders MUST accept any `u8` value).
 
 Existing field layouts and semantics will not change within the v0.x line without a Schema Version bump.
+
+`0x08 Liquidation` was added as a shared trade-companion type; Schema Version remains `1` because old decoders skip it via Message Length.
