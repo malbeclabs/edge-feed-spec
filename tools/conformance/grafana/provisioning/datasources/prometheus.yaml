@@ -1,0 +1,18 @@
+# Auto-registered on Grafana start. Connects to the Prometheus service.
+#
+# Prometheus runs with network_mode: host (like the parsers it scrapes) and
+# listens on 0.0.0.0:9095.  Grafana runs on the compose bridge network, so it
+# reaches Prometheus via the host-gateway special DNS name (available on
+# Docker >= 20.10 with the extra_hosts stanza in docker-compose.yml).
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus-conformance
+    type: prometheus
+    access: proxy
+    url: http://host-gateway:9095
+    isDefault: false
+    jsonData:
+      timeInterval: "15s"
+    editable: true

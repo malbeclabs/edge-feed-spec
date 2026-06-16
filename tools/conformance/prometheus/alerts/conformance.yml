@@ -1,0 +1,56 @@
+groups:
+  - name: dz_conformance
+    rules:
+      # Page: any "must" rule violation in the last 5 minutes.
+      # A single violation of a MUST rule means the feed is non-conformant.
+      - alert: ConformanceMustViolation
+        expr: increase(dz_conformance_violations_total{severity="must"}[5m]) > 0
+        for: 0m
+        labels:
+          severity: page
+        annotations:
+          summary: "Conformance MUST violation on {{ $labels.feed }} feed"
+          description: >
+            Rule {{ $labels.rule_id }} (severity=must) fired on feed {{ $labels.feed }}.
+            A MUST violation means the feed is non-conformant with the spec.
+
+      # Warn: unverifiable total rising — coverage is degrading.
+      # Fire if we see more than 5 unverifiable events in 5 minutes on any
+      # single rule/reason combination.  Tune the threshold to taste.
+      - alert: ConformanceCoverageLoss
+        expr: increase(dz_conformance_unverifiable_total[5m]) > 5
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Conformance coverage loss on {{ $labels.feed }} feed"
+          description: >
+            Rule {{ $labels.rule_id }} became unverifiable (reason={{ $labels.reason }})
+            on feed {{ $labels.feed }}. Check feed health and instrument definitions.
+
+      # Warn: transport packet loss detected.
+      - alert: ConformanceTransportLoss
+        expr: increase(dz_conformance_transport_loss_total[5m]) > 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Transport loss on port {{ $labels.port }}"
+          description: >
+            Sequence-gap loss detected on multicast port {{ $labels.port }}.
+            This may indicate network congestion or switch misconfiguration.
+
+      # Warn: conformance tool not reachable (scrape target down).
+      # Uses the synthetic `up` metric Prometheus sets per scrape — more
+      # reliable than absent() which is delayed by the staleness window.
+      - alert: ConformanceDown
+        expr: up{job="dz-conformance"} == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "dz-conformance scrape target is down"
+          description: >
+            Prometheus cannot reach the dz-conformance metrics endpoint.
+            Check that the container is running and --metrics-addr matches
+            the target in tools/conformance/prometheus/prometheus.yml.
