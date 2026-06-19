@@ -211,7 +211,8 @@
           "expr": "dz_conformance_instruments_state{status=\"active\"}",
           "legendFormat": "active"
         }
-      ]
+      ],
+      "description": "Sourced from dz_conformance_instruments_state, which is registered but not yet populated by the engine (documented limitation) \u2014 this panel is expected to be empty until that gauge is wired."
     },
     {
       "type": "row",
@@ -781,7 +782,8 @@
           "expr": "dz_conformance_instruments_state",
           "legendFormat": "{{status}}"
         }
-      ]
+      ],
+      "description": "Sourced from dz_conformance_instruments_state, which is registered but not yet populated by the engine (documented limitation) \u2014 this panel is expected to be empty until that gauge is wired."
     },
     {
       "type": "row",
