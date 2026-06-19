@@ -193,7 +193,10 @@ func (t *portTracker) observe(seq uint64, sendTS uint64, raw []byte, era uint8) 
 	var gap bool
 	if t.lastSeq != nil {
 		last := *t.lastSeq
-		if seq > last+1 {
+		// seq-last form (rather than last+1) avoids a u64 overflow when last is
+		// MaxUint64; unreachable for a seq starting at 0, but keeps the comparison
+		// total. A forward jump of more than 1 is a gap.
+		if seq > last && seq-last > 1 {
 			gap = true
 		}
 		// seq <= last → backward motion; handled by caller (FRAME.SEQ_RESET_GAP).

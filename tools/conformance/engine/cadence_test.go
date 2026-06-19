@@ -440,6 +440,48 @@ func TestDefinitionCycleCoverageUnconfigured(t *testing.T) {
 	}
 }
 
+// TestDefinitionCycleCoverageRealCadence proves the coverage check fires at spec
+// cadence — manifests arriving far more frequently than the definition cycle.
+// Under the old per-manifest cycle reset this was structurally dead (the
+// inter-manifest gap never reached ExpectDefinitionCycle); the tumbling window
+// fixes it. Cycle = 3s, manifests every 1s. Cycle 1 establishes {100,200} and
+// passes; cycle 2 retransmits only 100 (200 dropped) → Violation at close.
+func TestDefinitionCycleCoverageRealCadence(t *testing.T) {
+	cfg := Config{Feed: core.FeedTOB, ExpectDefinitionCycle: 3 * time.Second}
+	e, ac := newCadenceEngine(cfg)
+	magic := wire.MagicTOB
+	seq := uint64(1)
+	mf := func(ts uint64) { // ManifestSummary (seq=1, count=2) at SendTS=ts
+		processFrame(e, buildManifestFrameWithTS(magic, ts, 1, 1, 2, 1), magic, core.PortRefData, seq)
+		seq++
+	}
+	df := func(ts uint64, id uint32) { // InstrumentDefinition for id at SendTS=ts
+		processFrame(e, buildInstrDefFrameWithTS(ts, id, 1, 1), magic, core.PortRefData, seq)
+		seq++
+	}
+
+	// Cycle 1 window [0, 3s): establish active set {100,200}; manifests every 1s.
+	mf(0)
+	df(nsPerSec/10, 100) // 0.1s
+	df(nsPerSec/5, 200)  // 0.2s
+	mf(nsPerSec)         // 1s
+	mf(2 * nsPerSec)     // 2s
+	mf(3 * nsPerSec)     // 3s → closes cycle 1 (both seen → pass), reopens at 3s
+	clearFindings(ac)
+
+	// Cycle 2 window [3s, 6s): retransmit only 100; manifests still 1s apart.
+	df(3*nsPerSec+nsPerSec/10, 100) // 3.1s
+	mf(4 * nsPerSec)                // 4s
+	df(4*nsPerSec+nsPerSec/10, 100) // 4.1s
+	mf(5 * nsPerSec)                // 5s
+	mf(6 * nsPerSec)                // 6s → closes cycle 2: instrID 200 never retransmitted
+	e.Flush()
+
+	if !hasViolation(ac, "REFDATA.DEFINITION_CYCLE_COVERAGE") {
+		t.Error("REFDATA.DEFINITION_CYCLE_COVERAGE: expected Violation when an instrument is dropped at spec cadence (manifests far more frequent than the cycle); the old per-manifest reset left this dead")
+	}
+}
+
 // --- REFDATA.NO_BURST_DEFINITIONS tests ---
 
 // TestNoBurstDefinitions: in cycle 2 (after readiness established), all defs
