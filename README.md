@@ -13,6 +13,7 @@ This repository is the home of wire-format specifications that data publishers a
 | [Market-by-Order Feed](./market-by-order/spec.md) | Sibling protocol carrying the full resting-order population per instrument, with continuous in-band snapshot+delta recovery |
 | [Order-Intent Feed](./order-intent/spec.md) | Normalized, pre-consensus order-intent events (order/cancel/modify submissions) observed in a venue's mempool, as fixed-size binary multicast |
 | [Reference Data Distribution](./reference-data/spec.md) | Shared supplement defining the two-port transport model and continuous in-band instrument definition retransmission used by the feed specs above |
+| [Perp Stats Feed](./perp-stats/spec.md) | Sibling cadence feed carrying per-perpetual derived state (funding, mark, oracle, open interest, premium) relayed from the venue REST surface |
 | [Source ID Registry](./sources/spec.md) | Canonical registry of `Source ID` values identifying the venues whose books feed messages are derived from |
 
 ## Status
