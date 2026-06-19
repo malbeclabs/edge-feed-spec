@@ -1,8 +1,10 @@
 package report
 
 import (
+	"cmp"
 	"encoding/json"
 	"os"
+	"slices"
 )
 
 // ruleStatusCounts is the JSON-serialisable form of per-rule status counts.
@@ -13,7 +15,8 @@ type ruleStatusCounts struct {
 }
 
 // JSONReport marshals the aggregator's per-rule status counts to the given file path.
-// The file is created (or truncated) and written atomically enough for CI use.
+// The file is created or truncated and written in a single os.WriteFile call; a crash
+// mid-write can leave a partial file (acceptable for CI report output, not durable state).
 func JSONReport(agg *Aggregator, path string) error {
 	counts := agg.Counts()
 	rows := make([]ruleStatusCounts, 0, len(counts))
@@ -41,9 +44,7 @@ func JSONReport(agg *Aggregator, path string) error {
 
 // sortRuleRows sorts rows by RuleID for deterministic output.
 func sortRuleRows(rows []ruleStatusCounts) {
-	for i := 1; i < len(rows); i++ {
-		for j := i; j > 0 && rows[j].RuleID < rows[j-1].RuleID; j-- {
-			rows[j], rows[j-1] = rows[j-1], rows[j]
-		}
-	}
+	slices.SortFunc(rows, func(a, b ruleStatusCounts) int {
+		return cmp.Compare(a.RuleID, b.RuleID)
+	})
 }
