@@ -46,6 +46,26 @@ The full 82-rule catalog — rule ID, severity, tier, applicable feeds — is de
 
 ## Quick start
 
+### Try it now (bundled captures)
+
+No feed or network required — the repo ships small conformant captures under `testdata/`, on fixed ports `18001` (mktdata), `18002` (refdata), `18003` (snapshot):
+
+```bash
+go build -o dz-conformance .
+
+# Conformant MBO capture → exits 0
+./dz-conformance --feed mbo --pcap testdata/conformant_mbo.pcap \
+  --mktdata-port 18001 --refdata-port 18002 --snapshot-port 18003
+echo "exit: $?"   # 0
+
+# See it catch a violation: decode MBO bytes as TOB → magic mismatch, exits 1
+./dz-conformance --feed tob --pcap testdata/conformant_mbo.pcap \
+  --mktdata-port 18001 --refdata-port 18002
+echo "exit: $?"   # 1
+```
+
+`conformant_tob.pcap` and `conformant_midpoint.pcap` are also provided (mktdata + refdata only). Add `--json-report /tmp/report.json` for a per-rule status dump, or `-v` to surface `Unverifiable`/info findings.
+
 ### Live capture
 
 ```bash
