@@ -10,8 +10,12 @@ import (
 	"github.com/malbeclabs/edge-feed-spec/tools/conformance/engine"
 )
 
-// version is set at build time via -ldflags.
-var version = "dev"
+// version and commit are set at build time via -ldflags
+// (-X main.version=… -X main.commit=…). They label the build_info metric.
+var (
+	version = "dev"
+	commit  = "none"
+)
 
 func main() {
 	fs := flag.NewFlagSet("dz-conformance", flag.ExitOnError)

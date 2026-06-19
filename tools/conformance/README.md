@@ -189,7 +189,7 @@ All metrics are prefixed `dz_conformance_`.
 
 Cardinality is bounded: `rule_id` is a fixed enum (from `core/registry.go`), `port` has 3 values, `reason` is a small enum. `rule_info` adds one series per feed-applicable rule with fixed `summary`/`spec_url` label values (sourced from the registry's `RuleDoc`); these bounded strings live **only** on `rule_info`, never on the high-rate counters.
 
-**Note:** `build_info{commit=""}` — the `commit` label is always empty because `run.go` passes `""` to `report.NewProm`. Only `main.version` is set via ldflags.
+**Note:** both `build_info` labels are wired from build vars — set them with `-ldflags "-X main.version=… -X main.commit=…"`. They default to `version="dev"`, `commit="none"`.
 
 ## Building
 

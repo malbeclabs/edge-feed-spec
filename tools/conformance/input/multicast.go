@@ -13,6 +13,13 @@ import (
 const (
 	multicastBufSize = 65535
 	datagramChanSize = 256
+
+	// readErrBackoff and maxConsecutiveReadErrs bound a persistent ReadFromUDP
+	// error (e.g. the interface going down) so it cannot busy-spin the read
+	// goroutine at 100% CPU. After maxConsecutiveReadErrs failures in a row the
+	// loop gives up so the process can exit/restart rather than peg a core.
+	readErrBackoff         = 5 * time.Millisecond
+	maxConsecutiveReadErrs = 256
 )
 
 // MulticastSource binds one UDP multicast socket per logical port and delivers
@@ -105,6 +112,7 @@ func (ms *MulticastSource) readLoop(ctx context.Context, conn *net.UDPConn, port
 	defer ms.wg.Done()
 
 	buf := make([]byte, multicastBufSize)
+	consecutiveErrs := 0
 	for {
 		// Non-blocking done check before we block on ReadFromUDP.
 		select {
@@ -121,9 +129,22 @@ func (ms *MulticastSource) readLoop(ctx context.Context, conn *net.UDPConn, port
 				return
 			default:
 			}
-			// Transient error; keep going.
+			// Back off briefly so a persistent error can't busy-spin at 100% CPU,
+			// and bail after a sustained failure run so the process can exit/restart
+			// instead of pegging a core. Select on ctx so backoff never delays
+			// shutdown.
+			consecutiveErrs++
+			if consecutiveErrs >= maxConsecutiveReadErrs {
+				return
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(readErrBackoff):
+			}
 			continue
 		}
+		consecutiveErrs = 0
 
 		// Copy received bytes — buf is reused on the next iteration.
 		raw := make([]byte, n)
