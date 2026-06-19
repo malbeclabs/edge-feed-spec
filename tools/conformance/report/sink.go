@@ -59,6 +59,10 @@ type Aggregator struct {
 	counts      map[string]map[core.Status]int // ruleID → status → n
 }
 
+// Record tallies a finding. NOT safe for concurrent use: like the other
+// reporters it relies on the engine driving all Record calls from a single
+// goroutine (the Run pipeline). A future concurrent caller would need a mutex
+// added here (SlogSink already has one; Prom's CounterVecs are concurrency-safe).
 func (a *Aggregator) Record(f core.Finding) {
 	if a.counts == nil {
 		a.counts = map[string]map[core.Status]int{}
