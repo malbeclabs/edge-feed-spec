@@ -28,6 +28,11 @@ func Decode(raw []byte, expectMagic uint16) (*Frame, []StructFinding) {
 	if h.Magic != expectMagic {
 		fs = append(fs, StructFinding{"FRAME.MAGIC_MISMATCH", 0,
 			fmt.Sprintf("magic 0x%04X, expected 0x%04X", h.Magic, expectMagic), false})
+		// A wrong magic means this datagram is not a frame of this feed (misroute
+		// or corruption). The remaining header fields and message bytes can't be
+		// trusted, so return now rather than emit a cascade of derived findings
+		// from walking non-frame bytes.
+		return f, fs
 	}
 	if h.SchemaVersion != 1 {
 		fs = append(fs, StructFinding{"FRAME.SCHEMA_VERSION", 2,

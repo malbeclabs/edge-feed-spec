@@ -44,6 +44,17 @@ func TestDecodeFrameLengthLessThanReceived_IsPublisherInvalid(t *testing.T) {
 	}
 }
 
+func TestDecodeMagicMismatch_NoWalkCascade(t *testing.T) {
+	// A datagram whose magic doesn't match the bound feed is not a frame of
+	// this feed; Decode must report only FRAME.MAGIC_MISMATCH and not cascade
+	// derived findings (schema/length/walk) off untrusted bytes.
+	raw := make([]byte, 60) // all-zero: magic 0x0000 ≠ MBO, and every other field is junk
+	_, fs := wire.Decode(raw, wire.MagicMBO)
+	if len(fs) != 1 || fs[0].RuleID != "FRAME.MAGIC_MISMATCH" {
+		t.Fatalf("want exactly one FRAME.MAGIC_MISMATCH finding (no cascade), got %+v", fs)
+	}
+}
+
 func has(fs []wire.StructFinding, id string) bool {
 	for _, f := range fs {
 		if f.RuleID == id {
