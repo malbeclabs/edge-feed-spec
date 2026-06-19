@@ -12,8 +12,9 @@ RUN go mod download
 # Build the binary.
 COPY . .
 ARG VERSION=dev
+ARG COMMIT=none
 RUN CGO_ENABLED=0 go build \
-      -ldflags "-s -w -X main.version=${VERSION}" \
+      -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${COMMIT}" \
       -o /out/dz-conformance .
 
 FROM alpine:3.20

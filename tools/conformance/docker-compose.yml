@@ -13,10 +13,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    # No extra caps: the tool uses net.ListenMulticastUDP (an ordinary UDP
+    # socket + IGMP join), not raw sockets, and network_mode: host already
+    # shares the host netns — NET_ADMIN/NET_RAW would only widen blast radius.
     network_mode: host
-    cap_add:
-      - NET_ADMIN
-      - NET_RAW
     restart: unless-stopped
     command:
       - "--feed=mbo"
@@ -25,7 +25,9 @@ services:
       - "--refdata-port=${DZ_MBO_REFDATA_PORT}"
       - "--snapshot-port=${DZ_MBO_SNAPSHOT_PORT}"
       - "--interface=${DZ_INTERFACE}"
-      - "--metrics-addr=127.0.0.1:${CONFORMANCE_METRICS_PORT:-9094}"
+      # 9094 is hard-coded to match prometheus/prometheus.yml's scrape target —
+      # one source of truth, not an env override that would silently desync it.
+      - "--metrics-addr=127.0.0.1:9094"
 
   prometheus:
     image: prom/prometheus:v2.53.1
@@ -37,7 +39,8 @@ services:
     command:
       - "--config.file=/etc/prometheus/prometheus.yml"
       - "--storage.tsdb.path=/prometheus"
-      - "--web.listen-address=0.0.0.0:${PROMETHEUS_PORT:-9095}"
+      # 9095 is hard-coded to match the Grafana datasource URL — one source of truth.
+      - "--web.listen-address=0.0.0.0:9095"
       - "--web.enable-lifecycle"
     volumes:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
