@@ -90,16 +90,24 @@ func Run(opts RunOpts) int {
 	var promReporter *report.Prom
 	if opts.MetricsAddr != "" {
 		reg := prometheus.NewRegistry()
-		promReporter = report.NewProm(reg, version, "", opts.Cfg.Feed)
+		promReporter = report.NewProm(reg, version, commit, opts.Cfg.Feed)
 		rep = report.Multi{agg, logSink, promReporter}
 
-		// Serve metrics in the background; errors are non-fatal.
+		// Bind the metrics listener synchronously and fail fast. The metrics
+		// endpoint is the live alerting surface, so a bind failure (e.g. the port
+		// already in use) must surface as a startup error rather than be swallowed
+		// into a silent run with no metrics.
 		mux := http.NewServeMux()
 		mux.Handle("/metrics", promReporter.Handler())
 		mux.Handle("/healthz", promReporter.Healthz())
-		srv := &http.Server{Addr: opts.MetricsAddr, Handler: mux}
+		ln, err := net.Listen("tcp", opts.MetricsAddr)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "dz-conformance: cannot bind --metrics-addr %s: %v\n", opts.MetricsAddr, err)
+			return 2
+		}
+		srv := &http.Server{Handler: mux}
 		go func() {
-			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 				fmt.Fprintf(os.Stderr, "metrics server: %v\n", err)
 			}
 		}()
