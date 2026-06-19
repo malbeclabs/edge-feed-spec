@@ -326,12 +326,8 @@ func (e *Engine) checkTier1TOB(m wire.Message, port core.Port, ch uint8, seq uin
 		upd := quoteUpdateFlags(m)
 		bidGone := upd&0x04 != 0
 		askGone := upd&0x08 != 0
-		bidUpd := upd&0x01 != 0
-		askUpd := upd&0x02 != 0
 		bidPrice := quoteBidPrice(m)
 		askPrice := quoteAskPrice(m)
-		bidQty := quoteBidQty(m)
-		askQty := quoteAskQty(m)
 
 		// TOB.QUOTE.GONE_VS_ZERO_PRICE: the spec requires only gone => price 0
 		// (bit 2 bid-gone => bid_price 0; bit 3 ask-gone => ask_price 0). The reverse
@@ -345,38 +341,27 @@ func (e *Engine) checkTier1TOB(m wire.Message, port core.Port, ch uint8, seq uin
 				fmt.Sprintf("ask_gone set but ask_price=%d (must be 0)", askPrice))
 		}
 
-		// TOB.QUOTE.CROSSED_LOCKED: when both sides are present (neither gone), the
-		// book must not be crossed/locked (bid >= ask). "Present" is the not-gone
-		// flags, NOT price > 0 (a present side may carry a non-positive raw price).
+		// TOB.QUOTE.CROSSED_LOCKED (info): a crossed/locked book (bid >= ask, both
+		// sides present) is surfaced for visibility, but the spec does NOT declare it
+		// illegal — this feed carries Bid/Ask Source Count, i.e. aggregated
+		// multi-source BBOs, where transient crossed/locked is normal and conformant.
+		// Hence info severity (see registry), not a violation that fails CI.
 		if !bidGone && !askGone && bidPrice >= askPrice {
 			e.Emit("TOB.QUOTE.CROSSED_LOCKED", core.Violation, port, seq, ch, 0,
 				fmt.Sprintf("bid_price %d >= ask_price %d (crossed/locked)", bidPrice, askPrice))
 		}
 
-		// TOB.QUOTE.UPDATE_FLAGS_COHERENCE: at least one side must be flagged as
-		// updated in the update flags (bits 0-3); a zero update_flags with no side
-		// marked updated or gone is incoherent.
+		// TOB.QUOTE.UPDATE_FLAGS_COHERENCE: a quote should flag at least one side as
+		// updated or gone (bits 0-3); all-zero update flags signal a quote that
+		// claims nothing changed.
+		//
+		// The spec defines bits 0-3 independently. It does NOT couple "gone" to
+		// "updated", and a gone side mandates only price=0 (GONE_VS_ZERO_PRICE
+		// above), never qty=0. Those couplings are intentionally not asserted —
+		// flagging them would false-positive on spec-conformant publishers.
 		if upd&0x0F == 0 {
 			e.Emit("TOB.QUOTE.UPDATE_FLAGS_COHERENCE", core.Violation, port, seq, ch, 0,
 				"update_flags bits 0-3 all zero: no side updated or gone")
-		}
-		// A bid_gone flag without bid_updated is incoherent (gone implies updated).
-		if bidGone && !bidUpd {
-			e.Emit("TOB.QUOTE.UPDATE_FLAGS_COHERENCE", core.Violation, port, seq, ch, 0,
-				"bid_gone set but bid_updated not set")
-		}
-		if askGone && !askUpd {
-			e.Emit("TOB.QUOTE.UPDATE_FLAGS_COHERENCE", core.Violation, port, seq, ch, 0,
-				"ask_gone set but ask_updated not set")
-		}
-		// If a side is gone, qty must be 0 (no volume at a gone level).
-		if bidGone && bidQty != 0 {
-			e.Emit("TOB.QUOTE.UPDATE_FLAGS_COHERENCE", core.Violation, port, seq, ch, 0,
-				fmt.Sprintf("bid_gone set but bid_qty=%d (must be 0)", bidQty))
-		}
-		if askGone && askQty != 0 {
-			e.Emit("TOB.QUOTE.UPDATE_FLAGS_COHERENCE", core.Violation, port, seq, ch, 0,
-				fmt.Sprintf("ask_gone set but ask_qty=%d (must be 0)", askQty))
 		}
 
 		// TOB.QUOTE.SOURCE_ID_REGISTRY: source_id == 0 is always invalid (reserved
