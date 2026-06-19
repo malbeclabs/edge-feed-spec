@@ -106,12 +106,7 @@ type channelRefdataState struct {
 	// current retransmission cycle. A cycle spans from one ManifestSummary to
 	// the next (same or newer seq). Reset when a new cycle starts.
 	cycleStartSendTS    uint64
-	cycleStartSendTSSet bool // true once a cycle has been opened
-	// cycleOpenedPostReady is true when the current cycle was opened AFTER the
-	// active set snapshot was already established (i.e. this is a retransmission
-	// cycle, not the initial bootstrap cycle).  Coverage and burst checks only
-	// apply to retransmission cycles.
-	cycleOpenedPostReady bool
+	cycleStartSendTSSet bool // true once the tumbling cycle has been opened
 
 	// defsSeenThisCycle tracks which instrument IDs have been transmitted at
 	// least once in the current cycle (keyed by instruID). Used for
@@ -257,7 +252,11 @@ func (rs *refdataState) onManifestSummary(ch uint8, valid uint8, seq uint16, cou
 	// REFDATA.MANIFEST_SEQ_NONZERO_WHEN_VALID: a Valid=1 summary must have both
 	// Manifest Seq > 0 and Instrument Count > 0.
 	//
-	// seq==0: always incoherent (no publisher epoch starts at seq=0).
+	// seq==0: incoherent on a cold start / non-wrap (no publisher epoch starts at
+	// seq=0). But the spec supports u16 wraparound, so a legitimate 65535→0 bump
+	// (valid=1, prior state established) is a normal modular increment, NOT an epoch
+	// start — it must flow into the seq-advance + SEQ_BUMP_NOT_BY_ONE checks below
+	// rather than be discarded here.
 	//
 	// count==0: incoherent when the summary would advance or seed subscriber state
 	// (i.e., cold start or a bumped seq). A count drop at the current established
@@ -266,7 +265,8 @@ func (rs *refdataState) onManifestSummary(ch uint8, valid uint8, seq uint16, cou
 	//
 	// Discard after emitting: incoherent summaries must not seed subscriber state.
 	wouldAdvance := !s.valid || isLaterSeq(seq, s.latestSeq)
-	if valid == 1 && (seq == 0 || (count == 0 && wouldAdvance)) {
+	isWrapToZero := s.seqEverSet && s.latestSeq == 0xFFFF // 65535 → 0 modular increment
+	if valid == 1 && ((seq == 0 && !isWrapToZero) || (count == 0 && wouldAdvance)) {
 		st := core.Violation
 		if dirty {
 			st = core.Unverifiable
@@ -379,7 +379,6 @@ func (rs *refdataState) onManifestSummary(ch uint8, valid uint8, seq uint16, cou
 		s.everReady = false
 		s.cycleStartSendTS = 0
 		s.cycleStartSendTSSet = false
-		s.cycleOpenedPostReady = false
 		s.defsSeenThisCycle = make(map[uint32]struct{})
 		s.defFramesSeen = 0
 		s.prevDefFrameTS = 0
@@ -405,40 +404,43 @@ func (rs *refdataState) onManifestSummary(ch uint8, valid uint8, seq uint16, cou
 		}
 	}
 
-	// --- Task 15: REFDATA.DEFINITION_CYCLE_COVERAGE + REFDATA.NO_BURST_DEFINITIONS ---
-	// A new ManifestSummary closes the previous retransmission cycle.  Check:
-	//   (a) every member of the active set snapshot was retransmitted in the cycle.
-	//   (b) defs were not emitted as a single-frame burst (only evaluated when
-	//       all active defs were actually seen this cycle, to avoid firing burst
-	//       when the real problem is missing coverage).
-	// Only check when a cycle was previously opened and ExpectDefinitionCycle is
-	// configured. Gate on dirty.
-	if rs.e.cfg.ExpectDefinitionCycle > 0 && s.cycleStartSendTSSet && s.cycleOpenedPostReady && sendTS >= s.cycleStartSendTS {
-		cycleLen := time.Duration(sendTS-s.cycleStartSendTS) * time.Nanosecond
-		if cycleLen >= rs.e.cfg.ExpectDefinitionCycle {
+	// --- REFDATA.DEFINITION_CYCLE_COVERAGE + REFDATA.NO_BURST_DEFINITIONS ---
+	// The retransmission cycle is a TUMBLING window of ExpectDefinitionCycle
+	// wall-time, decoupled from manifest arrival: it is closed only once a full
+	// cycle has actually elapsed since it opened, then immediately reopened.
+	// (Previously the cycle was reset on every ManifestSummary, so the window was
+	// the inter-manifest gap; at spec cadence — manifests far more frequent than
+	// the cycle — that gap never reached ExpectDefinitionCycle and the coverage
+	// check was structurally dead. Manifests now only sample the elapsed time.)
+	//
+	// At close, every instrument in the frozen active set must have been
+	// retransmitted at least once during the window. Gate on dirty.
+	if rs.e.cfg.ExpectDefinitionCycle > 0 && s.cycleStartSendTSSet && sendTS >= s.cycleStartSendTS &&
+		time.Duration(sendTS-s.cycleStartSendTS)*time.Nanosecond >= rs.e.cfg.ExpectDefinitionCycle {
+		// Coverage/burst apply only once the active set is established; before that
+		// this is the bootstrap window, not subject to pacing requirements.
+		if s.setSnapshotSet {
 			// Coverage: every active def (from the frozen set snapshot) must have
-			// been retransmitted at least once this cycle.  Using setSnapshot
-			// (not just cardinality) ensures we detect cases where the publisher
-			// retransmits the right count but wrong instruments.
+			// been retransmitted at least once this cycle.  Using setSnapshot (not
+			// just cardinality) detects the publisher retransmitting the right
+			// count but the wrong instruments.
 			coverageOK := false
-			if s.setSnapshotSet {
-				missing := 0
-				for id := range s.setSnapshot {
-					if _, seen := s.defsSeenThisCycle[id]; !seen {
-						missing++
-					}
+			missing := 0
+			for id := range s.setSnapshot {
+				if _, seen := s.defsSeenThisCycle[id]; !seen {
+					missing++
 				}
-				if missing > 0 {
-					st := core.Violation
-					if dirty {
-						st = core.Unverifiable
-					}
-					rs.e.Emit("REFDATA.DEFINITION_CYCLE_COVERAGE", st, core.PortRefData, frameSeq, ch, 0,
-						fmt.Sprintf("cycle length %v: %d/%d definitions not retransmitted",
-							cycleLen, missing, len(s.setSnapshot)))
-				} else {
-					coverageOK = true
+			}
+			if missing > 0 {
+				st := core.Violation
+				if dirty {
+					st = core.Unverifiable
 				}
+				rs.e.Emit("REFDATA.DEFINITION_CYCLE_COVERAGE", st, core.PortRefData, frameSeq, ch, 0,
+					fmt.Sprintf("cycle window %v: %d/%d definitions not retransmitted",
+						rs.e.cfg.ExpectDefinitionCycle, missing, len(s.setSnapshot)))
+			} else {
+				coverageOK = true
 			}
 			// Burst: only evaluated when coverage was complete this cycle; otherwise
 			// the primary finding is coverage, not burst.
@@ -452,6 +454,12 @@ func (rs *refdataState) onManifestSummary(ch uint8, valid uint8, seq uint16, cou
 						s.expectedCount))
 			}
 		}
+		// Reopen the next tumbling window starting now.
+		s.cycleStartSendTS = sendTS
+		s.defsSeenThisCycle = make(map[uint32]struct{})
+		s.defFramesSeen = 0
+		s.prevDefFrameTS = 0
+		s.prevDefFrameTSSet = false
 	}
 
 	// Update previous-summary tracking (for COUNT_CHANGE_NO_SEQ_BUMP).
@@ -471,24 +479,24 @@ func (rs *refdataState) onManifestSummary(ch uint8, valid uint8, seq uint16, cou
 	}
 	// If seq == latestSeq and state was already valid: no-op on state (idempotent).
 
-	// --- Task 15: open a new retransmission cycle ---
-	// Every valid=1 ManifestSummary starts a new cycle window.
+	// --- timing trackers ---
 	if !s.firstSendTSSet {
 		s.firstSendTS = sendTS
 		s.firstSendTSSet = true
 	}
 	s.lastManifestSendTS = sendTS
 	s.lastManifestSendTSSet = true
-	s.cycleStartSendTS = sendTS
-	s.cycleStartSendTSSet = true
-	// Coverage/burst checks only apply to retransmission cycles (cycles opened
-	// after the active set snapshot was already established).  The initial
-	// bootstrap cycle is not subject to pacing requirements.
-	s.cycleOpenedPostReady = s.setSnapshotSet
-	s.defsSeenThisCycle = make(map[uint32]struct{})
-	s.defFramesSeen = 0
-	s.prevDefFrameTS = 0
-	s.prevDefFrameTSSet = false
+	// Open the (single) retransmission cycle on the first valid manifest. It then
+	// tumbles every ExpectDefinitionCycle (closed/reopened in the block above),
+	// rather than resetting on every manifest.
+	if rs.e.cfg.ExpectDefinitionCycle > 0 && !s.cycleStartSendTSSet {
+		s.cycleStartSendTS = sendTS
+		s.cycleStartSendTSSet = true
+		s.defsSeenThisCycle = make(map[uint32]struct{})
+		s.defFramesSeen = 0
+		s.prevDefFrameTS = 0
+		s.prevDefFrameTSSet = false
+	}
 }
 
 // onInstrumentDef processes an InstrumentDefinition message.
