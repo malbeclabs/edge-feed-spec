@@ -46,6 +46,26 @@ The full 82-rule catalog — rule ID, severity, tier, applicable feeds — is de
 
 ## Quick start
 
+### Try it now (bundled captures)
+
+No feed or network required — the repo ships small conformant captures under `testdata/`, on fixed ports `18001` (mktdata), `18002` (refdata), `18003` (snapshot):
+
+```bash
+go build -o dz-conformance .
+
+# Conformant MBO capture → exits 0
+./dz-conformance --feed mbo --pcap testdata/conformant_mbo.pcap \
+  --mktdata-port 18001 --refdata-port 18002 --snapshot-port 18003
+echo "exit: $?"   # 0
+
+# See it catch a violation: decode MBO bytes as TOB → magic mismatch, exits 1
+./dz-conformance --feed tob --pcap testdata/conformant_mbo.pcap \
+  --mktdata-port 18001 --refdata-port 18002
+echo "exit: $?"   # 1
+```
+
+`conformant_tob.pcap` and `conformant_midpoint.pcap` are also provided (mktdata + refdata only). Add `--json-report /tmp/report.json` for a per-rule status dump, or `-v` to surface `Unverifiable`/info findings.
+
 ### Live capture
 
 ```bash
@@ -244,7 +264,23 @@ For a 24/7 deployment:
 
 Memory is bounded for indefinite operation: the per-`(era,seq)` dedup map is FIFO-evicted via a fixed `2×--reorder-window` ring (it does **not** grow with the sequence space), books/trackers are keyed by the live instrument set and pruned on manifest bumps / cleared on era resets, and metric cardinality is fixed — each finding series is keyed by `feed × rule_id` plus one small bounded enum (`severity`, `result`, or `reason`), never the free-form `detail`.
 
-> A self-contained Docker + Prometheus + Grafana monitoring stack ships alongside this tool (`docker-compose.yml`, `grafana/`, `prometheus/`) — added in a follow-up layer.
+## Demo monitoring stack
+
+This directory ships a **self-contained** monitoring demo — the conformance subscriber plus Prometheus (scrape + alerts) and Grafana (the per-rule dashboard):
+
+```bash
+cp .env.example .env        # edit DZ_MBO_* / DZ_INTERFACE for your feed
+docker compose up --build
+open http://127.0.0.1:3000  # admin / GF_ADMIN_PASSWORD
+```
+
+| Path | Role |
+|------|------|
+| [docker-compose.yml](docker-compose.yml) | `dz-conformance` + `prometheus` + `grafana` (build context is this self-contained module) |
+| [prometheus/prometheus.yml](prometheus/prometheus.yml) | scrapes `dz-conformance` at `127.0.0.1:9094` |
+| [prometheus/alerts/conformance.yml](prometheus/alerts/conformance.yml) | must-violation page + coverage-loss / transport-loss / target-down warnings |
+| [grafana/dashboards/conformance.json](grafana/dashboards/conformance.json) | the `dz_conformance_*` dashboard, including the per-rule conformance table |
+| [grafana/provisioning/](grafana/provisioning/) | auto-registers the Prometheus datasource and the dashboard |
 
 ## Known limitations
 

@@ -1,0 +1,73 @@
+# Self-contained dz-conformance demo: the conformance subscriber + Prometheus
+# (scrape + alerts) + Grafana (the per-rule dashboard).
+#
+# Usage:
+#   cp .env.example .env   # then edit DZ_MBO_* / DZ_INTERFACE for your feed
+#   docker compose up --build
+#   open http://127.0.0.1:${GRAFANA_HOST_PORT:-3000}  (admin / GF_ADMIN_PASSWORD)
+#
+# The module is self-contained, so the build context is this directory.
+
+services:
+  dz-conformance:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    # No extra caps: the tool uses net.ListenMulticastUDP (an ordinary UDP
+    # socket + IGMP join), not raw sockets, and network_mode: host already
+    # shares the host netns — NET_ADMIN/NET_RAW would only widen blast radius.
+    network_mode: host
+    restart: unless-stopped
+    command:
+      - "--feed=mbo"
+      - "--group=${DZ_MBO_MULTICAST_GROUP}"
+      - "--mktdata-port=${DZ_MBO_MKTDATA_PORT}"
+      - "--refdata-port=${DZ_MBO_REFDATA_PORT}"
+      - "--snapshot-port=${DZ_MBO_SNAPSHOT_PORT}"
+      - "--interface=${DZ_INTERFACE}"
+      # 9094 is hard-coded to match prometheus/prometheus.yml's scrape target —
+      # one source of truth, not an env override that would silently desync it.
+      - "--metrics-addr=127.0.0.1:9094"
+
+  prometheus:
+    image: prom/prometheus:v2.53.1
+    network_mode: host
+    restart: unless-stopped
+    # host networking mirrors dz-conformance so Prometheus can scrape its
+    # 127.0.0.1:<port> metrics endpoint directly. Grafana reaches Prometheus
+    # via host-gateway (see the datasource provisioning).
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      # 9095 is hard-coded to match the Grafana datasource URL — one source of truth.
+      - "--web.listen-address=0.0.0.0:9095"
+      - "--web.enable-lifecycle"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/alerts:/etc/prometheus/alerts:ro
+      - prometheus-data:/prometheus
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    restart: unless-stopped
+    depends_on:
+      prometheus:
+        condition: service_started
+    # host-gateway resolves to the Docker host IP so Grafana (on the compose
+    # bridge) can reach Prometheus (on host networking).
+    extra_hosts:
+      - "host-gateway:host-gateway"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: "${GF_ADMIN_PASSWORD:-admin}"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "127.0.0.1:${GRAFANA_HOST_PORT:-3000}:3000"
+
+volumes:
+  prometheus-data:
+  grafana-data:
