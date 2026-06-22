@@ -1,0 +1,4 @@
+{
+  "spec_revision": "malbeclabs/edge-feed-spec sources/spec.md (read 2026-06-15): production range 1-1023, reserved 0 and 1024-32767, private/experimental 32768-65535; assigned IDs: 1=Hyperliquid, 2=Phoenix",
+  "ranges": [[1, 1023]]
+}

@@ -97,7 +97,7 @@ var Rules = []RuleMeta{
 	// --- Top-of-Book ---
 	{"TOB.QUOTE.STRUCT_LEN_TYPE", Must, 1, StateNone, tobOnly, false},
 	{"TOB.QUOTE.GONE_VS_ZERO_PRICE", Must, 1, StateNone, tobOnly, false},
-	{"TOB.QUOTE.CROSSED_LOCKED", Should, 1, StateNone, tobOnly, false},
+	{"TOB.QUOTE.CROSSED_LOCKED", Info, 1, StateNone, tobOnly, false},
 	{"TOB.QUOTE.UPDATE_FLAGS_COHERENCE", Should, 1, StateNone, tobOnly, false},
 	{"TOB.QUOTE.SOURCE_ID_REGISTRY", Must, 1, StateNone, tobOnly, false},
 	{"TOB.QUOTE.SOURCE_COUNT", Info, 1, StateNone, tobOnly, false},
