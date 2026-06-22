@@ -717,8 +717,8 @@
             "uid": "prometheus-conformance",
             "type": "prometheus"
           },
-          "expr": "sum(rate(dz_conformance_snapshot_audits_total{result=\"pass\"}[$__rate_interval])) / sum(rate(dz_conformance_snapshot_audits_total[$__rate_interval]))",
-          "legendFormat": "pass rate"
+          "expr": "sum(rate(dz_conformance_snapshot_audits_total{result=\"match\"}[$__rate_interval])) / sum(rate(dz_conformance_snapshot_audits_total[$__rate_interval]))",
+          "legendFormat": "match rate"
         }
       ]
     },
