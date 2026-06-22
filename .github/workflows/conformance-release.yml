@@ -1,0 +1,130 @@
+name: conformance release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release (e.g. v0.1.0 or v0.1.0-rc.1)"
+        required: true
+        type: string
+      ref:
+        description: "Git ref to release from (default: main)"
+        required: false
+        default: "main"
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: conformance-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+
+      - name: resolve commit sha
+        id: resolve
+        run: |
+          set -euo pipefail
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "short_sha=$(git rev-parse --short=12 HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: validate inputs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if ! [[ "${VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "version '${VERSION}' does not match vMAJOR.MINOR.PATCH[-PRERELEASE]" >&2
+            exit 1
+          fi
+          if git ls-remote --exit-code --tags origin \
+               "refs/tags/conformance/${VERSION}" >/dev/null 2>&1; then
+            echo "tag conformance/${VERSION} already exists on origin" >&2
+            exit 1
+          fi
+          if gh release view "conformance/${VERSION}" \
+               --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "release conformance/${VERSION} already exists" >&2
+            exit 1
+          fi
+
+      - name: setup go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.25.x"
+          cache-dependency-path: tools/conformance/go.sum
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.11
+          working-directory: tools/conformance
+
+      - name: test
+        working-directory: tools/conformance
+        env:
+          TMPDIR: /tmp
+        run: go test -v ./...
+
+      - name: build release artifact
+        id: build
+        working-directory: tools/conformance
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          ASSET_VERSION="${VERSION#v}"
+          COMMIT="$(git rev-parse --short=12 HEAD)"
+          DIST="$RUNNER_TEMP/dz-conformance-release"
+          STAGE="$DIST/dz-conformance_${ASSET_VERSION}_linux_amd64"
+          mkdir -p "$STAGE"
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+            -trimpath \
+            -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${COMMIT}" \
+            -o "$STAGE/dz-conformance" \
+            .
+          cp README.md "$STAGE/README.md"
+          tar -C "$DIST" -czf "$DIST/dz-conformance_${ASSET_VERSION}_linux_amd64.tar.gz" "$(basename "$STAGE")"
+          (cd "$DIST" && sha256sum "dz-conformance_${ASSET_VERSION}_linux_amd64.tar.gz" > "dz-conformance_${ASSET_VERSION}_linux_amd64.tar.gz.sha256")
+          echo "dist=$DIST" >> "$GITHUB_OUTPUT"
+
+      - name: tag and push
+        env:
+          VERSION: ${{ inputs.version }}
+          SHA: ${{ steps.resolve.outputs.sha }}
+        run: |
+          set -euo pipefail
+          git -c user.name="github-actions[bot]" \
+              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+              tag -a "conformance/${VERSION}" -m "dz-conformance ${VERSION}" "${SHA}"
+          git push origin "refs/tags/conformance/${VERSION}"
+
+      - name: create github release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          DIST: ${{ steps.build.outputs.dist }}
+        run: |
+          set -euo pipefail
+          PRERELEASE_FLAG=""
+          if [[ "${VERSION}" == *-* ]]; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
+          gh release create "conformance/${VERSION}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "dz-conformance ${VERSION}" \
+            --generate-notes \
+            $PRERELEASE_FLAG \
+            "${DIST}"/dz-conformance_*_linux_amd64.tar.gz \
+            "${DIST}"/dz-conformance_*_linux_amd64.tar.gz.sha256
