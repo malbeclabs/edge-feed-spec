@@ -35,6 +35,28 @@ type MulticastSource struct {
 	// that Close() causes an immediate ok=false return even if datagrams are
 	// buffered in the channel.
 	closed chan struct{}
+	// mu guards readErr — the first terminal read-loop error (a sustained
+	// ReadFromUDP failure, e.g. the interface going down). It is surfaced through
+	// Next so live capture fails loudly (exit code 2) instead of finishing as a
+	// silent clean pass when a socket dies.
+	mu      sync.Mutex
+	readErr error
+}
+
+// setReadErr records the first terminal read error; later ones are ignored.
+func (ms *MulticastSource) setReadErr(err error) {
+	ms.mu.Lock()
+	if ms.readErr == nil {
+		ms.readErr = err
+	}
+	ms.mu.Unlock()
+}
+
+// readError returns the recorded terminal read error, or nil if none occurred.
+func (ms *MulticastSource) readError() error {
+	ms.mu.Lock()
+	defer ms.mu.Unlock()
+	return ms.readErr
 }
 
 // MulticastConfig holds the parameters for a MulticastSource.
@@ -135,6 +157,13 @@ func (ms *MulticastSource) readLoop(ctx context.Context, conn *net.UDPConn, port
 			// shutdown.
 			consecutiveErrs++
 			if consecutiveErrs >= maxConsecutiveReadErrs {
+				// A sustained read failure (e.g. the interface going down) is fatal
+				// for live capture. Record the error and cancel the whole source so
+				// Next surfaces it (exit code 2) rather than silently dropping this
+				// port and letting Run finish as a clean pass.
+				ms.setReadErr(fmt.Errorf("multicast %v port: read failed %d times consecutively: %w",
+					port, consecutiveErrs, err))
+				ms.cancel()
 				return
 			}
 			select {
@@ -162,8 +191,10 @@ func (ms *MulticastSource) readLoop(ctx context.Context, conn *net.UDPConn, port
 }
 
 // Next blocks until the next datagram is available or the source is closed.
-// It returns ok=false (with a nil error) once Close() has been called and all
-// goroutines have exited.
+// It returns ok=false once the source is closed. The error is nil for a normal
+// Close, but non-nil when a terminal read failure (a sustained ReadFromUDP
+// error) brought the source down — so live capture fails loudly (exit code 2)
+// instead of finishing as a silent clean pass.
 //
 // Semantics: any call to Next that starts after Close returns will return
 // ok=false immediately; the pre-check on ms.closed guarantees this.  A call
@@ -179,7 +210,7 @@ func (ms *MulticastSource) Next() (Datagram, bool, error) {
 	// immediately, even if datagrams are queued.
 	select {
 	case <-ms.closed:
-		return Datagram{}, false, nil
+		return Datagram{}, false, ms.readError()
 	default:
 	}
 
@@ -187,11 +218,11 @@ func (ms *MulticastSource) Next() (Datagram, bool, error) {
 	select {
 	case dg, ok := <-ms.datagrams:
 		if !ok {
-			return Datagram{}, false, nil
+			return Datagram{}, false, ms.readError()
 		}
 		return dg, true, nil
 	case <-ms.closed:
-		return Datagram{}, false, nil
+		return Datagram{}, false, ms.readError()
 	}
 }
 

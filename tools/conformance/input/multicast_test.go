@@ -2,6 +2,7 @@ package input
 
 import (
 	"bytes"
+	"errors"
 	"net"
 	"testing"
 	"time"
@@ -201,5 +202,39 @@ func TestMulticastSource_CloseDiscardsBuffered(t *testing.T) {
 
 	if gotOK {
 		t.Error("Next() returned ok=true after Close() with buffered datagram, want false")
+	}
+}
+
+// TestMulticastSource_NextSurfacesTerminalReadError verifies that a terminal
+// read-loop failure is propagated through Next() (so Run exits 2) rather than
+// looking like a clean close.
+func TestMulticastSource_NextSurfacesTerminalReadError(t *testing.T) {
+	ms := &MulticastSource{
+		datagrams: make(chan Datagram, 1),
+		closed:    make(chan struct{}),
+	}
+	wantErr := errors.New("interface down")
+	ms.setReadErr(wantErr)
+	close(ms.closed) // all read goroutines have exited after the terminal failure
+
+	dg, ok, err := ms.Next()
+	if ok {
+		t.Fatalf("Next ok=true, want false after terminal read failure (dg=%+v)", dg)
+	}
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("Next err = %v, want it to wrap %v", err, wantErr)
+	}
+}
+
+// TestMulticastSource_NextCleanCloseHasNilError verifies a normal Close (no read
+// error) still returns ok=false with a nil error (clean EOF, not exit 2).
+func TestMulticastSource_NextCleanCloseHasNilError(t *testing.T) {
+	ms := &MulticastSource{
+		datagrams: make(chan Datagram, 1),
+		closed:    make(chan struct{}),
+	}
+	close(ms.closed)
+	if _, ok, err := ms.Next(); ok || err != nil {
+		t.Fatalf("clean close: Next ok=%v err=%v, want ok=false err=nil", ok, err)
 	}
 }
