@@ -2,7 +2,10 @@ module github.com/malbeclabs/edge-feed-spec/tools/conformance
 
 go 1.25.0
 
-require github.com/prometheus/client_golang v1.23.2
+require (
+	github.com/google/gopacket v1.1.19
+	github.com/prometheus/client_golang v1.23.2
+)
 
 require (
 	github.com/beorn7/perks v1.0.1 // indirect
@@ -14,6 +17,7 @@ require (
 	github.com/prometheus/common v0.66.1 // indirect
 	github.com/prometheus/procfs v0.16.1 // indirect
 	go.yaml.in/yaml/v2 v2.4.2 // indirect
+	golang.org/x/net v0.53.0 // indirect
 	golang.org/x/sys v0.43.0 // indirect
 	google.golang.org/protobuf v1.36.8 // indirect
 )

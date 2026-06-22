@@ -1,0 +1,4 @@
+dz-conformance
+
+# Local demo env (copied from .env.example); never commit real feed config.
+.env
