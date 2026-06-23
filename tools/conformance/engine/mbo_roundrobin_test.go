@@ -46,7 +46,7 @@ func TestRoundRobinNoViolationWhenAllCovered(t *testing.T) {
 	nextSeq = doSnapGroup(e, ch, instrA, 1, 1, nextSeq)
 	nextSeq = doSnapGroup(e, ch, instrB, 1, 2, nextSeq)
 	nextSeq = doSnapGroup(e, ch, instrA, 2, 3, nextSeq)
-	nextSeq = doSnapGroup(e, ch, instrB, 2, 4, nextSeq)
+	doSnapGroup(e, ch, instrB, 2, 4, nextSeq)
 	e.EndRun()
 
 	if hasViolation(ac, "SNAP.ROUND_ROBIN_COVERS_MANIFEST") {

@@ -107,7 +107,7 @@ func NewMulticastSource(cfg MulticastConfig) (*MulticastSource, error) {
 		if err != nil {
 			cancel()
 			for _, e := range entries {
-				e.conn.Close()
+				_ = e.conn.Close()
 			}
 			return nil, fmt.Errorf("joining multicast group %s port %d: %w", cfg.Group, udpPort, err)
 		}
@@ -236,7 +236,7 @@ func (ms *MulticastSource) Close() error {
 		ms.cancel()
 		// Unblock any goroutines blocked inside ReadFromUDP.
 		for _, c := range ms.conns {
-			c.Close()
+			_ = c.Close()
 		}
 	})
 	// Wait until all goroutines have finished.
