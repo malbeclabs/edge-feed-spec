@@ -290,3 +290,22 @@ The tool is correct (no false `Violation`s) and complete for its primary use cas
 - **Mid-stream join doesn't reconstruct a trusted book.** The referential-integrity and snapshot↔delta oracle checks only run once an instrument's delta book is *trusted*, which today requires observing its delta stream from `Per-Instrument Seq = 1` (i.e. from session start / `Reset Count` boundary). A cold-start or post-`InstrumentReset` recovery snapshot is currently used only to detect divergence, not to *bootstrap* the live book — so an instrument joined mid-stream stays `Unverifiable` for those checks until a fresh era. Capture the publisher from startup to exercise the full oracle. Bootstrapping a trusted book from a clean snapshot is a planned enhancement.
 
 Minor: the `dz_conformance_instruments_state` gauge is registered but not yet populated, and most `Unverifiable` findings currently carry `reason="unspecified"` (the bounded-reason taxonomy is wired only at the cross-port downgrade sites). Neither affects violation detection or the CI exit code.
+
+## Releasing
+
+Releases are cut from the **conformance release** GitHub Actions workflow
+(`.github/workflows/conformance-release.yml`), run via *Run workflow*
+(`workflow_dispatch`):
+
+- **version** — `vMAJOR.MINOR.PATCH` or a prerelease like `v0.1.0-rc.1`.
+- **ref** — git ref to build from (default `main`).
+
+The workflow lints, runs `go test ./...`, builds a static `linux_amd64`
+binary (`-ldflags -X main.version=<version> -X main.commit=<sha>`), pushes the
+annotated tag `conformance/<version>`, and publishes a GitHub Release with:
+
+- `dz-conformance_<version-without-v>_linux_amd64.tar.gz`
+- `dz-conformance_<version-without-v>_linux_amd64.tar.gz.sha256`
+
+Versions containing `-` are marked as prereleases. The deploy side
+(`malbeclabs/infra`, role `dz_conformance`) consumes these assets by name.
