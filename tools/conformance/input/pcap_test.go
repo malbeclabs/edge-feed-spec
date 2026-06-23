@@ -20,7 +20,7 @@ func writePcap(t *testing.T, path string, packets [][]byte, dstPorts []uint16) {
 	if err != nil {
 		t.Fatalf("create pcap: %v", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	w := pcapgo.NewWriter(f)
 	if err := w.WriteFileHeader(65535, layers.LinkTypeEthernet); err != nil {
@@ -31,7 +31,7 @@ func writePcap(t *testing.T, path string, packets [][]byte, dstPorts []uint16) {
 	opts := gopacket.SerializeOptions{FixLengths: true, ComputeChecksums: true}
 
 	for i, payload := range packets {
-		buf.Clear()
+		_ = buf.Clear()
 		ip4 := &layers.IPv4{
 			Version:  4,
 			TTL:      64,
@@ -90,7 +90,7 @@ func TestPcapSource(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewPcapSource: %v", err)
 	}
-	defer src.Close()
+	defer func() { _ = src.Close() }()
 
 	// First datagram: mktdata
 	dg, ok, err := src.Next()
@@ -158,7 +158,7 @@ func TestPcapSourceSkipsUnmappedPorts(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewPcapSource: %v", err)
 	}
-	defer src.Close()
+	defer func() { _ = src.Close() }()
 
 	// First Next() should skip port 9999 and return the mktdata packet
 	dg, ok, err := src.Next()

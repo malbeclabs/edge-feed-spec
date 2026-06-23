@@ -121,7 +121,7 @@ func Run(opts RunOpts) int {
 		fmt.Fprintf(os.Stderr, "dz-conformance: open source: %v\n", err)
 		return 2
 	}
-	defer src.Close()
+	defer func() { _ = src.Close() }()
 
 	// --- source registry ---
 	if opts.SourceRegistry != "" {

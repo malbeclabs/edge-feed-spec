@@ -40,7 +40,7 @@ func writeMBOPcap(t *testing.T, dir string) string {
 	if err != nil {
 		t.Fatalf("create pcap: %v", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	w := pcapgo.NewWriter(f)
 	if err := w.WriteFileHeader(65535, layers.LinkTypeEthernet); err != nil {

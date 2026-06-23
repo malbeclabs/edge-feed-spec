@@ -153,9 +153,7 @@ func quoteInstrumentID(m wire.Message) uint32   { return bodyU32LE(m, 0) }
 func quoteSourceID(m wire.Message) uint16       { return bodyU16LE(m, 4) }
 func quoteUpdateFlags(m wire.Message) uint8     { return bodyU8(m, 6) }
 func quoteBidPrice(m wire.Message) int64        { return int64(bodyU64LE(m, 16)) }
-func quoteBidQty(m wire.Message) uint64         { return bodyU64LE(m, 24) }
 func quoteAskPrice(m wire.Message) int64        { return int64(bodyU64LE(m, 32)) }
-func quoteAskQty(m wire.Message) uint64         { return bodyU64LE(m, 40) }
 func quoteBidSourceCount(m wire.Message) uint16 { return bodyU16LE(m, 48) }
 func quoteAskSourceCount(m wire.Message) uint16 { return bodyU16LE(m, 50) }
 

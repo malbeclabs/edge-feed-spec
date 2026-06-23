@@ -638,14 +638,13 @@ func (e *Engine) applyDeltaSeq(ch uint8, instrID uint32, perSeq uint32, frameSeq
 				e.Emit("RESET.NO_DANGLING_DELTAS_AT_OR_BELOW_ANCHOR", st, core.PortMktData, frameSeq, ch, instrID,
 					fmt.Sprintf("instrument %d: first post-reset delta seq is %d (expected recoveryK+1=%d)",
 						instrID, perSeq, t.recoveryK+1))
-			} else {
-				// Correct recovery sequence: seq continuity is established.
-				// However, we do not process SnapshotOrder messages, so the live
-				// order-id set is empty. Setting bookTrusted here would cause false
-				// REF.* violations for orders that existed in the snapshot.
-				// Leave bookTrusted = false; it will be set true only when we begin
-				// a fresh per-instrument sequence from seq=1.
 			}
+			// When perSeq == recoveryK+1 the recovery sequence is correct and seq
+			// continuity is established. We intentionally do NOT set bookTrusted here:
+			// we don't process SnapshotOrder messages, so the live order-id set is
+			// empty, and setting bookTrusted would cause false REF.* violations for
+			// orders that existed in the snapshot. bookTrusted is set true only when
+			// we begin a fresh per-instrument sequence from seq=1.
 			// Clear seenReset now that the first post-recovery delta has been consumed,
 			// so future unauthorized restarts to 1 are not suppressed by this flag.
 			t.seenReset = false

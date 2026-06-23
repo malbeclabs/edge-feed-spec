@@ -29,7 +29,7 @@ func NewPcapSource(path string, portMap map[int]core.Port) (*PcapSource, error) 
 	}
 	r, err := pcapgo.NewReader(f)
 	if err != nil {
-		f.Close()
+		_ = f.Close()
 		return nil, err
 	}
 	return &PcapSource{file: f, reader: r, portMap: portMap}, nil

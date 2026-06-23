@@ -84,7 +84,7 @@ func writeGoldenPcap(t *testing.T, path string, entries []goldenPcapEntry) {
 	if err != nil {
 		t.Fatalf("create pcap %q: %v", path, err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	w := pcapgo.NewWriter(f)
 	if err := w.WriteFileHeader(65535, layers.LinkTypeEthernet); err != nil {
@@ -95,7 +95,7 @@ func writeGoldenPcap(t *testing.T, path string, entries []goldenPcapEntry) {
 	serOpts := gopacket.SerializeOptions{FixLengths: true, ComputeChecksums: true}
 
 	for i, e := range entries {
-		buf.Clear()
+		_ = buf.Clear()
 		ip4 := &layers.IPv4{
 			Version:  4,
 			TTL:      64,
