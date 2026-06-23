@@ -56,7 +56,7 @@ func TestMulticastSource_Live(t *testing.T) {
 	if err != nil {
 		t.Skipf("multicast bind on loopback not supported in this environment: %v", err)
 	}
-	defer src.Close()
+	defer func() { _ = src.Close() }()
 
 	// Give the socket a moment to join the group before sending.
 	time.Sleep(50 * time.Millisecond)
@@ -69,7 +69,7 @@ func TestMulticastSource_Live(t *testing.T) {
 	if err != nil {
 		t.Skipf("cannot dial multicast address (not supported in this environment): %v", err)
 	}
-	defer sender.Close()
+	defer func() { _ = sender.Close() }()
 
 	if _, err := sender.Write(payload); err != nil {
 		t.Skipf("multicast send failed (not supported in this environment): %v", err)
