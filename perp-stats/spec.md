@@ -90,7 +90,7 @@ Sent when there is no other traffic. Receivers use this for stale-connection det
 
 Maps a numeric Instrument ID to human-readable metadata. Carried on the reference data port and retransmitted continuously per the [Reference Data Distribution supplement](../reference-data/spec.md). Not on the market data path.
 
-This feed uses the same 80-byte `InstrumentDefinition` layout as the top-of-book feed; see that spec for the full field table. The `InstrumentDefinition` set on this feed covers perpetual instruments only (see Instrument Scope).
+This feed uses the same 80-byte `InstrumentDefinition` layout as the top-of-book feed; see that spec for the full field table. The `InstrumentDefinition` set on this feed covers perpetual future instruments only (see Instrument Scope), so every definition on this feed carries `Asset Class = 5` (Perpetual Future).
 
 ### 0x06 EndOfSession (12 bytes)
 
@@ -118,7 +118,7 @@ Periodic summary of the active instrument set on this channel. Carried on the re
 
 ### 0x30 PerpStats (124 bytes)
 
-A per-perpetual derived state snapshot, relayed from the venue's REST surface. One message per active perpetual instrument per poll sweep. Fields whose upstream value is momentarily unavailable encode as `0`.
+A per-perpetual future derived state snapshot, relayed from the venue's REST surface. One message per active perpetual future instrument per poll sweep. Fields whose upstream value is momentarily unavailable encode as `0`.
 
 | Offset | Field | Type | Description |
 |--------|-------|------|-------------|
