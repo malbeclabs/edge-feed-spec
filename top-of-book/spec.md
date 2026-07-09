@@ -154,8 +154,11 @@ Maps a numeric Instrument ID to human-readable metadata. Carried on the referenc
 | 2 | Prediction Binary |
 | 3 | Prediction Scalar |
 | 4 | Prediction Categorical |
+| 5 | Perpetual Future |
 
 Publishers SHOULD use the most accurate value available; receivers MUST accept any `u8` value and treat unknown values as `0` (Unknown).
+
+`5` (Perpetual Future) identifies a perpetual-futures instrument — no expiry, funding-based convergence to an index. Perpetual Future instruments' derived state (funding, mark/oracle price, open interest) is carried on the sibling [Perp Stats Feed](../perp-stats/spec.md); the top-of-book feed still carries their `Quote`/`Trade` and this `InstrumentDefinition`.
 
 #### Market Model Values
 
@@ -307,3 +310,5 @@ The Schema Version byte in the frame header is `1` for this release. Future vers
 Existing field layouts and semantics will not change within the v0.x line without a Schema Version bump.
 
 `0x08 Liquidation` was added as a shared trade-companion type; Schema Version remains `1` because old decoders skip it via Message Length.
+
+Asset Class value `5` (Perpetual Future) was added; Schema Version remains `1` because it is a new enumerated value, and decoders already MUST accept any `u8` and treat unknown values as `0` (Unknown).
