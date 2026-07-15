@@ -2,7 +2,7 @@
 
 The DoubleZero Perp Stats Feed is a sibling cadence feed carrying per-perpetual derived state — funding, mark price, oracle price, open interest, and premium — relayed from the venue's REST surface. It is not the order-book hot path; data originates from REST polls rather than the matching engine, so it runs on a separate cadence from the top-of-book and market-by-order feeds.
 
-This document specifies version **0.1.0**: the transport, message types, `PerpStats` wire layout, emission model, and instrument scope.
+This document specifies version **0.1.1**: the transport, message types, `PerpStats` wire layout, emission model, and instrument scope.
 
 ---
 
@@ -21,7 +21,9 @@ This document specifies version **0.1.0**: the transport, message types, `PerpSt
 
 ## Transport Framing
 
-This feed uses the same 24-byte frame header and 4-byte application message header as the top-of-book feed. These are defined in the [Top-of-Book & Trades Feed spec](../top-of-book/spec.md) and are not restated here.
+This feed uses the same 24-byte frame header and 4-byte application message header as the top-of-book feed. These are defined in the [Top-of-Book & Trades Feed spec](../top-of-book/spec.md) and are not restated here — **except for the `Magic` value**.
+
+The frame `Magic` is `0x4450` ("DP", wire bytes `[0x50, 0x44]`). It is distinct from the top-of-book feed's `0x445A`, the market-by-order feed's `0x4444`, the midpoint feed's `0x4D44`, and the order-intent feed's `0x494F`, to prevent cross-protocol misrouting. A consumer MUST validate that a received frame's `Magic` equals the value for the feed it subscribed to and discard any frame that does not match (for example, another sibling feed's traffic arriving from a misconfigured multicast group). The `Magic` is the only frame-header field that differs from the top-of-book feed.
 
 ### Two-Port Channel Model
 
@@ -203,7 +205,7 @@ The publisher MUST follow the cadence and atomicity rules in the [Reference Data
 
 ## Versioning and Forward Compatibility
 
-This document is version **0.1.0**, versioned independently of the sibling feed specs.
+This document is version **0.1.1**, versioned independently of the sibling feed specs.
 
 The Schema Version byte in the frame header is `1` for this release. Future versions of this specification MAY:
 
@@ -212,6 +214,8 @@ The Schema Version byte in the frame header is `1` for this release. Future vers
 - Define new values for enumerated fields (decoders MUST accept any `u8` value).
 
 Existing field layouts and semantics will not change within the v0.x line without a Schema Version bump.
+
+**v0.1.1** — registered the frame `Magic` value `0x4450` ("DP") for this feed and added the consumer validation requirement (see [Transport Framing](#transport-framing)). Previously the header was deferred wholesale to the top-of-book spec, leaving the value ambiguous even though the sibling-feed rule already required a distinct one. No wire-layout change; Schema Version remains `1`.
 
 ---
 
@@ -224,4 +228,4 @@ The DoubleZero Perp Stats Feed is one of a family of sibling protocols sharing f
 - The **[Market-by-Order Feed](../market-by-order/spec.md)** carries the full resting-order population per instrument.
 - The **Perp Stats Feed** (this document) carries per-perpetual derived state — funding, mark, oracle, OI, premium — relayed from the venue REST surface on a cadence path.
 
-Sibling feeds share the 24-byte frame header, the 4-byte application message header, and the forward-compatibility rules. They differ in magic value, message type table, and payload. Sibling feeds MUST use distinct Magic values and SHOULD use distinct multicast groups.
+Sibling feeds share the 24-byte frame header, the 4-byte application message header, and the forward-compatibility rules. They differ in magic value, message type table, and payload. Sibling feeds MUST use distinct Magic values and SHOULD use distinct multicast groups. The Perp Stats feed's `Magic` is `0x4450` (vs. `0x445A` top-of-book, `0x4444` market-by-order, `0x4D44` midpoint, `0x494F` order-intent).
