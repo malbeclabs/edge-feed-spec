@@ -47,7 +47,7 @@ This document specifies version **0.1.0**: the frame header, application message
 
 The number of price levels carried per side, *N*, is fixed by this specification at **`N = 10`**. `BookDepth` is therefore a constant-length message of `24 + 40N` = **424 bytes**, carrying both sides in one atomic refresh.
 
-424 bytes does not fit the 8-bit `Message Length` of common framing 0.1.x, which capped a message at 255 bytes and so capped this feed at *N* = 5. Ten levels per side is the requirement, so the length field was widened family-wide instead: **common framing 0.2.0** makes `Message Length` a 12-bit field (see [Application Message Header](#application-message-header-4-bytes)), and this feed is its first consumer. The widening is byte-compatible for every message of 255 bytes or fewer, so it costs the sibling feeds nothing; what it costs *this* feed is a frame `Schema Version` of `2`, which is how a subscriber that only implements 8-bit lengths knows to discard these frames rather than mis-walk them.
+424 bytes does not fit the 8-bit `Message Length` of common framing 0.1.x, which capped a message at 255 bytes and so capped this feed at *N* = 5. Ten levels per side is the requirement, so the length field was widened family-wide instead: **common framing 0.2.0** makes `Message Length` a contiguous 12-bit field at offset 1, moving `Flags` to a `u8` at offset 3 (see [Application Message Header](#application-message-header-4-bytes)). This feed is the only consumer of the extra length bits, but the layout change is breaking for the whole family, so every feed now declares frame `Schema Version = 2`.
 
 Under 0.2.0 framing the binding constraint on *N* is the datagram budget, not the length field. At the 1,232-byte maximum frame size a single-message frame leaves 1,208 bytes for the payload, so `24 + 40N ≤ 1208` admits *N* ≤ 29. *N* = 10 sits well inside that ceiling and can be **raised** by a future version of this spec, up to 29, with a Schema Version bump; see [Versioning and Forward Compatibility](#versioning-and-forward-compatibility).
 
@@ -97,7 +97,7 @@ There is **no snapshot port**. Unlike the market-by-order feed, this feed needs 
 | Offset | Field | Type | Description |
 |--------|-------|------|-------------|
 | 0 | Magic | `u16` | `0x4442` ("DB", wire bytes `[0x42, 0x44]`). Frame delimiter. Distinct from top-of-book `0x445A`, market-by-order `0x4444`, midpoint `0x4D44`, perp-stats `0x4450`, and order-intent `0x494F` to prevent cross-protocol misrouting. A consumer MUST validate that a received frame's `Magic` equals `0x4442` and discard any frame that does not match. |
-| 2 | Schema Version | `u8` | Protocol version. A publisher of this feed MUST set it to `2` on **both ports**, declaring that messages on the channel may use the 12-bit `Message Length` of common framing 0.2.0 — `BookDepth` is 424 bytes. A subscriber that implements only an 8-bit `Message Length` MUST discard these frames; see [Application Message Header](#application-message-header-4-bytes). |
+| 2 | Schema Version | `u8` | Protocol version, denoting the application message header layout. A publisher of this feed MUST set it to `2` (common framing 0.2.0) on **both ports**. A subscriber MUST discard frames whose version it does not implement — for this feed a 0.1.x decoder would also mis-walk `BookDepth`, which is 424 bytes; see [Application Message Header](#application-message-header-4-bytes). |
 | 3 | Channel ID | `u8` | Logical channel for instrument sharding. |
 | 4 | Sequence Number | `u64` | Monotonically increasing **per channel per port**, starting from 0. Resets to 0 when `Reset Count` changes. Used for per-port gap detection **and, on `mktdata`, as the per-instrument ordering discriminant** ([Steady State](#steady-state) step 2). The `mktdata` and `refdata` ports each have an independent series. Exactly one publisher host emits a given `(channel, port)` series; see [Single Publisher Host per Channel](#single-publisher-host-per-channel). |
 | 12 | Send Timestamp | `ts_ns` | When the publisher sent this frame. |
@@ -122,19 +122,18 @@ Every application message begins with the common application message header at *
 | Offset | Field | Type | Description |
 |--------|-------|------|-------------|
 | 0 | Message Type | `u8` | See Message Types table. |
-| 1 | Length Low | `u8` | Low 8 bits of `Message Length`. |
-| 2 | Flags | `u8` | Bit 0: snapshot (1) vs. incremental (0). Bits 1–7: reserved, MUST be zero on emission and MUST be ignored on receipt. Every `BookDepth` is a full refresh and there is no incremental variant, so a publisher MUST set bit 0 to `1` on every `BookDepth` (see [Publisher Behavior](#publisher-behavior) #6). A receiver MUST NOT treat a `BookDepth` with bit 0 clear as a delta: the message is still a full refresh, and the cleared bit is a publisher defect to count, not a different wire semantic. |
-| 3 | Length High / Reserved | `u8` | Low nibble (mask `0x0F`): bits 8–11 of `Message Length`. High nibble (mask `0xF0`): reserved, MUST be zero on emission and MUST be ignored on receipt. |
+| 1 | Message Length | `u16` | Little-endian 16-bit word at offset 1. **Low 12 bits**: total message length in bytes including this header. **Top 4 bits** (mask `0xF000`): reserved, MUST be zero on emission and MUST be masked off on receipt. |
+| 3 | Flags | `u8` | Bit 0: snapshot (1) vs. incremental (0). Bits 1–7: reserved, MUST be zero on emission and MUST be ignored on receipt. Every `BookDepth` is a full refresh and there is no incremental variant, so a publisher MUST set bit 0 to `1` on every `BookDepth` (see [Publisher Behavior](#publisher-behavior) #6). A receiver MUST NOT treat a `BookDepth` with bit 0 clear as a delta: the message is still a full refresh, and the cleared bit is a publisher defect to count, not a different wire semantic. |
 
-`Message Length` is the 12-bit total message length in bytes including this header:
+`Message Length` is the contiguous 12-bit total message length in bytes including this header:
 
 ```
-Message Length = byte[1] | (byte[3] & 0x0F) << 8      // minimum 4
+Message Length = read_u16_le(byte[1..2]) & 0x0FFF      // minimum 4
 ```
 
-This feed is the first in the family to need the extension nibble: `BookDepth` is 424 bytes, so its length is encoded as `byte[1] = 0xA8`, `byte[3] = 0x01`. Every other message type carried here is 80 bytes or fewer and leaves byte 3 zero.
+This feed is the only one in the family that needs the extra length bits: `BookDepth` is 424 bytes, so bytes 1–2 carry `A8 01` and `Flags` sits at byte 3. Every other message type carried here is 80 bytes or fewer and leaves the length's high bits zero.
 
-Because a frame on this feed can carry a message longer than 255 bytes, a publisher MUST declare frame `Schema Version = 2` on both ports of the channel, and a subscriber that implements only an 8-bit `Message Length` MUST discard those frames rather than walk them — reading 424 as 168 would desynchronize the walk. See the canonical section for the full compatibility rule.
+A publisher MUST declare frame `Schema Version = 2` on both ports of the channel — as every 0.2.0 feed does, since the version denotes the header layout — and a subscriber MUST discard frames whose `Schema Version` it does not implement. For this feed the stakes are higher than for the siblings: a 0.1.x decoder would not merely misread `Flags`, it would read a 424-byte `BookDepth` as 168 bytes and desynchronize the rest of the frame. See the canonical section for the version gate and the coordinated-upgrade rule.
 
 ---
 
@@ -308,7 +307,7 @@ The core message. A single, fixed-size, two-sided, top-*N* aggregated-depth refr
  0                   1                   2                   3
  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|  Type (0x40)  | Len Low(0xA8) |     Flags     |Rsvd(4)|LenHi=1|
+|  Type (0x40)  |  Msg Length = 424 (0x1A8)     |     Flags     |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 |                       Instrument ID (u32)                     |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
@@ -324,7 +323,7 @@ The core message. A single, fixed-size, two-sided, top-*N* aggregated-depth refr
 
 | Offset | Field | Type | Description |
 |--------|-------|------|-------------|
-| 0 | Header | 4B | Type=`0x40`, `Message Length`=424 (`Length Low` = `0xA8`, `Length High` nibble = `0x1`) |
+| 0 | Header | 4B | Type=`0x40`, `Message Length`=424 (bytes 1–2 = `A8 01` little-endian), `Flags` at byte 3 |
 | 4 | Instrument ID | `u32` | Instrument this book applies to |
 | 8 | Source ID | `u16` | Originating source, per the [Source ID Registry](../sources/spec.md). Publishers operating a single source MAY use a fixed value (e.g., `1`). MUST NOT be `0`. |
 | 10 | Book Flags | `u8` | Bit 0: bid side changed. Bit 1: ask side changed. Bit 2: book crossed or locked at capture (informational; see [Crossed and Locked Books](#crossed-and-locked-books)). Bit 3: bid side truncated. Bit 4: ask side truncated (see [Depth Truncation](#depth-truncation)). Bits 5–7 reserved, MUST be zero on emission and MUST be ignored on receipt. Bits 0/1 are informational only; see [Change Flag Semantics](#change-flag-semantics). |
@@ -470,8 +469,8 @@ instrument_state = {
 Before any message-level handling, for each received datagram:
 
 1. **Bound every later step by the bytes actually received, not by a declared length.** Discard a datagram shorter than the 24-byte frame header before reading any field. Then validate `Frame Length`: it MUST be `>= 24` and MUST NOT exceed the received datagram length — a frame declaring more bytes than arrived is malformed (count it, discard it, keep the channel). A `Frame Length` *shorter* than the datagram is trailing padding: parse only the first `Frame Length` bytes and count the discrepancy. Every bound below is taken against this validated length. Without this step the frame-walk ceiling in step 3 rests on a number the sender controls.
-2. Validate the frame header `Magic` equals `0x4442`; discard the datagram if it does not match. Then validate `Schema Version`: a subscriber MUST discard (and count) a frame whose `Schema Version` it does not implement, and in particular an 8-bit-`Message Length` decoder MUST discard frames declaring `2` rather than attempt the walk in step 3. A `Schema Version` of `1` on this feed is a publisher defect — `BookDepth` cannot be expressed under it — and MUST be treated the same way.
-3. Walk the frame's application messages using each `Message Length`, assembled from the 12-bit encoding of [Application Message Header](#application-message-header-4-bytes) (`byte[1] | (byte[3] & 0x0F) << 8`) — **not** from byte 1 alone, which would read a 424-byte `BookDepth` as 168 bytes and desynchronize the rest of the frame. Skip unknown Type IDs by length. A `Message Length` that is `< 4`, exceeds the bytes remaining in the frame, or is inconsistent with `Frame Length` makes the frame malformed: stop parsing that frame, count it, and keep the channel — do not fail or reset. This guard is not optional. Without the `< 4` floor a `Message Length` of `0` advances the walk by zero bytes and spins forever on a single malformed or misrouted datagram; without the remaining-bytes ceiling an oversized length reads past the datagram. This matches the sibling [Order-Intent Feed](../order-intent/spec.md) parse rule, with the datagram-length validation of step 1 added and the widened length field.
+2. Validate the frame header `Magic` equals `0x4442`; discard the datagram if it does not match. Then validate `Schema Version`: it MUST be `2`, and a subscriber MUST discard (and count) a frame declaring anything else rather than attempt the walk in step 3. A `Schema Version` of `1` on this feed is a publisher defect — under the 0.1.x layout `BookDepth` cannot be expressed at all, and `Flags` sits at a different offset.
+3. Walk the frame's application messages using each `Message Length`, read as the contiguous 12-bit field of [Application Message Header](#application-message-header-4-bytes) (`read_u16_le(byte[1..2]) & 0x0FFF`) — **not** from byte 1 alone, which would read a 424-byte `BookDepth` as 168 bytes and desynchronize the rest of the frame. Skip unknown Type IDs by length. A `Message Length` that is `< 4`, exceeds the bytes remaining in the frame, or is inconsistent with `Frame Length` makes the frame malformed: stop parsing that frame, count it, and keep the channel — do not fail or reset. This guard is not optional. Without the `< 4` floor a `Message Length` of `0` advances the walk by zero bytes and spins forever on a single malformed or misrouted datagram; without the remaining-bytes ceiling an oversized length reads past the datagram. This matches the sibling [Order-Intent Feed](../order-intent/spec.md) parse rule, with the datagram-length validation of step 1 added and the widened length field.
 4. **Validate `Message Count`.** The walk MUST yield exactly the frame header's `Message Count` messages and MUST end exactly at `Frame Length`. A mismatch in either direction makes the frame malformed: discard the whole frame, count it, and keep the channel. `Message Count` is not advisory — it is the frame's own statement of how many messages it contains, so a walk that yields a different number means the frame is not what its header says it is, and the messages already walked cannot be trusted individually. Reject the frame **before** applying any of its `BookDepth` messages, not after. A `Message Count` of `0` is invalid: every frame carries at least one message.
 5. Reject (drop and count) any `BookDepth` whose `Bid Levels` or `Ask Levels` exceeds `10`, before touching the level arrays. The declared count indexes fixed 10-element arrays; the 424-byte message length constrains the buffer but not the count field, so a frame claiming `Bid Levels = 200` would drive a literal implementation past the end of `Bids`. A subscriber MUST NOT index either array beyond index 9 under any circumstances.
 6. Reject (drop and count) any `BookDepth` whose `Source ID` is `0`, which the [Source ID Registry](../sources/spec.md) reserves and forbids on the wire.
@@ -534,7 +533,7 @@ A publisher operating the `mktdata` port MUST:
 11. Emit exactly one sequence series per `(channel, port)` from exactly one host, per [Single Publisher Host per Channel](#single-publisher-host-per-channel).
 12. Emit `Heartbeat` on `mktdata` at the operator-defined heartbeat interval (recommended 1 s) when otherwise idle. Note that a channel meeting the re-emission floor over a non-trivial instrument set is rarely idle, so heartbeats are a fallback signal, not the primary liveness indicator.
 13. Emit `Trade` (and `Liquidation` where applicable) on `mktdata` when the upstream has a venue-level trade concept. Trades are independent of `BookDepth` and are not required to reconstruct the book.
-14. Set frame `Schema Version` to `2` on both ports of the channel, and encode every `Message Length` per the 12-bit rule of [Application Message Header](#application-message-header-4-bytes) — `BookDepth` as `Length Low` = `0xA8` with `Length High` nibble `0x1`, every other message type with a zero extension nibble.
+14. Set frame `Schema Version` to `2` on both ports of the channel, and encode every `Message Length` per the contiguous 12-bit rule of [Application Message Header](#application-message-header-4-bytes) — `BookDepth` as bytes 1–2 = `A8 01`, every other message type with the length's high bits zero — and zero the reserved top 4 bits.
 15. Set frame `Message Count` to the exact number of application messages packed into the frame, and `Frame Length` to the exact total byte count. Subscribers validate the message walk against both and discard frames that disagree ([Frame Parsing](#frame-parsing) step 4).
 
 A publisher operating the `refdata` port MUST follow the cadence and atomicity rules in the [Reference Data Distribution supplement](../reference-data/spec.md), identical to the sibling feeds.
@@ -579,7 +578,7 @@ The format is fixed-size and binary, so parsing requires no allocation, no strin
 Sibling of the [Top-of-Book & Trades Feed](../top-of-book/spec.md), the [Market-by-Order Feed](../market-by-order/spec.md), and the [Midpoint Feed](../midpoint/spec.md). Shared:
 
 - The 24-byte frame header layout (except the `Magic` value).
-- The 4-byte application message header at **common framing 0.2.0**, whose 12-bit `Message Length` this feed is the first to need (`BookDepth` is 424 bytes). The widening is byte-compatible with 0.1.x for every message of 255 bytes or fewer, so the sibling feeds' encodings are unchanged; see the canonical [Application Message Header](../top-of-book/spec.md#application-message-header-4-bytes).
+- The 4-byte application message header at **common framing 0.2.0**, whose contiguous 12-bit `Message Length` this feed is the only one to need (`BookDepth` is 424 bytes) and whose `u8` `Flags` at offset 3 every sibling shares; see the canonical [Application Message Header](../top-of-book/spec.md#application-message-header-4-bytes).
 - The [Reference Data Distribution supplement](../reference-data/spec.md), including `InstrumentDefinition` (`0x02`) and `ManifestSummary` (`0x07`).
 - The cross-spec Type IDs `0x01`, `0x04`, `0x06`, `0x07`, `0x08` byte-for-byte.
 - The session-lifecycle and `Reset Count` patterns and the forward-compatibility rules.
@@ -590,7 +589,7 @@ Distinctions of this feed:
 - **Stateless full-refresh** delivery: no per-instrument sequence, no snapshot/delta recovery, no book maintenance required of the subscriber. Loss is repaired by the next refresh, with periodic re-emission bounding how long that takes. Consistency vs. L1: `BookDepth` level 0 equals the `Quote` BBO for the same source and `Source Timestamp` (see [L1 Consistency](#l1-consistency)); the two feeds conflate independently, so they are not instant-by-instant equal. Relationship to L3: `BookDepth` is the price-aggregated projection of the same book the market-by-order feed carries order-by-order, truncated to *N* levels per side — a consumer that needs the untruncated book uses the market-by-order feed and aggregates client-side.
 - **One publisher host per `(channel, port)`**, a stricter deployment constraint than the order-intent feed's, because the frame `Sequence Number` orders book application here rather than serving only as a health signal (see [Single Publisher Host per Channel](#single-publisher-host-per-channel)).
 - L2-specific payload lives at `0x40` (`BookDepth`), with `0x41` reserved and unused. The `0x40`–`0x4F` range does not overlap any sibling feed.
-- **Frame `Schema Version` `2`**, the only feed in the family to declare it: `BookDepth` at 424 bytes uses the 12-bit `Message Length` extension, and the version byte is what tells an 8-bit-length decoder to discard these frames instead of mis-walking them.
+- **The only feed that needs the widened `Message Length`.** Every feed declares `Schema Version = 2` because 0.2.0 moved `Flags`, but this is the one whose messages exceed 255 bytes, so a 0.1.x decoder pointed at it desynchronizes the frame walk rather than merely misreading `Flags`.
 - **Deeper by design**: ten price levels per side, against one for top-of-book and one derived price for midpoint. The depth costs packing density — two instruments per frame — which is the explicit trade recorded in [Wire Efficiency and Bandwidth](#wire-efficiency-and-bandwidth).
 
 A publisher MAY operate any subset of the sibling feeds for the same instruments simultaneously. Subscribers MAY consume any subset independently.
@@ -599,7 +598,7 @@ A publisher MAY operate any subset of the sibling feeds for the same instruments
 
 ## Versioning and Forward Compatibility
 
-This document is version **0.1.0**, versioned independently of the sibling feed specs. It requires **common framing 0.2.0** (the 12-bit `Message Length`), and the Schema Version byte in the frame header is `2` for this release — see [Application Message Header](#application-message-header-4-bytes). Future versions MAY:
+This document is version **0.1.0**, versioned independently of the sibling feed specs. It requires **common framing 0.2.0** (a contiguous 12-bit `Message Length` at offset 1 and a `u8` `Flags` at offset 3), and the Schema Version byte in the frame header is `2` for this release — see [Application Message Header](#application-message-header-4-bytes). Future versions MAY:
 
 - Append new fields to existing messages (old decoders ignore trailing bytes within the declared length).
 - Define new message types in reserved type-ID ranges (old decoders skip unknown types via the length field).

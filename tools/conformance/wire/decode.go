@@ -34,15 +34,15 @@ func Decode(raw []byte, expectMagic uint16) (*Frame, []StructFinding) {
 		// from walking non-frame bytes.
 		return f, fs
 	}
-	// Known schema versions are 1 (all messages ≤255 bytes) and 2 (messages may use
-	// the 12-bit Message Length extension of common framing 0.2.0). Every feed this
-	// tool decodes has only short message types, so 2 is decodable but unexpected.
+	// Schema Version denotes the application message header layout. This decoder
+	// implements common framing 0.2.0 (version 2); a version-1 frame carries the
+	// 0.1.x layout, whose Flags sits at a different offset, and is not walkable here.
 	switch h.SchemaVersion {
-	case SchemaVersionBase:
-	case SchemaVersionLong:
+	case SchemaVersionCF2:
+	case SchemaVersionLegacy:
 		fs = append(fs, StructFinding{"FRAME.SCHEMA_VERSION", 2,
-			fmt.Sprintf("schema version %d declares the 12-bit Message Length extension, "+
-				"but every message type on this feed is under 255 bytes", h.SchemaVersion), false})
+			fmt.Sprintf("schema version %d is common framing 0.1.x (u8 length, u16 Flags at offset 2); "+
+				"this decoder implements 0.2.0", h.SchemaVersion), false})
 	default:
 		fs = append(fs, StructFinding{"FRAME.SCHEMA_VERSION", 2,
 			fmt.Sprintf("schema version %d", h.SchemaVersion), false})
@@ -93,20 +93,11 @@ func (f *Frame) walkMessages() []StructFinding {
 				"trailing bytes shorter than message header", truncated})
 			break
 		}
-		// Message Length is 12 bits: byte 1 low, low nibble of byte 3 high.
+		// Message Length is the low 12 bits of the little-endian u16 at offset 1.
 		// Reading byte 1 alone would mistake a 424-byte message for a 168-byte one
-		// and desynchronize the rest of the walk.
-		ext := raw[off+3] & MsgLenExtMask
-		mlen := uint16(raw[off+1]) | uint16(ext)<<8
-		if ext != 0 && f.Header.SchemaVersion == SchemaVersionBase {
-			// A Schema-1 frame promises byte 3 is zero; using the extension anyway is a
-			// publisher self-inconsistency, and an 8-bit decoder trusting the promise
-			// would mis-walk the frame.
-			fs = append(fs, StructFinding{"FRAME.SCHEMA_VERSION", off + 3,
-				fmt.Sprintf("message length extension nibble 0x%X used under schema version %d",
-					ext, f.Header.SchemaVersion), false})
-			break
-		}
+		// and desynchronize the rest of the walk. The top 4 bits are reserved and
+		// masked off here per spec ("MUST be masked off on receipt").
+		mlen := binary.LittleEndian.Uint16(raw[off+1:]) & MsgLenMask
 		if mlen < MsgHeaderLen {
 			fs = append(fs, StructFinding{"MSG.LENGTH_PER_TYPE", off,
 				fmt.Sprintf("message length %d < header %d", mlen, MsgHeaderLen), false})
@@ -127,7 +118,7 @@ func (f *Frame) walkMessages() []StructFinding {
 		m := Message{
 			Type:   raw[off],
 			Length: mlen,
-			Flags:  raw[off+2],
+			Flags:  raw[off+3],
 			Body:   raw[off+MsgHeaderLen : off+int(mlen)],
 			Offset: off,
 		}

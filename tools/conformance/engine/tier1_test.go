@@ -214,8 +214,10 @@ func tier1Cases() []struct {
 			feed:  core.FeedTOB,
 			magic: wire.MagicTOB,
 			port:  core.PortMktData,
-			bad:   wb.Frame(wire.MagicTOB).Schema(2).Msg(wire.TypeHeartbeat, 16, heartbeatBody(0)).Bytes(),
-			good:  wb.Frame(wire.MagicTOB).Schema(1).Msg(wire.TypeHeartbeat, 16, heartbeatBody(0)).Bytes(),
+			// Schema Version denotes the header layout: 2 is common framing 0.2.0
+			// (what the engine implements), 1 is the 0.1.x layout it must refuse.
+			bad:  wb.Frame(wire.MagicTOB).Schema(wire.SchemaVersionLegacy).Msg(wire.TypeHeartbeat, 16, heartbeatBody(0)).Bytes(),
+			good: wb.Frame(wire.MagicTOB).Schema(wire.SchemaVersionCF2).Msg(wire.TypeHeartbeat, 16, heartbeatBody(0)).Bytes(),
 		},
 		{
 			rule:  "FRAME.MSG_COUNT_RANGE",

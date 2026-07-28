@@ -19,7 +19,7 @@ This repository is the home of wire-format specifications that data publishers a
 
 ## Common Framing
 
-The feed specs share a 24-byte frame header and a 4-byte application message header. The application message header is versioned as **common framing 0.2.0** and is defined canonically in the [Top-of-Book & Trades Feed spec](./top-of-book/spec.md#application-message-header-4-bytes); the other specs restate it and must not diverge from it. 0.2.0 widened `Message Length` from 8 to 12 bits so a feed can carry messages longer than 255 bytes; the encoding is byte-identical to 0.1.x for every shorter message, and a channel that uses the extension declares frame `Schema Version = 2`.
+The feed specs share a 24-byte frame header and a 4-byte application message header. The application message header is versioned as **common framing 0.2.0** and is defined canonically in the [Top-of-Book & Trades Feed spec](./top-of-book/spec.md#application-message-header-4-bytes); the other specs restate it and must not diverge from it. 0.2.0 widened `Message Length` from 8 to a contiguous 12 bits so a feed can carry messages longer than 255 bytes, moving `Flags` to a `u8` at offset 3. That is a breaking header-layout change, so every feed declares frame `Schema Version = 2` and a channel's publishers and subscribers upgrade together.
 
 ## Status
 

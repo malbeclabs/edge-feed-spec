@@ -2,7 +2,7 @@
 
 The DoubleZero Perp Stats Feed is a sibling cadence feed carrying per-perpetual derived state — funding, mark price, oracle price, open interest, and premium — relayed from the venue's REST surface. It is not the order-book hot path; data originates from REST polls rather than the matching engine, so it runs on a separate cadence from the top-of-book and market-by-order feeds.
 
-This document specifies version **0.1.2**: the transport, message types, `PerpStats` wire layout, emission model, and instrument scope.
+This document specifies version **0.2.0**: the transport, message types, `PerpStats` wire layout, emission model, and instrument scope.
 
 ---
 
@@ -21,7 +21,7 @@ This document specifies version **0.1.2**: the transport, message types, `PerpSt
 
 ## Transport Framing
 
-This feed uses the same 24-byte frame header and 4-byte application message header as the top-of-book feed, at **common framing 0.2.0** (a 12-bit `Message Length`). These are defined in the [Top-of-Book & Trades Feed spec](../top-of-book/spec.md#application-message-header-4-bytes) and are not restated here — **except for the `Magic` value**. Every message type on this feed is 124 bytes or fewer, so the length extension nibble is always zero here and this feed's publishers declare `Schema Version = 1`.
+This feed uses the same 24-byte frame header and 4-byte application message header as the top-of-book feed, at **common framing 0.2.0** (a contiguous 12-bit `Message Length` at offset 1 and a `u8` `Flags` at offset 3). These are defined in the [Top-of-Book & Trades Feed spec](../top-of-book/spec.md#application-message-header-4-bytes) and are not restated here — **except for the `Magic` value**. No message type on this feed exceeds 124 bytes, so the extra length bits are unused here, but the 0.2.0 layout moved `Flags`, so this feed's publishers MUST declare `Schema Version = 2`.
 
 The frame `Magic` is `0x4450` ("DP", wire bytes `[0x50, 0x44]`). It is distinct from the top-of-book feed's `0x445A`, the market-by-order feed's `0x4444`, the midpoint feed's `0x4D44`, the order-intent feed's `0x494F`, and the market-by-price feed's `0x4442`, to prevent cross-protocol misrouting. A consumer MUST validate that a received frame's `Magic` equals the value for the feed it subscribed to and discard any frame that does not match (for example, another sibling feed's traffic arriving from a misconfigured multicast group). The `Magic` is the only frame-header field that differs from the top-of-book feed.
 
@@ -205,9 +205,9 @@ The publisher MUST follow the cadence and atomicity rules in the [Reference Data
 
 ## Versioning and Forward Compatibility
 
-This document is version **0.1.2**, versioned independently of the sibling feed specs.
+This document is version **0.2.0**, versioned independently of the sibling feed specs.
 
-The Schema Version byte in the frame header is `1` for this release. Future versions of this specification MAY:
+The Schema Version byte in the frame header is `2` for this release, denoting common framing 0.2.0. Future versions of this specification MAY:
 
 - Append new fields to existing messages (old decoders ignore trailing bytes within the declared Message Length).
 - Define new message types (old decoders skip unknown types using the Message Length field).
@@ -215,7 +215,7 @@ The Schema Version byte in the frame header is `1` for this release. Future vers
 
 Existing field layouts and semantics will not change within the v0.x line without a Schema Version bump.
 
-**v0.1.2** — adopted **common framing 0.2.0**, which widens the shared application message header's `Message Length` to 12 bits. Every message type on this feed is 124 bytes or fewer, so the encoding is byte-identical to 0.1.x, no publisher or subscriber change is required, and Schema Version remains `1`.
+**v0.2.0** — adopted **common framing 0.2.0**, which makes the shared application message header's `Message Length` a contiguous 12-bit field and moves `Flags` from a `u16` at offset 2 to a `u8` at offset 3. No message type on this feed exceeds 124 bytes, so the extra length bits are unused here, but the layout change is breaking: **Schema Version becomes `2`**, and a channel's publishers and subscribers must be upgraded together.
 
 **v0.1.1** — registered the frame `Magic` value `0x4450` ("DP") for this feed and added the consumer validation requirement (see [Transport Framing](#transport-framing)). Previously the header was deferred wholesale to the top-of-book spec, leaving the value ambiguous even though the sibling-feed rule already required a distinct one. No wire-layout change; Schema Version remains `1`.
 

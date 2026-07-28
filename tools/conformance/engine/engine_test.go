@@ -36,10 +36,10 @@ func TestEmitConditionalDowngrade(t *testing.T) {
 func TestEmitUnknownSchemaDowngrade(t *testing.T) {
 	cap := &capture{}
 	e := New(Config{Feed: core.FeedMBO}, cap)
-	e.beginFrame(2)                                                           // schema version 2 > implemented
-	e.Emit("FIELD.SIDE_ENUM", core.Violation, core.PortMktData, 0, 0, 0, "x") // v1-specific → downgrade
+	e.beginFrame(3)                                                           // a version this engine does not implement
+	e.Emit("FIELD.SIDE_ENUM", core.Violation, core.PortMktData, 0, 0, 0, "x") // payload check → downgrade
 	if cap.last.Severity == core.Must || cap.last.Status == core.Violation {
-		t.Fatal("v1-specific check must downgrade under unknown schema")
+		t.Fatal("payload check must downgrade under an unimplemented schema")
 	}
 	e.Emit("FRAME.MAGIC_MISMATCH", core.Violation, core.PortMktData, 0, 0, 0, "x") // envelope → stays
 	if cap.last.Status != core.Violation {

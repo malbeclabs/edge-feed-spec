@@ -52,11 +52,17 @@ func New(cfg Config, rep report.Reporter) *Engine {
 	}
 }
 
-func (e *Engine) beginFrame(schemaVersion uint8) { e.curUnknownSchema = schemaVersion > 1 }
+// beginFrame records whether the frame's schema version is one this engine can
+// fully interpret. It implements common framing 0.2.0 (wire.SchemaVersionCF2);
+// any other version — the 0.1.x layout below it, or an unknown one above —
+// downgrades non-envelope checks, since the payload offsets cannot be trusted.
+func (e *Engine) beginFrame(schemaVersion uint8) {
+	e.curUnknownSchema = schemaVersion != wire.SchemaVersionCF2
+}
 
 // Emit resolves severity from the registry, applying two downgrades:
 //   - Conditional must* rules downgrade unless their --expect-* config is set.
-//   - Under an unknown (higher) schema version, non-envelope checks downgrade.
+//   - Under a schema version this engine does not implement, non-envelope checks downgrade.
 //
 // port and seq are the logical port and frame sequence number of the frame being
 // classified; they are recorded on the Finding for logging and debugging.

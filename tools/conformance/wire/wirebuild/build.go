@@ -40,7 +40,7 @@ type frame struct {
 	overrideLength *uint16 // forge FRAME.LENGTH_CONSISTENCY
 }
 
-func Frame(magic uint16) *frame { return &frame{magic: magic, schemaVer: 1} }
+func Frame(magic uint16) *frame { return &frame{magic: magic, schemaVer: wire.SchemaVersionCF2} }
 
 func (f *frame) Schema(v uint8) *frame       { f.schemaVer = v; return f }
 func (f *frame) Channel(c uint8) *frame      { f.channelID = c; return f }
@@ -50,8 +50,8 @@ func (f *frame) ResetCount(r uint8) *frame   { f.resetCount = r; return f }
 func (f *frame) ForgeCount(c uint8) *frame   { f.overrideCount = &c; return f }
 func (f *frame) ForgeLength(l uint16) *frame { f.overrideLength = &l; return f }
 
-// Msg appends a message. declaredLen is the value written in the 12-bit length
-// field of the message header (byte 1 plus the low nibble of byte 3); pass the
+// Msg appends a message. declaredLen is the value written in the contiguous
+// 12-bit length field at message-header offset 1; pass the
 // correct size for conformant frames, a wrong value to test MSG.LENGTH_PER_TYPE.
 // body builds the bytes AFTER the 4-byte message header.
 func (f *frame) Msg(typ uint8, declaredLen uint16, build func(*Body)) *frame {
@@ -82,14 +82,10 @@ func (f *frame) Bytes() []byte {
 	out[20] = count
 	out[21] = f.resetCount
 	for _, m := range f.msgs {
-		// 12-bit Message Length: low 8 bits in byte 1, bits 8–11 in the low nibble
-		// of byte 3. Byte 2 is the u8 Flags. Byte 3's high nibble stays reserved/zero.
-		hdr := []byte{
-			m.typ,
-			uint8(m.declaredLen),
-			m.flags,
-			uint8(m.declaredLen>>8) & wire.MsgLenExtMask,
-		}
+		// Contiguous 12-bit Message Length in the little-endian u16 at offset 1,
+		// with the top 4 bits reserved/zero; Flags is the u8 at offset 3.
+		hdr := []byte{m.typ, 0, 0, m.flags}
+		binary.LittleEndian.PutUint16(hdr[1:], m.declaredLen&wire.MsgLenMask)
 		out = append(out, hdr...)
 		out = append(out, m.body...)
 	}

@@ -16,19 +16,19 @@ const (
 	// 0.2.0 admits 4095, so the frame is the binding limit, not the field.
 	MaxMsgLen = MaxFrameLen - FrameHeaderLen
 
-	// MsgLenExtMask selects the low nibble of message-header byte 3, which
-	// carries bits 8–11 of the 12-bit Message Length (common framing 0.2.0).
-	// The high nibble is reserved and MUST be zero on emission.
-	MsgLenExtMask         = 0x0F
-	MsgLenExtReservedMask = 0xF0
+	// MsgLenMask selects the low 12 bits of the little-endian u16 at message-header
+	// offset 1, which carry the whole Message Length under common framing 0.2.0.
+	// The top 4 bits are reserved and MUST be zero on emission.
+	MsgLenMask         = 0x0FFF
+	MsgLenReservedMask = 0xF000
 
-	// SchemaVersionBase is the schema version of a channel whose messages all
-	// fit the 8-bit Message Length of common framing 0.1.x. SchemaVersionLong
-	// declares that messages on the channel may exceed 255 bytes and so use the
-	// 12-bit length extension. Every feed this tool decodes has only short
-	// message types and therefore declares SchemaVersionBase.
-	SchemaVersionBase = 1
-	SchemaVersionLong = 2
+	// SchemaVersionLegacy is common framing 0.1.x: a u8 Message Length at offset 1
+	// and a u16 Flags at offset 2. SchemaVersionCF2 is common framing 0.2.0: a
+	// contiguous 12-bit Message Length at offset 1 and a u8 Flags at offset 3. The
+	// layouts are not interchangeable, so a decoder walks only the version it
+	// implements. This decoder implements 0.2.0.
+	SchemaVersionLegacy = 1
+	SchemaVersionCF2    = 2
 )
 
 // Message type IDs (shared + per-feed).
@@ -62,11 +62,11 @@ type FrameHeader struct {
 	FrameLength   uint16
 }
 
-// Message is one application message. Length is the 12-bit Message Length of
-// common framing 0.2.0, assembled from byte 1 (low 8 bits) and the low nibble of
-// byte 3 (bits 8–11); Flags is the u8 at byte 2. Under 0.1.x framing byte 3 was
-// the high byte of a u16 Flags whose bits 1–15 were reserved and ignored, so for
-// every message of 255 bytes or fewer the two readings agree byte-for-byte.
+// Message is one application message. Length is the contiguous 12-bit Message
+// Length of common framing 0.2.0 — the low 12 bits of the little-endian u16 at
+// offset 1 — and Flags is the u8 at offset 3. Under 0.1.x framing the length was
+// a u8 at offset 1 and Flags a u16 at offset 2, so the two layouts differ
+// wherever Flags is non-zero: they are gated by frame Schema Version, not mixed.
 type Message struct {
 	Type   uint8
 	Length uint16

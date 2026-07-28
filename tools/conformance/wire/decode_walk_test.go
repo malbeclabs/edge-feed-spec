@@ -64,16 +64,15 @@ func TestMessageOverrunsDeclaredFrameLength_IsPublisherInvalid(t *testing.T) {
 
 func TestWalk12BitMessageLength(t *testing.T) {
 	// A 424-byte message (the market-by-price BookDepth size) encodes as
-	// Length Low = 0xA8 with extension nibble 0x1, and is only walkable by a
-	// decoder that assembles both halves. Schema 2 declares the extension.
-	raw := wb.Frame(wire.MagicMBO).Schema(wire.SchemaVersionLong).
+	// bytes 1-2 = A8 01 little-endian, and is only walkable by a
+	// decoder that reads the whole 12-bit word rather than byte 1 alone.
+	raw := wb.Frame(wire.MagicMBO).Schema(wire.SchemaVersionCF2).
 		Msg(0x40, 424, func(b *wb.Body) { b.Pad(420) }).
 		Msg(wire.TypeHeartbeat, 16, func(b *wb.Body) { b.Pad(12) }).Bytes()
-	if raw[wire.FrameHeaderLen+1] != 0xA8 || raw[wire.FrameHeaderLen+3] != 0x01 {
-		t.Fatalf("length not split as 0xA8/0x01: % X", raw[wire.FrameHeaderLen:wire.FrameHeaderLen+4])
+	if raw[wire.FrameHeaderLen+1] != 0xA8 || raw[wire.FrameHeaderLen+2] != 0x01 {
+		t.Fatalf("length not encoded as A8 01: % X", raw[wire.FrameHeaderLen:wire.FrameHeaderLen+4])
 	}
 	f, fs := wire.Decode(raw, wire.MagicMBO)
-	// Schema 2 on a short-message feed is flagged (Info), but the walk must succeed.
 	if len(f.Messages) != 2 {
 		t.Fatalf("walk failed: msgs=%d findings=%+v", len(f.Messages), fs)
 	}
@@ -85,15 +84,15 @@ func TestWalk12BitMessageLength(t *testing.T) {
 	}
 }
 
-func TestShortMessagesAreByteIdenticalToOldFraming(t *testing.T) {
-	// The 0.2.0 encoder must produce byte 3 == 0 for any message of 255 bytes or
-	// fewer, which is exactly what a 0.1.x encoder wrote as the high byte of its
-	// u16 Flags. This is the whole basis of the widening's wire compatibility.
+func TestFlagsLiveAtOffset3(t *testing.T) {
+	// 0.2.0 puts Flags at offset 3, after the contiguous length word. A 0.1.x
+	// decoder reading Flags as a u16 at offset 2 would see bit 0 clear, which is
+	// exactly why Schema Version gates the two layouts.
 	raw := wb.Frame(wire.MagicMBO).
 		MsgFlags(wire.TypeSnapshotOrder, 44, 0x01, func(b *wb.Body) { b.Pad(40) }).Bytes()
 	hdr := raw[wire.FrameHeaderLen : wire.FrameHeaderLen+4]
-	if hdr[1] != 44 || hdr[2] != 0x01 || hdr[3] != 0x00 {
-		t.Fatalf("short message header not 0.1.x-compatible: % X", hdr)
+	if hdr[1] != 44 || hdr[2] != 0x00 || hdr[3] != 0x01 {
+		t.Fatalf("header not 0.2.0 layout: % X", hdr)
 	}
 	f, fs := wire.Decode(raw, wire.MagicMBO)
 	if len(fs) != 0 || len(f.Messages) != 1 || f.Messages[0].Flags != 0x01 {
@@ -101,13 +100,13 @@ func TestShortMessagesAreByteIdenticalToOldFraming(t *testing.T) {
 	}
 }
 
-func TestLengthExtensionUnderSchema1IsFlagged(t *testing.T) {
-	// Declaring schema 1 promises byte 3 is zero. Using the extension anyway would
-	// mis-walk on any 8-bit decoder that trusted the promise.
-	raw := wb.Frame(wire.MagicMBO).Schema(wire.SchemaVersionBase).
-		Msg(0x40, 424, func(b *wb.Body) { b.Pad(420) }).Bytes()
+func TestLegacySchemaVersionIsFlagged(t *testing.T) {
+	// A version-1 frame carries the 0.1.x header layout, whose Flags sits at a
+	// different offset. This decoder implements 0.2.0 and must not walk it silently.
+	raw := wb.Frame(wire.MagicMBO).Schema(wire.SchemaVersionLegacy).
+		Msg(wire.TypeHeartbeat, 16, func(b *wb.Body) { b.Pad(12) }).Bytes()
 	_, fs := wire.Decode(raw, wire.MagicMBO)
 	if !has(fs, "FRAME.SCHEMA_VERSION") {
-		t.Fatalf("expected schema/length inconsistency, got %+v", fs)
+		t.Fatalf("expected legacy-layout finding, got %+v", fs)
 	}
 }
