@@ -20,7 +20,11 @@ import (
 // expectedMsgLen returns the canonical wire length (including the 4-byte
 // header) for message types that have a fixed size in the current spec version.
 // Returns 0 for types that are not defined in a given feed (caller must check).
-func expectedMsgLen(feed core.Feed, typ uint8) uint8 {
+// expectedMsgLen returns the mandated byte length of a message type on a feed, or
+// 0 when the type carries no mandated length there. The return is uint16 because
+// common framing 0.2.0 allows a message length above 255; no type on the feeds
+// decoded here reaches that, but the comparison has to be width-correct.
+func expectedMsgLen(feed core.Feed, typ uint8) uint16 {
 	switch typ {
 	case wire.TypeHeartbeat:
 		return 16

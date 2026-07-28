@@ -23,8 +23,8 @@ func (x *Body) Char(s string, n int) *Body {
 
 type msg struct {
 	typ         uint8
-	declaredLen uint8 // what to write in the header (override to forge MSG.LENGTH_PER_TYPE)
-	flags       uint16
+	declaredLen uint16 // what to write in the header (override to forge MSG.LENGTH_PER_TYPE)
+	flags       uint8
 	body        []byte
 }
 
@@ -50,10 +50,11 @@ func (f *frame) ResetCount(r uint8) *frame   { f.resetCount = r; return f }
 func (f *frame) ForgeCount(c uint8) *frame   { f.overrideCount = &c; return f }
 func (f *frame) ForgeLength(l uint16) *frame { f.overrideLength = &l; return f }
 
-// Msg appends a message. declaredLen is the value written in the 1-byte length
-// header; pass the correct size for conformant frames, a wrong value to test
-// MSG.LENGTH_PER_TYPE. body builds the bytes AFTER the 4-byte message header.
-func (f *frame) Msg(typ uint8, declaredLen uint8, build func(*Body)) *frame {
+// Msg appends a message. declaredLen is the value written in the 12-bit length
+// field of the message header (byte 1 plus the low nibble of byte 3); pass the
+// correct size for conformant frames, a wrong value to test MSG.LENGTH_PER_TYPE.
+// body builds the bytes AFTER the 4-byte message header.
+func (f *frame) Msg(typ uint8, declaredLen uint16, build func(*Body)) *frame {
 	b := &Body{}
 	if build != nil {
 		build(b)
@@ -61,7 +62,7 @@ func (f *frame) Msg(typ uint8, declaredLen uint8, build func(*Body)) *frame {
 	f.msgs = append(f.msgs, msg{typ: typ, declaredLen: declaredLen, body: b.b})
 	return f
 }
-func (f *frame) MsgFlags(typ uint8, declaredLen uint8, flags uint16, build func(*Body)) *frame {
+func (f *frame) MsgFlags(typ uint8, declaredLen uint16, flags uint8, build func(*Body)) *frame {
 	f.Msg(typ, declaredLen, build)
 	f.msgs[len(f.msgs)-1].flags = flags
 	return f
@@ -81,8 +82,14 @@ func (f *frame) Bytes() []byte {
 	out[20] = count
 	out[21] = f.resetCount
 	for _, m := range f.msgs {
-		hdr := []byte{m.typ, m.declaredLen, 0, 0}
-		binary.LittleEndian.PutUint16(hdr[2:], m.flags)
+		// 12-bit Message Length: low 8 bits in byte 1, bits 8–11 in the low nibble
+		// of byte 3. Byte 2 is the u8 Flags. Byte 3's high nibble stays reserved/zero.
+		hdr := []byte{
+			m.typ,
+			uint8(m.declaredLen),
+			m.flags,
+			uint8(m.declaredLen>>8) & wire.MsgLenExtMask,
+		}
 		out = append(out, hdr...)
 		out = append(out, m.body...)
 	}

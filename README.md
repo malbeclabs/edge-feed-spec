@@ -11,11 +11,15 @@ This repository is the home of wire-format specifications that data publishers a
 | [Top-of-Book & Trades Feed](./top-of-book/spec.md) | Compact, fixed-size, multicast-native binary protocol for L1 quotes and trades from any two-sided market |
 | [Midpoint Feed](./midpoint/spec.md) | Sibling protocol carrying a single derived mid price per instrument, computed from a venue's order book |
 | [Market-by-Order Feed](./market-by-order/spec.md) | Sibling protocol carrying the full resting-order population per instrument, with continuous in-band snapshot+delta recovery |
-| [Market-by-Price Feed](./market-by-price/spec.md) | Sibling protocol carrying a fixed-depth, price-aggregated L2 book — the top *N* levels per side as self-contained full refreshes, with no delta stream or subscriber-side book state |
+| [Market-by-Price Feed](./market-by-price/spec.md) | Sibling protocol carrying a fixed-depth, price-aggregated L2 book — the top ten levels per side as self-contained full refreshes, with no delta stream or subscriber-side book state |
 | [Order-Intent Feed](./order-intent/spec.md) | Normalized, pre-consensus order-intent events (order/cancel/modify submissions) observed in a venue's mempool, as fixed-size binary multicast |
 | [Reference Data Distribution](./reference-data/spec.md) | Shared supplement defining the two-port transport model and continuous in-band instrument definition retransmission used by the feed specs above |
 | [Perp Stats Feed](./perp-stats/spec.md) | Sibling cadence feed carrying per-perpetual derived state (funding, mark, oracle, open interest, premium) relayed from the venue REST surface |
 | [Source ID Registry](./sources/spec.md) | Canonical registry of `Source ID` values identifying the venues whose books feed messages are derived from |
+
+## Common Framing
+
+The feed specs share a 24-byte frame header and a 4-byte application message header. The application message header is versioned as **common framing 0.2.0** and is defined canonically in the [Top-of-Book & Trades Feed spec](./top-of-book/spec.md#application-message-header-4-bytes); the other specs restate it and must not diverge from it. 0.2.0 widened `Message Length` from 8 to 12 bits so a feed can carry messages longer than 255 bytes; the encoding is byte-identical to 0.1.x for every shorter message, and a channel that uses the extension declares frame `Schema Version = 2`.
 
 ## Status
 

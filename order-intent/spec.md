@@ -4,7 +4,7 @@ The DoubleZero Order-Intent Feed is a wire format for normalized, pre-consensus 
 
 This is a sibling protocol to the DoubleZero [Top-of-Book & Trades Feed](../top-of-book/spec.md), the [Market-by-Order Feed](../market-by-order/spec.md), and the [Midpoint Feed](../midpoint/spec.md), not a layer on top. Where those feeds carry accepted book state — quotes, resting orders, mid prices — this feed carries *intent*: every successfully normalized supported submission, plus dead-man-switch arm/disarm, as a fixed-size binary message.
 
-This document specifies version **0.1.0**: the frame header, application message header, and the message types that define the wire format. The wire format is venue-generic; the per-venue derivations it deliberately does not fix (account-id encoding, Action Tag rule, source-message mapping) are defined out of band by each venue's publisher and are not part of this specification. The [Source ID Registry](../sources/spec.md) only assigns the Source ID → venue mapping.
+This document specifies version **0.1.1**: the frame header, application message header, and the message types that define the wire format. The wire format is venue-generic; the per-venue derivations it deliberately does not fix (account-id encoding, Action Tag rule, source-message mapping) are defined out of band by each venue's publisher and are not part of this specification. The [Source ID Registry](../sources/spec.md) only assigns the Source ID → venue mapping.
 
 **Trust semantics (normative).** Events are *observed signed submissions*, not accepted orders. An event may reference an invalid order, a replay, an action the venue later rejects, or intent that never executes. The publisher performs no venue-level validation: it *attempts* signature recovery to attribute the event, but recovery is **not a gate on publication** — when recovery fails or is skipped, the event is still published with a zeroed Signer and the `signer unverified` flag (an unauthenticated observation; see [Common Event Fields](#common-event-fields)). Subscribers MUST treat the feed as intent, never as fills or book state. The boundary is syntactic, not semantic: values that parse and convert exactly are published as-is even if venue-invalid (zero quantity, a past schedule-cancel time, an order id that never existed). "Successfully normalized" means malformed, unmappable, or precision-violating entries are dropped; the feed does not promise every observed submission.
 
@@ -78,7 +78,7 @@ v1 uses a single channel (ID 0). The frame header supports instrument sharding a
 | Offset | Field | Type | Description |
 |--------|-------|------|-------------|
 | 0 | Magic | `u16` | `0x494F` ("OI", wire bytes `[0x4F, 0x49]`). Frame delimiter. Distinct from the top-of-book feed's `0x445A`, the market-by-order feed's `0x4444`, the midpoint feed's `0x4D44`, and the market-by-price feed's `0x4442` to prevent cross-protocol misrouting. |
-| 2 | Schema Version | `u8` | Protocol version. Starts at `1`. |
+| 2 | Schema Version | `u8` | Protocol version. Starts at `1`. `2` declares that messages on this channel may use the 12-bit `Message Length` extension (see [Application Message Header](#application-message-header-4-bytes)); this feed's publishers declare `1`. |
 | 3 | Channel ID | `u8` | Logical channel for instrument sharding. `0` in v1. |
 | 4 | Sequence Number | `u64` | Monotonically increasing **per publisher host, per channel, per port**, starting from 0. Resets to 0 when `Reset Count` changes. Used for per-port gap detection. The `mktdata` and `refdata` ports each have an independent series. The frame header carries no Source ID, so a subscriber binding several hosts on one multicast group sees one independent sequence series **per originating host** and MUST track them keyed by transport origin (the datagram's source IP and destination port; each host of a venue publishes on a distinct destination port, and the per-host port offset is a deployment convention defined out of band, not by this spec). Hosts of one venue all carry the **same** Source ID (per-venue; see [Common Event Fields](#common-event-fields)), so the host is identified by transport, not by the in-message Source ID. Sequence gaps are a per-host, per-channel, per-port health signal and never gate delivery. |
 | 12 | Send Timestamp | `ts_ns` | When the publisher sent this frame. Subscribers can measure publisher-internal latency as the difference from a message's Source Timestamp. |
@@ -92,13 +92,16 @@ A `Reset Count` change means the sequence space restarted and any events during 
 
 ## Application Message Header (4 bytes)
 
-Every application message begins with:
+Every application message begins with the common application message header at **common framing 0.2.0**, defined canonically in the [Top-of-Book & Trades Feed spec](../top-of-book/spec.md#application-message-header-4-bytes) and restated here:
 
 | Offset | Field | Type | Description |
 |--------|-------|------|-------------|
 | 0 | Message Type | `u8` | See Message Types table. |
-| 1 | Message Length | `u8` | Total message length including this header. Max 255. |
-| 2 | Flags | `u16` | Bit 0: snapshot (1) vs. incremental (0) — always 0 on this feed, which has no snapshot mechanism. Bits 1–15: reserved. The per-event semantic flags live in the **Event Flags** `u8` field inside each message body, not in this header. |
+| 1 | Length Low | `u8` | Low 8 bits of `Message Length`. |
+| 2 | Flags | `u8` | Bit 0: snapshot (1) vs. incremental (0) — always 0 on this feed, which has no snapshot mechanism. Bits 1–7: reserved, MUST be zero on emission and MUST be ignored on receipt. The per-event semantic flags live in the **Event Flags** `u8` field inside each message body, not in this header. |
+| 3 | Length High / Reserved | `u8` | Low nibble (mask `0x0F`): bits 8–11 of `Message Length`. High nibble (mask `0xF0`): reserved, MUST be zero on emission and MUST be ignored on receipt. |
+
+`Message Length` is the 12-bit total message length in bytes including this header, `byte[1] | (byte[3] & 0x0F) << 8`, minimum `4`. Every message type on this feed is 148 bytes or fewer, so byte 3 is always zero here, this feed's encoding is byte-identical to common framing 0.1.x, and its publishers declare `Schema Version = 1`.
 
 ---
 
@@ -454,7 +457,7 @@ A publisher MAY operate any subset of the sibling feeds for the same instruments
 
 ## Versioning and Forward Compatibility
 
-The Schema Version byte in the frame header is `1` for this release (spec version **0.1.0**). Future versions of this specification MAY:
+The Schema Version byte in the frame header is `1` for this release (spec version **0.1.1**). Future versions of this specification MAY:
 
 - Append new fields to existing messages (old decoders ignore trailing bytes within the declared Message Length).
 - Define new message types in currently-reserved Type ID ranges (old decoders skip unknown types using the Message Length field).
@@ -462,3 +465,5 @@ The Schema Version byte in the frame header is `1` for this release (spec versio
 - Define new Event Flag bits (decoders MUST ignore flag bits they do not recognize).
 
 Existing field layouts and semantics will not change within the v0.x line without a Schema Version bump.
+
+**v0.1.1** — adopted **common framing 0.2.0**, which widens the shared `Message Length` to 12 bits (see [Application Message Header](#application-message-header-4-bytes)). Every message type on this feed is 148 bytes or fewer, so the encoding is byte-identical to 0.1.x, no publisher or subscriber change is required, and Schema Version remains `1`.

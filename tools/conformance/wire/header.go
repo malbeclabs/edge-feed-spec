@@ -10,6 +10,25 @@ const (
 	FrameHeaderLen = 24
 	MsgHeaderLen   = 4
 	MaxFrameLen    = 1232
+
+	// MaxMsgLen is the largest message a frame can hold: one message filling a
+	// maximum-size frame. The 12-bit Message Length field of common framing
+	// 0.2.0 admits 4095, so the frame is the binding limit, not the field.
+	MaxMsgLen = MaxFrameLen - FrameHeaderLen
+
+	// MsgLenExtMask selects the low nibble of message-header byte 3, which
+	// carries bits 8–11 of the 12-bit Message Length (common framing 0.2.0).
+	// The high nibble is reserved and MUST be zero on emission.
+	MsgLenExtMask         = 0x0F
+	MsgLenExtReservedMask = 0xF0
+
+	// SchemaVersionBase is the schema version of a channel whose messages all
+	// fit the 8-bit Message Length of common framing 0.1.x. SchemaVersionLong
+	// declares that messages on the channel may exceed 255 bytes and so use the
+	// 12-bit length extension. Every feed this tool decodes has only short
+	// message types and therefore declares SchemaVersionBase.
+	SchemaVersionBase = 1
+	SchemaVersionLong = 2
 )
 
 // Message type IDs (shared + per-feed).
@@ -43,10 +62,15 @@ type FrameHeader struct {
 	FrameLength   uint16
 }
 
+// Message is one application message. Length is the 12-bit Message Length of
+// common framing 0.2.0, assembled from byte 1 (low 8 bits) and the low nibble of
+// byte 3 (bits 8–11); Flags is the u8 at byte 2. Under 0.1.x framing byte 3 was
+// the high byte of a u16 Flags whose bits 1–15 were reserved and ignored, so for
+// every message of 255 bytes or fewer the two readings agree byte-for-byte.
 type Message struct {
 	Type   uint8
-	Length uint8
-	Flags  uint16
+	Length uint16
+	Flags  uint8
 	Body   []byte // bytes after the 4-byte message header, bounded by Length
 	Offset int    // byte offset of this message within the frame
 }

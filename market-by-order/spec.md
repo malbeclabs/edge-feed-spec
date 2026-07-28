@@ -80,7 +80,7 @@ The snapshot stream has a fundamentally different traffic shape from the delta s
 | Offset | Field | Type | Description |
 |--------|-------|------|-------------|
 | 0 | Magic | `u16` | `0x4444`. Frame delimiter. Distinct from the top-of-book feed's `0x445A`, the midpoint feed's `0x4D44`, and the market-by-price feed's `0x4442` to prevent cross-protocol misrouting. |
-| 2 | Schema Version | `u8` | Protocol version. Starts at `1`. |
+| 2 | Schema Version | `u8` | Protocol version. Starts at `1`. `2` declares that messages on this channel may use the 12-bit `Message Length` extension (see [Application Message Header](#application-message-header-4-bytes)); this feed's publishers declare `1`. |
 | 3 | Channel ID | `u8` | Logical channel for instrument sharding. |
 | 4 | Sequence Number | `u64` | Monotonically increasing **per channel per port**, starting from 0. Resets to 0 when `Reset Count` changes. Used for per-port gap detection. The `mktdata`, `refdata`, and `snapshot` ports each have an independent `Sequence Number` series; see [Sequence Numbers and Recovery](#sequence-numbers-and-recovery) for how the series relate. |
 | 12 | Send Timestamp | `ts_ns` | When the publisher sent this frame. |
@@ -92,13 +92,16 @@ The snapshot stream has a fundamentally different traffic shape from the delta s
 
 ## Application Message Header (4 bytes)
 
-Every application message begins with:
+Every application message begins with the common application message header at **common framing 0.2.0**, defined canonically in the [Top-of-Book & Trades Feed spec](../top-of-book/spec.md#application-message-header-4-bytes) and restated here:
 
 | Offset | Field | Type | Description |
 |--------|-------|------|-------------|
 | 0 | Message Type | `u8` | See Message Types table. |
-| 1 | Message Length | `u8` | Total message length including this header. Max 255. |
-| 2 | Flags | `u16` | Bit 0: snapshot (1) vs. incremental (0). Bits 1–15: reserved. |
+| 1 | Length Low | `u8` | Low 8 bits of `Message Length`. |
+| 2 | Flags | `u8` | Bit 0: snapshot (1) vs. incremental (0). Bits 1–7: reserved, MUST be zero on emission and MUST be ignored on receipt. |
+| 3 | Length High / Reserved | `u8` | Low nibble (mask `0x0F`): bits 8–11 of `Message Length`. High nibble (mask `0xF0`): reserved, MUST be zero on emission and MUST be ignored on receipt. |
+
+`Message Length` is the 12-bit total message length in bytes including this header, `byte[1] | (byte[3] & 0x0F) << 8`, minimum `4`. Every message type on this feed is 80 bytes or fewer, so byte 3 is always zero here, this feed's encoding is byte-identical to common framing 0.1.x, and its publishers declare `Schema Version = 1`.
 
 ---
 
@@ -781,3 +784,5 @@ The Schema Version byte in the frame header is `1` for this release. Future vers
 - Introduce an optional `OrderModify` message type for venues with true in-place modification semantics.
 
 Existing field layouts and semantics will not change within the v0.x line without a Schema Version bump.
+
+The common application message header was widened to a 12-bit `Message Length` (**common framing 0.2.0**, defined canonically in the [Top-of-Book & Trades Feed spec](../top-of-book/spec.md#application-message-header-4-bytes)). Every message type on this feed is 80 bytes or fewer, so this feed's encoding is unchanged byte-for-byte, no publisher or subscriber change is required, and Schema Version remains `1`.

@@ -2,9 +2,9 @@
 
 This supplement defines a continuous in-band mechanism for DoubleZero Edge feeds to advertise their active instrument set. It allows new subscribers to reach a complete reference-data state without an offline file, an out-of-band catalog, or a replay service.
 
-The mechanism is payload-independent. Any feed in the DoubleZero Edge family that uses the shared 24-byte frame header and 4-byte application message header MAY adopt it. The Top-of-Book & Trades Feed and the Midpoint Feed both do.
+The mechanism is payload-independent. Any feed in the DoubleZero Edge family that uses the shared 24-byte frame header and 4-byte application message header (**common framing 0.2.0**, defined in the [Top-of-Book & Trades Feed spec](../top-of-book/spec.md#application-message-header-4-bytes)) MAY adopt it. The Top-of-Book & Trades Feed and the Midpoint Feed both do.
 
-This document specifies version **0.1.0**: the two-port transport model, the `ManifestSummary` message, the publisher cadence requirements, and the subscriber algorithm.
+This document specifies version **0.1.1**: the two-port transport model, the `ManifestSummary` message, the publisher cadence requirements, and the subscriber algorithm.
 
 ---
 
@@ -202,3 +202,5 @@ Future versions of this supplement MAY:
 - Add an optional `manifest_hash` field to `ManifestSummary` for defense against publisher bugs in single- or multi-publisher channels.
 
 The two-port transport model and the subscriber algorithm are stable for the v0.1.x line.
+
+**v0.1.1** — adopted **common framing 0.2.0**, which widens the shared application message header's `Message Length` to 12 bits. Both message types this supplement defines or carries (`ManifestSummary` at 24 bytes, `InstrumentDefinition` at 64–80 bytes depending on the adopting feed) are well under 255 bytes, so the length extension nibble is always zero on the `refdata` port and its encoding is byte-identical to 0.1.x. A feed whose `mktdata` port carries messages longer than 255 bytes declares frame `Schema Version = 2` on **both** ports of the channel, since the schema is a property of the channel; a `refdata` decoder MUST therefore accept `Schema Version` `1` and `2` alike.

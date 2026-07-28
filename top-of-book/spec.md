@@ -71,7 +71,7 @@ The frame header and application message header are identical on both ports. A s
 | Offset | Field | Type | Description |
 |--------|-------|------|-------------|
 | 0 | Magic | `u16` | `0x445A` ("DZ"). Frame delimiter. |
-| 2 | Schema Version | `u8` | Protocol version. Starts at `1`. |
+| 2 | Schema Version | `u8` | Protocol version. Starts at `1`. `2` declares that messages on this channel may use the 12-bit `Message Length` extension; see [Application Message Header](#application-message-header-4-bytes). This feed's publishers declare `1`. |
 | 3 | Channel ID | `u8` | Logical channel for instrument sharding. |
 | 4 | Sequence Number | `u64` | Monotonically increasing per channel, starting from 0. Resets to 0 when `Reset Count` changes. Used for gap detection. |
 | 12 | Send Timestamp | `ts_ns` | When the publisher sent this frame. |
@@ -83,13 +83,50 @@ The frame header and application message header are identical on both ports. A s
 
 ## Application Message Header (4 bytes)
 
+This section is the canonical definition of the **common application message header** shared by every feed in this family. It is at **common framing version 0.2.0**; the sibling specs restate it and MUST NOT diverge from it.
+
 Every application message begins with:
+
+```
+ 0                   1                   2                   3
+ 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+| Message Type  |  Length Low   |     Flags     |Rsvd(4)| LenHi |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+```
 
 | Offset | Field | Type | Description |
 |--------|-------|------|-------------|
 | 0 | Message Type | `u8` | See Message Types table. |
-| 1 | Message Length | `u8` | Total message length including this header. Max 255. |
-| 2 | Flags | `u16` | Bit 0: snapshot (1) vs. incremental (0). Bits 1–15: reserved. |
+| 1 | Length Low | `u8` | Low 8 bits of `Message Length`. |
+| 2 | Flags | `u8` | Bit 0: snapshot (1) vs. incremental (0). Bits 1–7: reserved, MUST be zero on emission and MUST be ignored on receipt. |
+| 3 | Length High / Reserved | `u8` | Low nibble (mask `0x0F`): bits 8–11 of `Message Length`. High nibble (mask `0xF0`): reserved, MUST be zero on emission and MUST be ignored on receipt. |
+
+`Message Length` is a **12-bit** value assembled from the two length fields, and is the total message length in bytes including this 4-byte header:
+
+```
+Message Length = byte[1] | (byte[3] & 0x0F) << 8      // 0 .. 4095
+```
+
+A publisher MUST set `Message Length` to at least `4`. A subscriber MUST bounds-check it before using it to advance the frame walk: a value below `4` or exceeding the bytes remaining in the frame makes the frame malformed. The 12-bit field admits 4,095 bytes, but the binding limit is the frame: at the 1,232-byte maximum frame size a single message cannot exceed **1,208 bytes**.
+
+### Wire Compatibility with Common Framing 0.1.x
+
+Common framing 0.1.x defined offset 1 as a `u8` `Message Length` capped at 255, and offsets 2–3 as a `u16` `Flags` whose bits 1–15 were reserved and MUST be ignored. The 0.2.0 layout is **byte-identical for every message of 255 bytes or fewer**:
+
+- The length's high nibble is zero for such messages, so byte 3 is zero — exactly what a 0.1.x encoder writes as the high byte of a `Flags` value that only ever sets bit 0.
+- A 0.1.x decoder reading `Flags` as a little-endian `u16` sees the length extension nibble in bits 8–11, which 0.1.x already required it to ignore. Bit 0 stays at the same bit of the same byte.
+
+So the widening costs existing publishers and subscribers nothing: no encoder or decoder change is required for any message that already fits in 255 bytes, and no feed's existing messages change on the wire.
+
+The one thing an 8-bit-length decoder cannot do is walk a frame containing a message **longer** than 255 bytes: it would read the low byte alone, mistake a 424-byte message for a 168-byte one, and desynchronize the rest of the frame. `Schema Version` is the gate:
+
+- `Schema Version = 1` — no message on this channel exceeds 255 bytes. Byte 3 of every application message header is zero.
+- `Schema Version = 2` — messages on this channel MAY use the length extension nibble.
+
+A publisher MUST declare `Schema Version = 2` on every frame of a channel on which it may emit any message longer than 255 bytes, and MUST declare it on **both ports** of that channel, since the schema is a property of the channel rather than of one port. A subscriber that implements only an 8-bit `Message Length` MUST discard frames whose `Schema Version` is greater than `1` rather than walk them. A subscriber that implements the 12-bit length accepts both values.
+
+This feed's messages are all 80 bytes or fewer, so its publishers keep declaring `Schema Version = 1` and its encoding is unchanged. The [Market-by-Price Feed](../market-by-price/spec.md), whose `BookDepth` is 424 bytes, is the first feed in the family to declare `Schema Version = 2`.
 
 ---
 
@@ -312,3 +349,5 @@ Existing field layouts and semantics will not change within the v0.x line withou
 `0x08 Liquidation` was added as a shared trade-companion type; Schema Version remains `1` because old decoders skip it via Message Length.
 
 Asset Class value `5` (Perpetual Future) was added; Schema Version remains `1` because it is a new enumerated value, and decoders already MUST accept any `u8` and treat unknown values as `0` (Unknown).
+
+The common application message header was widened to a 12-bit `Message Length` (**common framing 0.2.0**, defined in [Application Message Header](#application-message-header-4-bytes)) to admit messages longer than 255 bytes on feeds that need them. Every message type on this feed is 80 bytes or fewer, so this feed's wire encoding is unchanged byte-for-byte and its Schema Version remains `1`. Publishers and subscribers of this feed require no change.
