@@ -45,23 +45,25 @@ This document specifies version **0.1.0**: the frame header, application message
 
 ## Depth Parameter
 
-The number of price levels carried per side, *N*, is fixed by this specification at **`N = 5`**. `BookDepth` is therefore a constant-length message (224 bytes), which fits within the `u8` `Message Length` cap of the shared application message header — so this feed reuses the sibling feeds' 4-byte application header verbatim, with no wire changes.
+The number of price levels carried per side, *N*, is fixed by this specification at **`N = 10`**. `BookDepth` is therefore a constant-length message of `24 + 40N` = **424 bytes**, carrying both sides in one atomic refresh.
 
-`N = 5` is the largest value the current framing admits, not an arbitrary preference: message length is `24 + 40N` bytes, and the `u8` `Message Length` cap of 255 gives `N ≤ 5`. Within the framing defined here *N* can only be **reduced**, never raised.
+424 bytes does not fit the 8-bit `Message Length` of common framing 0.1.x, which capped a message at 255 bytes and so capped this feed at *N* = 5. Ten levels per side is the requirement, so the length field was widened family-wide instead: **common framing 0.2.0** makes `Message Length` a 12-bit field (see [Application Message Header](#application-message-header-4-bytes)), and this feed is its first consumer. The widening is byte-compatible for every message of 255 bytes or fewer, so it costs the sibling feeds nothing; what it costs *this* feed is a frame `Schema Version` of `2`, which is how a subscriber that only implements 8-bit lengths knows to discard these frames rather than mis-walk them.
+
+Under 0.2.0 framing the binding constraint on *N* is the datagram budget, not the length field. At the 1,232-byte maximum frame size a single-message frame leaves 1,208 bytes for the payload, so `24 + 40N ≤ 1208` admits *N* ≤ 29. *N* = 10 sits well inside that ceiling and can be **raised** by a future version of this spec, up to 29, with a Schema Version bump; see [Versioning and Forward Compatibility](#versioning-and-forward-compatibility).
+
+The cost of the extra depth is packing density and bandwidth, in that order of severity: at 424 bytes only **two** `BookDepth` messages fit in a frame (`24 + 2 × 424 = 872` bytes) where *N* = 5 fitted five, so a given instrument set needs about 2.5× the datagrams, and each refresh carries 1.9× the bytes. Correctness is unaffected — the message stays fixed-size, two-sided, and atomic. This is the trade weighed deliberately rather than settled by the length field, and it is quantified in [Wire Efficiency and Bandwidth](#wire-efficiency-and-bandwidth).
 
 The number of levels actually populated on each side is carried per-message in the `Bid Levels` and `Ask Levels` fields (`0..N`); levels beyond the populated count are zero-filled. A shallow book (fewer than *N* levels resting) is represented by populating fewer levels, not by a different message.
 
-A subscriber that needs more than *N* levels of depth is not an L2 consumer; that requirement is served by the [Market-by-Order Feed](../market-by-order/spec.md) with client-side aggregation. A deeper `BookDepth` variant would exceed the `u8` `Message Length` cap and needs a framing accommodation not defined in this version; the type ID `0x41` is reserved for it. Do not add it speculatively.
+A subscriber that needs more than *N* levels of depth is not an L2 consumer; that requirement is served by the [Market-by-Order Feed](../market-by-order/spec.md) with client-side aggregation. A deeper book does not need a new message type under 0.2.0 framing — a longer `0x40` is now expressible — so type ID `0x41` stays reserved and unused. Do not add depth speculatively.
 
-The `u8` cap is a property of the shared application message header, not of this feed. If the header is ever widened family-wide — for example, `Message Length` as a 12-bit field with the top 4 bits reserved — the binding constraint on *N* becomes the datagram budget rather than the length field: at the 1,232-byte MTU assumed by [Wire Efficiency and Bandwidth](#wire-efficiency-and-bandwidth), a single-message frame leaves 1,204 bytes for the payload, so `24 + 40N ≤ 1204` admits *N* = 29. That change belongs to the shared header, and therefore to the sibling family as a whole, not to this spec; it is noted here only so the *N* = 5 ceiling is not mistaken for a permanent property of price-aggregated depth.
-
-Because `Bid Levels` and `Ask Levels` saturate at *N*, a count of `5` alone does not say whether the source book holds exactly five levels or more than five. `Update Flags` bits 3 and 4 carry that distinction where the publisher can determine it; see [0x40 BookDepth](#0x40-bookdepth-224-bytes).
+Because `Bid Levels` and `Ask Levels` saturate at *N*, a count of `10` alone does not say whether the source book holds exactly ten levels or more than ten. `Book Flags` bits 3 and 4 carry that distinction where the publisher can determine it; see [0x40 BookDepth](#0x40-bookdepth-424-bytes).
 
 ---
 
 ## Transport Framing
 
-One UDP datagram = one frame. Frames do not span packet boundaries. Multiple application messages may be packed into a single frame. The maximum frame size is **1,232 bytes** to leave room for GRE encapsulation headers used by the DoubleZero network's last-mile delivery. At `N = 5` a `BookDepth` message is 224 bytes, so up to five fit in one frame alongside the frame header.
+One UDP datagram = one frame. Frames do not span packet boundaries. Multiple application messages may be packed into a single frame. The maximum frame size is **1,232 bytes** to leave room for GRE encapsulation headers used by the DoubleZero network's last-mile delivery. At `N = 10` a `BookDepth` message is 424 bytes, so up to two fit in one frame alongside the frame header, with room left over for a `Trade` or `Heartbeat`.
 
 ### Two-Port Channel Model
 
@@ -95,11 +97,11 @@ There is **no snapshot port**. Unlike the market-by-order feed, this feed needs 
 | Offset | Field | Type | Description |
 |--------|-------|------|-------------|
 | 0 | Magic | `u16` | `0x4442` ("DB", wire bytes `[0x42, 0x44]`). Frame delimiter. Distinct from top-of-book `0x445A`, market-by-order `0x4444`, midpoint `0x4D44`, perp-stats `0x4450`, and order-intent `0x494F` to prevent cross-protocol misrouting. A consumer MUST validate that a received frame's `Magic` equals `0x4442` and discard any frame that does not match. |
-| 2 | Schema Version | `u8` | Protocol version. Starts at `1`. |
+| 2 | Schema Version | `u8` | Protocol version. A publisher of this feed MUST set it to `2` on **both ports**, declaring that messages on the channel may use the 12-bit `Message Length` of common framing 0.2.0 — `BookDepth` is 424 bytes. A subscriber that implements only an 8-bit `Message Length` MUST discard these frames; see [Application Message Header](#application-message-header-4-bytes). |
 | 3 | Channel ID | `u8` | Logical channel for instrument sharding. |
 | 4 | Sequence Number | `u64` | Monotonically increasing **per channel per port**, starting from 0. Resets to 0 when `Reset Count` changes. Used for per-port gap detection **and, on `mktdata`, as the per-instrument ordering discriminant** ([Steady State](#steady-state) step 2). The `mktdata` and `refdata` ports each have an independent series. Exactly one publisher host emits a given `(channel, port)` series; see [Single Publisher Host per Channel](#single-publisher-host-per-channel). |
 | 12 | Send Timestamp | `ts_ns` | When the publisher sent this frame. |
-| 20 | Message Count | `u8` | Number of application messages in this frame (1–255). |
+| 20 | Message Count | `u8` | Number of application messages in this frame (1–255). A publisher MUST set it to the exact number of messages it packed. A subscriber MUST validate the message walk against it and discard a frame that disagrees; see [Frame Parsing](#frame-parsing) step 4. At 424 bytes per `BookDepth` a frame carries two of them, so in practice this field is small. |
 | 21 | Reset Count | `u8` | Incremented each time the publisher resets the channel. Subscribers detect a reset by comparing against their last-seen value. Shared across both ports of the channel. |
 | 22 | Frame Length | `u16` | Total frame length in bytes, including this header. A subscriber MUST validate it against the received datagram; see [Frame Parsing](#frame-parsing) step 1. |
 
@@ -115,13 +117,24 @@ Redundant A/B publication remains possible, but the two streams MUST be separate
 
 ## Application Message Header (4 bytes)
 
-Every application message begins with the sibling feeds' standard 4-byte header, unchanged:
+Every application message begins with the common application message header at **common framing 0.2.0**, defined canonically in the [Top-of-Book & Trades Feed spec](../top-of-book/spec.md#application-message-header-4-bytes) and restated here:
 
 | Offset | Field | Type | Description |
 |--------|-------|------|-------------|
 | 0 | Message Type | `u8` | See Message Types table. |
-| 1 | Message Length | `u8` | Total message length including this header. Max 255. `BookDepth` at `N = 5` is 224 bytes, within this cap. |
-| 2 | Flags | `u16` | Bit 0: snapshot (1) vs. incremental (0). Bits 1–15: reserved. Every `BookDepth` is a full refresh and there is no incremental variant, so a publisher MUST set bit 0 to `1` on every `BookDepth` (see [Publisher Behavior](#publisher-behavior) #6). A receiver MUST NOT treat a `BookDepth` with bit 0 clear as a delta: the message is still a full refresh, and the cleared bit is a publisher defect to count, not a different wire semantic. |
+| 1 | Length Low | `u8` | Low 8 bits of `Message Length`. |
+| 2 | Flags | `u8` | Bit 0: snapshot (1) vs. incremental (0). Bits 1–7: reserved, MUST be zero on emission and MUST be ignored on receipt. Every `BookDepth` is a full refresh and there is no incremental variant, so a publisher MUST set bit 0 to `1` on every `BookDepth` (see [Publisher Behavior](#publisher-behavior) #6). A receiver MUST NOT treat a `BookDepth` with bit 0 clear as a delta: the message is still a full refresh, and the cleared bit is a publisher defect to count, not a different wire semantic. |
+| 3 | Length High / Reserved | `u8` | Low nibble (mask `0x0F`): bits 8–11 of `Message Length`. High nibble (mask `0xF0`): reserved, MUST be zero on emission and MUST be ignored on receipt. |
+
+`Message Length` is the 12-bit total message length in bytes including this header:
+
+```
+Message Length = byte[1] | (byte[3] & 0x0F) << 8      // minimum 4
+```
+
+This feed is the first in the family to need the extension nibble: `BookDepth` is 424 bytes, so its length is encoded as `byte[1] = 0xA8`, `byte[3] = 0x01`. Every other message type carried here is 80 bytes or fewer and leaves byte 3 zero.
+
+Because a frame on this feed can carry a message longer than 255 bytes, a publisher MUST declare frame `Schema Version = 2` on both ports of the channel, and a subscriber that implements only an 8-bit `Message Length` MUST discard those frames rather than walk them — reading 424 as 168 would desynchronize the walk. See the canonical section for the full compatibility rule.
 
 ---
 
@@ -137,8 +150,8 @@ Every application message begins with the sibling feeds' standard 4-byte header,
 | `0x06` | EndOfSession | 12 | mktdata | Inherited. No more data for this session. |
 | `0x07` | ManifestSummary | 24 | refdata | Active instrument set summary. Inherited; see the [Reference Data Distribution supplement](../reference-data/spec.md). |
 | `0x08` | Liquidation | 48 | mktdata | Trade-companion annotation. **Identical byte-for-byte to the top-of-book feed's Liquidation.** Emitted in the same frame as its `Trade`. |
-| `0x40` | BookDepth | 224 | mktdata | Fixed-depth top-*N* aggregated book, both sides. The core L2 message. |
-| `0x41` | *(reserved)* | — | — | Reserved for a future deeper `BookDepth` variant. Not defined in this version. |
+| `0x40` | BookDepth | 424 | mktdata | Fixed-depth top-*N* aggregated book, both sides. The core L2 message. |
+| `0x41` | *(reserved)* | — | — | Reserved, unused. A deeper book is a longer `0x40` under common framing 0.2.0, not a new type; see [Depth Parameter](#depth-parameter). |
 
 A decoder encountering an unknown type MUST skip the message using its Message Length field and continue parsing the frame. `Message Length` MUST be bounds-checked before it is used to advance the walk; see [Frame Parsing](#frame-parsing).
 
@@ -160,7 +173,7 @@ The unique key for an instrument is the tuple **`(channel_id, instrument_id)`**.
 
 ### Single Source per Instrument
 
-A `(channel_id, instrument_id)` identifies **one book from one source**. `Source ID` values are assigned by the canonical [Source ID Registry](../sources/spec.md): one stable id per venue, never reused. `0` is reserved by the registry and MUST NOT appear on the wire; a subscriber MUST reject a `BookDepth` carrying `Source ID = 0` ([Frame Parsing](#frame-parsing) step 5).
+A `(channel_id, instrument_id)` identifies **one book from one source**. `Source ID` values are assigned by the canonical [Source ID Registry](../sources/spec.md): one stable id per venue, never reused. `0` is reserved by the registry and MUST NOT appear on the wire; a subscriber MUST reject a `BookDepth` carrying `Source ID = 0` ([Frame Parsing](#frame-parsing) step 6).
 
 A publisher MUST NOT emit `BookDepth` for a single `(channel, instrument)` under more than one `Source ID`; an instrument observed at two venues is two instruments with two `InstrumentDefinition` entries and two `instrument_id` values, not one instrument_id with two sources.
 
@@ -227,7 +240,7 @@ Publishers SHOULD use the most accurate value available; receivers MUST accept a
 | 1 | CLOB |
 | 2 | AMM |
 
-Publishers SHOULD use the most accurate value available; receivers MUST accept any `u8` value and treat unknown values as `0` (Unknown). For an AMM instrument, the publisher discretizes the curve into up to *N* synthetic price levels; see the `AMM-synthetic` level flag in [0x40 BookDepth](#0x40-bookdepth-224-bytes).
+Publishers SHOULD use the most accurate value available; receivers MUST accept any `u8` value and treat unknown values as `0` (Unknown). For an AMM instrument, the publisher discretizes the curve into up to *N* synthetic price levels; see the `AMM-synthetic` level flag in [0x40 BookDepth](#0x40-bookdepth-424-bytes).
 
 ### 0x04 Trade (52 bytes)
 
@@ -285,7 +298,7 @@ Identical to the top-of-book feed's Liquidation message, byte-for-byte. Annotate
 | 20 | Mark Price | `price` | Mark price at liquidation |
 | 28 | Liquidated User | 20B | Liquidated account address |
 
-### 0x40 BookDepth (224 bytes)
+### 0x40 BookDepth (424 bytes)
 
 The core message. A single, fixed-size, two-sided, top-*N* aggregated-depth refresh. Self-contained: it carries the entire top-*N* state of both sides at the source timestamp, and stands alone with no dependence on prior messages.
 
@@ -295,32 +308,32 @@ The core message. A single, fixed-size, two-sided, top-*N* aggregated-depth refr
  0                   1                   2                   3
  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|  Type (0x40)  |  Length (224) |            Flags              |
+|  Type (0x40)  | Len Low(0xA8) |     Flags     |Rsvd(4)|LenHi=1|
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 |                       Instrument ID (u32)                     |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|         Source ID (u16)       |  Update Flags |  Bid Levels   |
+|         Source ID (u16)       |   Book Flags  |  Bid Levels   |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 |  Ask Levels   |            Reserved (3 bytes)                 |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 |                   Source Timestamp (ts_ns)                    |
 |                                                               |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-   ... followed by Bids[0..4] then Asks[0..4], 20 bytes each ...
+   ... followed by Bids[0..9] then Asks[0..9], 20 bytes each ...
 ```
 
 | Offset | Field | Type | Description |
 |--------|-------|------|-------------|
-| 0 | Header | 4B | Type=`0x40`, Length=224 |
+| 0 | Header | 4B | Type=`0x40`, `Message Length`=424 (`Length Low` = `0xA8`, `Length High` nibble = `0x1`) |
 | 4 | Instrument ID | `u32` | Instrument this book applies to |
 | 8 | Source ID | `u16` | Originating source, per the [Source ID Registry](../sources/spec.md). Publishers operating a single source MAY use a fixed value (e.g., `1`). MUST NOT be `0`. |
-| 10 | Update Flags | `u8` | Bit 0: bid side changed. Bit 1: ask side changed. Bit 2: book crossed or locked at capture (informational; see [Crossed and Locked Books](#crossed-and-locked-books)). Bit 3: bid side truncated. Bit 4: ask side truncated (see [Depth Truncation](#depth-truncation)). Bits 5–7 reserved, MUST be zero on emission and MUST be ignored on receipt. Bits 0/1 are informational only; see [Change Flag Semantics](#change-flag-semantics). |
-| 11 | Bid Levels | `u8` | Count of populated bid levels. A publisher MUST set this in `0..5`; a subscriber MUST reject a message where it exceeds `5`. Entries `[Bid Levels..4]` in the `Bids` array are zero-filled. |
-| 12 | Ask Levels | `u8` | Count of populated ask levels. A publisher MUST set this in `0..5`; a subscriber MUST reject a message where it exceeds `5`. Entries `[Ask Levels..4]` in the `Asks` array are zero-filled. |
+| 10 | Book Flags | `u8` | Bit 0: bid side changed. Bit 1: ask side changed. Bit 2: book crossed or locked at capture (informational; see [Crossed and Locked Books](#crossed-and-locked-books)). Bit 3: bid side truncated. Bit 4: ask side truncated (see [Depth Truncation](#depth-truncation)). Bits 5–7 reserved, MUST be zero on emission and MUST be ignored on receipt. Bits 0/1 are informational only; see [Change Flag Semantics](#change-flag-semantics). |
+| 11 | Bid Levels | `u8` | Count of populated bid levels. A publisher MUST set this in `0..10`; a subscriber MUST reject a message where it exceeds `10`. Entries `[Bid Levels..9]` in the `Bids` array are zero-filled. |
+| 12 | Ask Levels | `u8` | Count of populated ask levels. A publisher MUST set this in `0..10`; a subscriber MUST reject a message where it exceeds `10`. Entries `[Ask Levels..9]` in the `Asks` array are zero-filled. |
 | 13 | Reserved | 3B | Padding. A publisher MUST zero these bytes; a receiver MUST ignore them. |
 | 16 | Source Timestamp | `ts_ns` | Timestamp from the originating venue for this book state |
-| 24 | Bids | `Level[5]` | Best-to-worst: index 0 is the best (highest) bid, descending price. |
-| 124 | Asks | `Level[5]` | Best-to-worst: index 0 is the best (lowest) ask, ascending price. |
+| 24 | Bids | `Level[10]` | Best-to-worst: index 0 is the best (highest) bid, descending price. |
+| 224 | Asks | `Level[10]` | Best-to-worst: index 0 is the best (lowest) ask, ascending price. |
 
 **Level struct (20 bytes):**
 
@@ -331,19 +344,19 @@ The core message. A single, fixed-size, two-sided, top-*N* aggregated-depth refr
 | 16 | Order Count | `u16` | Number of resting orders aggregated at this level. Saturates at `0xFFFF`. `0` means the venue does not expose the count: a populated level always holds at least one order, so `0` is never a legitimate order count and the value is unambiguous. |
 | 18 | Level Flags | `u16` | Bit 0: implied level. Bit 1: AMM-synthetic level (discretized curve point, not a real resting order). Bits 2–15 reserved, MUST be zero on emission and MUST be ignored on receipt. |
 
-Offset arithmetic: `24 (prefix) + 5 × 20 (bids) + 5 × 20 (asks) = 224` bytes.
+Offset arithmetic: `24 (prefix) + 10 × 20 (bids) + 10 × 20 (asks) = 424` bytes.
 
 **Rules:**
 
-- A side with no liquidity sets its level count to `0`; its entire `Level[5]` array is zeroed. An empty book is a valid message with both counts `0`.
+- A side with no liquidity sets its level count to `0`; its entire `Level[10]` array is zeroed. An empty book is a valid message with both counts `0`.
 - Populated levels are dense from index 0: there are no gaps inside `[0..count)`.
-- `Bid Levels` and `Ask Levels` MUST NOT exceed `5`. The 224-byte message size bounds the *buffer*, not the count: a subscriber MUST NOT index the `Bids`/`Asks` arrays beyond index 4 no matter what count the message declares, and MUST reject a message declaring a larger count per [Frame Parsing](#frame-parsing) step 4.
+- `Bid Levels` and `Ask Levels` MUST NOT exceed `10`. The 424-byte message size bounds the *buffer*, not the count: a subscriber MUST NOT index the `Bids`/`Asks` arrays beyond index 9 no matter what count the message declares, and MUST reject a message declaring a larger count per [Frame Parsing](#frame-parsing) step 5.
 - Bids are ordered by **strictly** descending price, asks by strictly ascending price: a price MUST NOT repeat within a side, since a repeated price means the level was not aggregated. Index 0 of each side is the inside market. A subscriber MUST verify this ordering on every message and treat a side that violates it as unreliable, per [Steady State](#steady-state) step 5 — the publisher requirement is not a guarantee, for the same reason bit 2 is not (see [Crossed and Locked Books](#crossed-and-locked-books)).
 - `Quantity` is the aggregate across all orders resting at that price, not a single order's size. This is the defining difference from the market-by-order feed.
 
 ### Depth Truncation
 
-`Bid Levels` and `Ask Levels` saturate at *N*, so a count of `5` is ambiguous on its own: the source book may hold exactly five levels on that side, or many more. `Update Flags` bit 3 (bid) and bit 4 (ask) resolve it. A publisher MUST set the bit for a side when it knows the source book holds at least one price level beyond the last one carried.
+`Bid Levels` and `Ask Levels` saturate at *N*, so a count of `10` is ambiguous on its own: the source book may hold exactly ten levels on that side, or many more. `Book Flags` bit 3 (bid) and bit 4 (ask) resolve it. A publisher MUST set the bit for a side when it knows the source book holds at least one price level beyond the last one carried.
 
 The bits are **asymmetric in strength**, and consumers must read them that way:
 
@@ -354,11 +367,11 @@ The bits are per-message state, not a change flag; they carry no dependence on a
 
 ### Change Flag Semantics
 
-`Update Flags` bits 0 and 1 are pinned to the **immediately preceding `BookDepth` this publisher emitted** for the same `(instrument, Source ID)` within the current `Reset Count` era — emitted, not received, so conflation and packet loss do not change their meaning. On the first `BookDepth` for an instrument in an era (cold start, post-reset, or first admission to the manifest) a publisher MUST set both bits, because there is no predecessor to diff against.
+`Book Flags` bits 0 and 1 are pinned to the **immediately preceding `BookDepth` this publisher emitted** for the same `(instrument, Source ID)` within the current `Reset Count` era — emitted, not received, so conflation and packet loss do not change their meaning. On the first `BookDepth` for an instrument in an era (cold start, post-reset, or first admission to the manifest) a publisher MUST set both bits, because there is no predecessor to diff against.
 
 These bits are **informational only**. A subscriber MUST NOT gate applying the refresh on them: every `BookDepth` is a complete replacement of both sides regardless of the flags, and a receiver that has lost frames will see bits that describe a state transition it never observed. Their intended use is publisher-side observability and cheap change detection by consumers that already trust the emitted sequence.
 
-`Update Flags` bit assignments are **per message type, not shared across the family**. The top-of-book feed's `Quote` uses bit 2 for "bid gone" and bit 3 for "ask gone", which have no counterpart here — an empty side is expressed by a zero level count, and bits 2/3/4 carry crossed-or-locked and per-side truncation instead. A decoder MUST NOT apply one feed's bit-interpretation table to another's messages.
+The field is named `Book Flags`, **not** `Update Flags`, and the distinct name is normative. The top-of-book feed's `Quote` carries an `Update Flags` `u8` at the same offset 10 with incompatible bit meanings — its bit 2 is "bid gone" and bit 3 is "ask gone", where here bit 2 is crossed-or-locked and bit 3 is bid-truncated. Reusing the name would have left a same-name, same-offset, same-type field with different semantics in two feeds, which is a trap for anyone sharing a wire package or generated code across the family; the rename removes it rather than documenting it. An empty side is expressed here by a zero level count, so this feed needs no side-gone bits at all.
 
 ### L1 Consistency
 
@@ -366,7 +379,7 @@ These bits are **informational only**. A subscriber MUST NOT gate applying the r
 
 ### Crossed and Locked Books
 
-A publisher MUST NOT emit a crossed book (`Bids[0].Price > Asks[0].Price`) as a settled state: transient crosses during upstream reordering MUST be resolved before emission (resolve-then-emit). If a publisher's upstream forces it to relay a crossed state it cannot resolve, it MUST set `Update Flags` bit 2 and SHOULD emit the flagged book rather than withhold it — suppressing emission until the book uncrosses freezes `Source Timestamp` in a way a subscriber cannot distinguish from a dying feed, which is the worse failure. A **locked** book (`Bids[0].Price == Asks[0].Price`) is routine on some venues and is not an error; a publisher MAY set bit 2 for it but MUST NOT suppress or delay a locked book.
+A publisher MUST NOT emit a crossed book (`Bids[0].Price > Asks[0].Price`) as a settled state: transient crosses during upstream reordering MUST be resolved before emission (resolve-then-emit). If a publisher's upstream forces it to relay a crossed state it cannot resolve, it MUST set `Book Flags` bit 2 and SHOULD emit the flagged book rather than withhold it — suppressing emission until the book uncrosses freezes `Source Timestamp` in a way a subscriber cannot distinguish from a dying feed, which is the worse failure. A **locked** book (`Bids[0].Price == Asks[0].Price`) is routine on some venues and is not an error; a publisher MAY set bit 2 for it but MUST NOT suppress or delay a locked book.
 
 Subscribers MUST tolerate receiving a book with bit 2 set and treat the inside market as unreliable for that message. Bit 2 is a publisher courtesy, not a guarantee: a subscriber MUST independently check `Bids[0].Price >= Asks[0].Price` on every message with both `Bid Levels` and `Ask Levels` non-zero and treat the inside market as unreliable when it holds, regardless of whether bit 2 is set. Depth beyond index 0 remains usable in both cases.
 
@@ -393,7 +406,7 @@ This feed carries **no per-instrument sequence number and no snapshot recovery**
 1. **Per-port frame sequence.** The frame-header `Sequence Number` (per channel per port) detects lost frames. A gap on `mktdata` means one or more messages were lost. Because every `BookDepth` is a full refresh, recovery is automatic: the next `BookDepth` for an affected instrument fully restores its book. A subscriber never needs to request or await a snapshot. At most it is stale on some instruments for one refresh interval or one re-emission period, whichever is longer.
 
    Automatic recovery depends on that next `BookDepth` actually arriving, which is why the periodic re-emission requirement in [Publisher Behavior](#publisher-behavior) #2 is load-bearing rather than a nicety. A publisher that emitted only on change would leave a quiet instrument — a thin market, a paused venue, a stub after hours — permanently wrong after a single lost frame: the book never changes, so no corrective refresh is ever produced, and the channel keeps looking healthy throughout. Nor could the subscriber notice on its own. Without a re-emission floor there is no expected per-instrument cadence, so silence on an instrument is indistinguishable from a quiet market and an arrival-based staleness check has no threshold to test against; a `Source Timestamp`-based one never fires either, since the timestamp of the last book received simply stops advancing. The re-emission floor is what supplies that threshold, converting every loss into bounded staleness.
-2. **Arrival cadence and channel liveness.** A subscriber detects per-instrument staleness from the **arrival time of the last applied `BookDepth`**, measured against a small multiple of the re-emission period *T*, and detects channel-level silence from the arrival of any `mktdata` frame.
+2. **Arrival cadence and channel liveness.** A subscriber detects per-instrument staleness from the **arrival time of the last applied `BookDepth`**, measured against a small multiple of the re-emission period *T* (which the subscriber MUST be configured with — see [Re-Emission Period *T* Is Subscriber Configuration](#re-emission-period-t-is-subscriber-configuration)), and detects channel-level silence from the arrival of any `mktdata` frame.
 
    Per-instrument staleness MUST NOT be derived from `Source Timestamp` advancing: a re-emission republishes the unchanged timestamp by design, so a quiet-but-healthy instrument's `Source Timestamp` legitimately stands still for as long as its book does. `Source Timestamp` measures the age of the *book state*; arrival cadence measures the health of the *feed*. They answer different questions and a subscriber generally wants both.
 
@@ -401,11 +414,34 @@ This feed carries **no per-instrument sequence number and no snapshot recovery**
 
 Neither mechanism requires book state.
 
+### Re-Emission Period *T* Is Subscriber Configuration
+
+*T* is **not carried on the wire in this version**. It is **REQUIRED out-of-band subscriber configuration**: an operator MUST publish the re-emission period of each channel it runs (alongside the port mapping and the multicast group), and a subscriber MUST be configured with that value before it can perform the per-instrument staleness detection described above.
+
+This is a normative requirement, not a recommendation, because *T* is the only threshold the staleness check has. A subscriber lacking *T*:
+
+- MUST NOT invent one. A guessed threshold is worse than none: too low and every quiet instrument is falsely flagged stale, too high and a dead instrument stays "fresh" for as long as the guess allows.
+- MUST treat per-instrument staleness detection as **unavailable**, and SHOULD surface that degraded state rather than reporting healthy instruments. Channel-level liveness (arrival of any `mktdata` frame) still works and is independent of *T*.
+
+Everything else this feed asks of a subscriber — ordering, source checking, level-count validation, book application — works without *T*. Only staleness detection depends on it, and staleness detection is what makes the re-emission recovery guarantee observable to the party that relies on it, so a deployment that leaves *T* unconfigured has a recovery mechanism it cannot verify.
+
+A future version MAY carry *T* in band — `ManifestSummary` has two reserved bytes at offset 10 that would hold a `u16` seconds value without changing its 24-byte length — but that is a change to the shared [Reference Data Distribution supplement](../reference-data/spec.md) and therefore to every feed that adopts it, not something this spec can do alone. Until then, configuration is the contract.
+
 A subscriber tracks, per instrument, the frame `Sequence Number` of the last `BookDepth` it applied. This feed has no *per-instrument* sequence to bootstrap, but the per-port frame sequence is the ordering discriminant in [Steady State](#steady-state) and is also how loss is measured; see that section for why `Source Timestamp` cannot carry that role.
 
 ---
 
 ## Subscriber Algorithm
+
+Configuration (out of band, per [Re-Emission Period *T* Is Subscriber Configuration](#re-emission-period-t-is-subscriber-configuration)):
+
+```
+channel_config = {
+  re_emission_period_T: duration,      // the publisher's T; REQUIRED for staleness detection
+  staleness_multiple:   number = 3,    // stale when now - last_applied_at > multiple x T
+  future_skew_allowance: duration = 5s // Frame Parsing step 7
+}
+```
 
 State per channel:
 
@@ -420,8 +456,8 @@ channel_state = {
 
 instrument_state = {
   status: "awaiting-refdata" | "ready",
-  bids:   Level[5], bid_count: u8 = 0,   // slots [bid_count..4] unused
-  asks:   Level[5], ask_count: u8 = 0,
+  bids:   Level[10], bid_count: u8 = 0,  // slots [bid_count..9] unused
+  asks:   Level[10], ask_count: u8 = 0,
   source_id:      u16   = null,  // the one Source ID seen for this instrument this era
   last_book_seq:  u64   = null,  // frame seq of the last applied BookDepth; the ordering discriminant
   last_source_ts: ts_ns = 0,     // book-state age and regression counting; NOT an ordering gate
@@ -434,17 +470,20 @@ instrument_state = {
 Before any message-level handling, for each received datagram:
 
 1. **Bound every later step by the bytes actually received, not by a declared length.** Discard a datagram shorter than the 24-byte frame header before reading any field. Then validate `Frame Length`: it MUST be `>= 24` and MUST NOT exceed the received datagram length — a frame declaring more bytes than arrived is malformed (count it, discard it, keep the channel). A `Frame Length` *shorter* than the datagram is trailing padding: parse only the first `Frame Length` bytes and count the discrepancy. Every bound below is taken against this validated length. Without this step the frame-walk ceiling in step 3 rests on a number the sender controls.
-2. Validate the frame header `Magic` equals `0x4442`; discard the datagram if it does not match.
-3. Walk the frame's application messages using each `Message Length`, skipping unknown Type IDs by length. A `Message Length` that is `< 4`, exceeds the bytes remaining in the frame, or is inconsistent with `Frame Length` makes the frame malformed: stop parsing that frame, count it, and keep the channel — do not fail or reset. This guard is not optional. Without the `< 4` floor a `Message Length` of `0` advances the walk by zero bytes and spins forever on a single malformed or misrouted datagram; without the remaining-bytes ceiling an oversized length reads past the datagram. This matches the sibling [Order-Intent Feed](../order-intent/spec.md) parse rule, with the datagram-length validation of step 1 added.
-4. Reject (drop and count) any `BookDepth` whose `Bid Levels` or `Ask Levels` exceeds `5`, before touching the level arrays. The declared count indexes fixed 5-element arrays; the 224-byte message length constrains the buffer but not the count field, so a frame claiming `Bid Levels = 200` would drive a literal implementation past the end of `Bids`. A subscriber MUST NOT index either array beyond index 4 under any circumstances.
-5. Reject (drop and count) any `BookDepth` whose `Source ID` is `0`, which the [Source ID Registry](../sources/spec.md) reserves and forbids on the wire.
-6. Reject (drop and count) any `BookDepth` whose `Source Timestamp` exceeds the local receive time by more than a bounded skew allowance (operator-configured; recommended 5 s, sized to cover ordinary venue clock offset). A far-future timestamp — an upstream NTP step, or a replayed or hostile datagram — is not an ordering hazard (ordering runs on the frame `Sequence Number`; see [Steady State](#steady-state) step 2), but it does poison every timestamp-derived signal: it makes the instrument look permanently fresh to the per-instrument staleness check in [Sequence Numbers, Gaps, and Staleness](#sequence-numbers-gaps-and-staleness), so a genuinely dying feed stops tripping it, and it corrupts any publisher-to-subscriber latency measurement. It is also the only guard on the first `BookDepth` of an era, which has no predecessor sequence to be checked against. No lower bound is applied here; a stale-but-plausible timestamp is handled by the ordering rule and counted as a regression.
+2. Validate the frame header `Magic` equals `0x4442`; discard the datagram if it does not match. Then validate `Schema Version`: a subscriber MUST discard (and count) a frame whose `Schema Version` it does not implement, and in particular an 8-bit-`Message Length` decoder MUST discard frames declaring `2` rather than attempt the walk in step 3. A `Schema Version` of `1` on this feed is a publisher defect — `BookDepth` cannot be expressed under it — and MUST be treated the same way.
+3. Walk the frame's application messages using each `Message Length`, assembled from the 12-bit encoding of [Application Message Header](#application-message-header-4-bytes) (`byte[1] | (byte[3] & 0x0F) << 8`) — **not** from byte 1 alone, which would read a 424-byte `BookDepth` as 168 bytes and desynchronize the rest of the frame. Skip unknown Type IDs by length. A `Message Length` that is `< 4`, exceeds the bytes remaining in the frame, or is inconsistent with `Frame Length` makes the frame malformed: stop parsing that frame, count it, and keep the channel — do not fail or reset. This guard is not optional. Without the `< 4` floor a `Message Length` of `0` advances the walk by zero bytes and spins forever on a single malformed or misrouted datagram; without the remaining-bytes ceiling an oversized length reads past the datagram. This matches the sibling [Order-Intent Feed](../order-intent/spec.md) parse rule, with the datagram-length validation of step 1 added and the widened length field.
+4. **Validate `Message Count`.** The walk MUST yield exactly the frame header's `Message Count` messages and MUST end exactly at `Frame Length`. A mismatch in either direction makes the frame malformed: discard the whole frame, count it, and keep the channel. `Message Count` is not advisory — it is the frame's own statement of how many messages it contains, so a walk that yields a different number means the frame is not what its header says it is, and the messages already walked cannot be trusted individually. Reject the frame **before** applying any of its `BookDepth` messages, not after. A `Message Count` of `0` is invalid: every frame carries at least one message.
+5. Reject (drop and count) any `BookDepth` whose `Bid Levels` or `Ask Levels` exceeds `10`, before touching the level arrays. The declared count indexes fixed 10-element arrays; the 424-byte message length constrains the buffer but not the count field, so a frame claiming `Bid Levels = 200` would drive a literal implementation past the end of `Bids`. A subscriber MUST NOT index either array beyond index 9 under any circumstances.
+6. Reject (drop and count) any `BookDepth` whose `Source ID` is `0`, which the [Source ID Registry](../sources/spec.md) reserves and forbids on the wire.
+7. Reject (drop and count) any `BookDepth` whose `Source Timestamp` exceeds the local receive time by more than a bounded skew allowance (operator-configured; recommended 5 s, sized to cover ordinary venue clock offset). A far-future timestamp — an upstream NTP step, or a replayed or hostile datagram — is not an ordering hazard (ordering runs on the frame `Sequence Number`; see [Steady State](#steady-state) step 2), but it does poison every timestamp-derived signal: it makes the instrument look permanently fresh to the per-instrument staleness check in [Sequence Numbers, Gaps, and Staleness](#sequence-numbers-gaps-and-staleness), so a genuinely dying feed stops tripping it, and it corrupts any publisher-to-subscriber latency measurement. It is also the only guard on the first `BookDepth` of an era, which has no predecessor sequence to be checked against. No lower bound is applied here; a stale-but-plausible timestamp is handled by the ordering rule and counted as a regression.
 
 ### Cold Start
 
 1. Bind both ports. On the first frame from any port, record `reset_count` and initialise per-port `seq_last`.
 2. Build reference-data state per the [Reference Data Distribution supplement](../reference-data/spec.md). As each `InstrumentDefinition` arrives under the current `Manifest Seq`, the corresponding instrument moves from `awaiting-refdata` to `ready`. Instruments not yet in the manifest are ignored.
-3. On each `BookDepth` for a `ready` instrument, replace that instrument's book wholesale with the message contents. There is no buffering, replay, or ordering dependency. Discard `BookDepth` for instruments not in the current manifest.
+3. Process each `BookDepth` for a `ready` instrument exactly as in [Steady State](#steady-state) — the source check, the ordering check, wholesale replacement, and the watermark update all apply from the very first message. Cold start is not a distinct processing mode: it is Steady State with empty per-instrument state, and the era's-first-message cases are handled there. Discard `BookDepth` for instruments not in the current manifest.
+
+   What cold start does *not* need is a bootstrap barrier: no buffering, no replay, and no waiting for a snapshot before the first refresh becomes usable, because each `BookDepth` is itself complete.
 4. An instrument is immediately usable the first time a `BookDepth` for it is applied. There is no channel-wide bootstrap barrier; readiness is per instrument on first refresh.
 
 ### Steady State
@@ -460,10 +499,10 @@ For each `BookDepth` that passed [Frame Parsing](#frame-parsing), arriving for i
 
    `Source Timestamp` is deliberately **not** a second gate. It cannot order a reordered pair in the first place: a venue publishing at millisecond resolution emits equal ns-padded timestamps for both, so the older book would be applied last and, with no further updates, stick. Its role here is staleness detection and regression counting only. The frame `Sequence Number` — per channel per port, monotonic within a `Reset Count` era, and single-host per [Single Publisher Host per Channel](#single-publisher-host-per-channel) — carries ordering alone.
 
-   On the era's first `BookDepth` for `I` there is no `last_book_seq` to compare against and the message is applied as-is; the bounded future-skew guard in [Frame Parsing](#frame-parsing) step 6 is what protects that first application. On a `Reset Count` change all of this state is discarded with the rest of the channel state, so no comparison ever spans eras.
+   On the era's first `BookDepth` for `I` there is no `last_book_seq` to compare against and the message is applied as-is; the bounded future-skew guard in [Frame Parsing](#frame-parsing) step 7 is what protects that first application. On a `Reset Count` change all of this state is discarded with the rest of the channel state, so no comparison ever spans eras.
 3. **Apply.** Replace `I.bids`/`I.asks` and `I.bid_count`/`I.ask_count` wholesale with the message's level arrays and counts. Nothing from the previous book survives.
 4. **Then update the watermarks.** Set `I.last_book_seq`, `I.last_source_ts`, and `I.last_applied_at` from this message. Updating these before step 2's comparison would compare the message against itself, so the check could never fire and a stale datagram would already have been applied.
-5. **Check the book.** Treat the inside market as unreliable if `Bid Levels` and `Ask Levels` are both non-zero and `Bids[0].Price >= Asks[0].Price`, or if `Update Flags` bit 2 is set (see [Crossed and Locked Books](#crossed-and-locked-books)). Independently, verify that each populated side is strictly monotonic in price — descending for bids, ascending for asks — and treat a side that is not as unreliable and count it; an unsorted or duplicate-price side breaks every cumulative-depth and VWAP computation, and like bit 2 the publisher requirement is not something the wire enforces.
+5. **Check the book.** Treat the inside market as unreliable if `Bid Levels` and `Ask Levels` are both non-zero and `Bids[0].Price >= Asks[0].Price`, or if `Book Flags` bit 2 is set (see [Crossed and Locked Books](#crossed-and-locked-books)). Independently, verify that each populated side is strictly monotonic in price — descending for bids, ascending for asks — and treat a side that is not as unreliable and count it; an unsorted or duplicate-price side breaks every cumulative-depth and VWAP computation, and like bit 2 the publisher requirement is not something the wire enforces.
 
 Out-of-order full refreshes are safe to drop because a newer one supersedes them; `last_book_seq` is load-bearing for this ordering check, and additionally useful for measuring loss.
 
@@ -471,7 +510,7 @@ A publisher that violates [Publisher Behavior](#publisher-behavior) #10 by packi
 
 ### Gap, Reset, and Manifest Handling
 
-- **`mktdata` frame gap:** no action required beyond noting loss. The next `BookDepth` per instrument restores state, within one refresh interval or one re-emission period *T*, whichever is longer. There is no `gap` status and no recovery flow. A subscriber MAY treat an instrument whose last applied `BookDepth` is older than a small multiple of *T* as stale, since the publisher's re-emission floor means silence that long is a fault, not a quiet market.
+- **`mktdata` frame gap:** no action required beyond noting loss. The next `BookDepth` per instrument restores state, within one refresh interval or one re-emission period *T*, whichever is longer. There is no `gap` status and no recovery flow. A subscriber configured with *T* MAY treat an instrument whose last applied `BookDepth` is older than a small multiple of it as stale, since the publisher's re-emission floor means silence that long is a fault, not a quiet market; a subscriber without *T* cannot make this determination at all (see [Re-Emission Period *T* Is Subscriber Configuration](#re-emission-period-t-is-subscriber-configuration)).
 - **`Reset Count` change on any port:** discard all channel state and restart from Cold Start.
 - **`Manifest Seq` change on `refdata`:** per the supplement — drop instruments no longer in the manifest, admit new ones (they become `ready` on their first `BookDepth`), retain surviving instruments' books.
 - **`EndOfSession` on `mktdata`:** the publisher has stopped emitting for this session. A subscriber MUST mark every instrument's book stale at that point and MUST NOT continue serving the last-known books as live; whether it clears them or retains them as last-known-values is an application policy. Books do not resume on their own: the next session arrives with an incremented `Reset Count`, which discards channel state and restarts from Cold Start. A subscriber that keeps consuming after `EndOfSession` without marking staleness will serve an indefinitely frozen book with no signal that anything is wrong.
@@ -483,18 +522,20 @@ A publisher that violates [Publisher Behavior](#publisher-behavior) #10 by packi
 A publisher operating the `mktdata` port MUST:
 
 1. For each instrument, maintain the current top-*N* aggregated book and emit it as a `BookDepth` whenever it changes, subject to the operator's conflation cadence.
-2. **Re-emit each active instrument's current `BookDepth` at least once every re-emission period *T*, even when the book has not changed** (recommended *T* = 30 s, aligned with the definition cycle). This is the feed's only loss-recovery mechanism: without it, a `BookDepth` lost to a dropped frame on an instrument that then stops changing is never corrected. A re-emission repeats the previous message's payload — the same levels, counts and unchanged `Source Timestamp` — with `Update Flags` bits 0 and 1 clear; bits 2, 3 and 4 describe the current state at re-emission time and MAY therefore differ from the message being repeated. Re-emissions MAY be paced across *T* to spread the load rather than bursting the whole instrument set at once. An instrument is *active* while it is in the current manifest; a publisher MUST NOT re-emit for instruments dropped from the manifest.
+2. **Re-emit each active instrument's current `BookDepth` at least once every re-emission period *T*, even when the book has not changed** (recommended *T* = 30 s, aligned with the definition cycle), and **publish the channel's *T* out of band** so subscribers can be configured with it, per [Re-Emission Period *T* Is Subscriber Configuration](#re-emission-period-t-is-subscriber-configuration). This is the feed's only loss-recovery mechanism: without it, a `BookDepth` lost to a dropped frame on an instrument that then stops changing is never corrected; without the published *T*, subscribers cannot detect when it has failed. A re-emission repeats the previous message's payload — the same levels, counts and unchanged `Source Timestamp` — with `Book Flags` bits 0 and 1 clear; bits 2, 3 and 4 describe the current state at re-emission time and MAY therefore differ from the message being repeated. Re-emissions MAY be paced across *T* to spread the load rather than bursting the whole instrument set at once. An instrument is *active* while it is in the current manifest; a publisher MUST NOT re-emit for instruments dropped from the manifest.
 3. Order bid levels by strictly descending price and ask levels by strictly ascending price, dense from index 0, with no price repeated within a side, and set `Bid Levels`/`Ask Levels` to the populated counts. Zero-fill unused level slots.
 4. Aggregate `Quantity` across all resting orders at each price, and set `Order Count` when the venue exposes it (else `0`), saturating at `0xFFFF`.
-5. Resolve transient crossed books before emission, or set `Update Flags` bit 2 per [Crossed and Locked Books](#crossed-and-locked-books).
+5. Resolve transient crossed books before emission, or set `Book Flags` bit 2 per [Crossed and Locked Books](#crossed-and-locked-books).
 6. Set application-header Flags bit 0 (snapshot) to `1` on every `BookDepth`.
-7. Set `Update Flags` bits 0/1 relative to the immediately preceding emitted `BookDepth` for the same `(instrument, Source ID)` in this `Reset Count` era, setting both on the era's first message, per [Change Flag Semantics](#change-flag-semantics).
-8. Set `Update Flags` bits 3/4 per [Depth Truncation](#depth-truncation) when the source book is known to hold levels beyond those carried, and leave them clear otherwise. Zero the reserved bits (5–7) and the 3 reserved bytes at offset 13.
+7. Set `Book Flags` bits 0/1 relative to the immediately preceding emitted `BookDepth` for the same `(instrument, Source ID)` in this `Reset Count` era, setting both on the era's first message, per [Change Flag Semantics](#change-flag-semantics).
+8. Set `Book Flags` bits 3/4 per [Depth Truncation](#depth-truncation) when the source book is known to hold levels beyond those carried, and leave them clear otherwise. Zero the reserved bits (5–7) and the 3 reserved bytes at offset 13.
 9. Emit at most one `Source ID` per `(channel, instrument)`, never `0`, per [Single Source per Instrument](#single-source-per-instrument).
 10. Pack at most one `BookDepth` per instrument into any one frame. Two refreshes of the same instrument would share a frame `Sequence Number`, which the subscriber's ordering check ([Steady State](#steady-state) step 2) uses as its discriminant — the subscriber would keep the first and silently discard the later, newer one. Conflation makes compliance free, since only the latest state need ever be emitted.
 11. Emit exactly one sequence series per `(channel, port)` from exactly one host, per [Single Publisher Host per Channel](#single-publisher-host-per-channel).
 12. Emit `Heartbeat` on `mktdata` at the operator-defined heartbeat interval (recommended 1 s) when otherwise idle. Note that a channel meeting the re-emission floor over a non-trivial instrument set is rarely idle, so heartbeats are a fallback signal, not the primary liveness indicator.
 13. Emit `Trade` (and `Liquidation` where applicable) on `mktdata` when the upstream has a venue-level trade concept. Trades are independent of `BookDepth` and are not required to reconstruct the book.
+14. Set frame `Schema Version` to `2` on both ports of the channel, and encode every `Message Length` per the 12-bit rule of [Application Message Header](#application-message-header-4-bytes) — `BookDepth` as `Length Low` = `0xA8` with `Length High` nibble `0x1`, every other message type with a zero extension nibble.
+15. Set frame `Message Count` to the exact number of application messages packed into the frame, and `Frame Length` to the exact total byte count. Subscribers validate the message walk against both and discard frames that disagree ([Frame Parsing](#frame-parsing) step 4).
 
 A publisher operating the `refdata` port MUST follow the cadence and atomicity rules in the [Reference Data Distribution supplement](../reference-data/spec.md), identical to the sibling feeds.
 
@@ -517,15 +558,17 @@ The publisher MUST follow the cadence and atomicity rules in the [Reference Data
 
 ## Wire Efficiency and Bandwidth
 
-At `N = 5`, one `BookDepth` is **224 bytes** of application payload, or 248 bytes including the frame header for a single-message frame. Five `BookDepth` messages plus the frame header is 1,144 bytes, within the 1,232-byte MTU.
+At `N = 10`, one `BookDepth` is **424 bytes** of application payload, or 448 bytes including the frame header for a single-message frame. Two `BookDepth` messages plus the frame header is 872 bytes, within the 1,232-byte MTU, leaving 360 bytes for a `Trade`, a `Liquidation`, or a `Heartbeat` alongside them.
 
-Per-instrument bandwidth is governed by the conflation cadence, because each refresh is a fixed 224 bytes regardless of how much changed:
+Per-instrument bandwidth is governed by the conflation cadence, because each refresh is a fixed 424 bytes regardless of how much changed:
 
-- At a 100 Hz per-instrument cap: `224 B × 100 ≈ 22.4 KB/s ≈ 179 Kbps` per actively-updating instrument.
-- At 50 Hz: about 90 Kbps per instrument.
-- A quiet instrument costs proportionally less, with a floor set by the re-emission period: at *T* = 30 s that floor is `224 / 30 ≈ 7.5 B/s ≈ 60 bps` per idle instrument. Even 10,000 idle instruments re-emit at only about 600 Kbps aggregate, so the recovery guarantee is effectively free.
+- At a 100 Hz per-instrument cap: `424 B × 100 ≈ 42.4 KB/s ≈ 339 Kbps` per actively-updating instrument.
+- At 50 Hz: about 170 Kbps per instrument.
+- A quiet instrument costs proportionally less, with a floor set by the re-emission period: at *T* = 30 s that floor is `424 / 30 ≈ 14.1 B/s ≈ 113 bps` per idle instrument. Even 10,000 idle instruments re-emit at only about 1.1 Mbps aggregate, so the recovery guarantee remains effectively free.
 
-For a channel of *M* actively-updating instruments at cadence *f* Hz, aggregate `≈ M × 224 × f` bytes/s. Sharding across channels divides *M* per channel. Because the message is fixed-size, deep-book venues and shallow-book venues cost the same per refresh; the lever is *f*, not book depth.
+For a channel of *M* actively-updating instruments at cadence *f* Hz, aggregate `≈ M × 424 × f` bytes/s. Sharding across channels divides *M* per channel. Because the message is fixed-size, deep-book venues and shallow-book venues cost the same per refresh; the lever is *f*, not book depth.
+
+**What ten levels cost.** Against the *N* = 5 shape this feed was first drafted with, both bandwidth and datagram count roughly double: 424 bytes per refresh instead of 224 (1.9×), and two instruments per frame instead of five, so a given instrument set needs about 2.5× as many datagrams at the same cadence. The packing loss is the sharper of the two, since datagram rate — not bit rate — is what a receiving NIC and kernel feel. Both are bounded and both are the price of the depth the consumers require; the levers for an operator that finds either too high are the conflation cadence *f* and channel sharding, not *N*, which is fixed by this specification.
 
 The format is fixed-size and binary, so parsing requires no allocation, no string handling, and no schema negotiation on the market data path.
 
@@ -536,7 +579,7 @@ The format is fixed-size and binary, so parsing requires no allocation, no strin
 Sibling of the [Top-of-Book & Trades Feed](../top-of-book/spec.md), the [Market-by-Order Feed](../market-by-order/spec.md), and the [Midpoint Feed](../midpoint/spec.md). Shared:
 
 - The 24-byte frame header layout (except the `Magic` value).
-- The 4-byte application message header, unchanged (`BookDepth` fits the `u8` `Message Length` cap at `N = 5`).
+- The 4-byte application message header at **common framing 0.2.0**, whose 12-bit `Message Length` this feed is the first to need (`BookDepth` is 424 bytes). The widening is byte-compatible with 0.1.x for every message of 255 bytes or fewer, so the sibling feeds' encodings are unchanged; see the canonical [Application Message Header](../top-of-book/spec.md#application-message-header-4-bytes).
 - The [Reference Data Distribution supplement](../reference-data/spec.md), including `InstrumentDefinition` (`0x02`) and `ManifestSummary` (`0x07`).
 - The cross-spec Type IDs `0x01`, `0x04`, `0x06`, `0x07`, `0x08` byte-for-byte.
 - The session-lifecycle and `Reset Count` patterns and the forward-compatibility rules.
@@ -546,7 +589,9 @@ Distinctions of this feed:
 - **Two-port** channel model (`mktdata` + `refdata`); no snapshot port, because refreshes are self-contained.
 - **Stateless full-refresh** delivery: no per-instrument sequence, no snapshot/delta recovery, no book maintenance required of the subscriber. Loss is repaired by the next refresh, with periodic re-emission bounding how long that takes. Consistency vs. L1: `BookDepth` level 0 equals the `Quote` BBO for the same source and `Source Timestamp` (see [L1 Consistency](#l1-consistency)); the two feeds conflate independently, so they are not instant-by-instant equal. Relationship to L3: `BookDepth` is the price-aggregated projection of the same book the market-by-order feed carries order-by-order, truncated to *N* levels per side — a consumer that needs the untruncated book uses the market-by-order feed and aggregates client-side.
 - **One publisher host per `(channel, port)`**, a stricter deployment constraint than the order-intent feed's, because the frame `Sequence Number` orders book application here rather than serving only as a health signal (see [Single Publisher Host per Channel](#single-publisher-host-per-channel)).
-- L2-specific payload lives at `0x40` (`BookDepth`), with `0x41` reserved for a future deeper variant. The `0x40`–`0x4F` range does not overlap any sibling feed.
+- L2-specific payload lives at `0x40` (`BookDepth`), with `0x41` reserved and unused. The `0x40`–`0x4F` range does not overlap any sibling feed.
+- **Frame `Schema Version` `2`**, the only feed in the family to declare it: `BookDepth` at 424 bytes uses the 12-bit `Message Length` extension, and the version byte is what tells an 8-bit-length decoder to discard these frames instead of mis-walking them.
+- **Deeper by design**: ten price levels per side, against one for top-of-book and one derived price for midpoint. The depth costs packing density — two instruments per frame — which is the explicit trade recorded in [Wire Efficiency and Bandwidth](#wire-efficiency-and-bandwidth).
 
 A publisher MAY operate any subset of the sibling feeds for the same instruments simultaneously. Subscribers MAY consume any subset independently.
 
@@ -554,11 +599,12 @@ A publisher MAY operate any subset of the sibling feeds for the same instruments
 
 ## Versioning and Forward Compatibility
 
-This document is version **0.1.0**, versioned independently of the sibling feed specs. The Schema Version byte in the frame header is `1` for this release. Future versions MAY:
+This document is version **0.1.0**, versioned independently of the sibling feed specs. It requires **common framing 0.2.0** (the 12-bit `Message Length`), and the Schema Version byte in the frame header is `2` for this release — see [Application Message Header](#application-message-header-4-bytes). Future versions MAY:
 
 - Append new fields to existing messages (old decoders ignore trailing bytes within the declared length).
-- Define new message types in reserved type-ID ranges (old decoders skip unknown types via the length field), including a deeper `BookDepth` variant at `0x41`.
-- Define new values for enumerated fields and new `Update Flags` / `Level Flags` bits. Decoders MUST accept any value and ignore unknown bits.
-- **Reduce** the depth constant *N* (requires a Schema Version bump, since it changes `BookDepth`'s length). *N* cannot be **raised** under the current framing at all: `BookDepth` is `24 + 40N` bytes and the `u8` `Message Length` cap of 255 puts the ceiling at `N = 5`, where this version already sits. While the shared application message header keeps its `u8` `Message Length`, a deeper book requires the framing accommodation reserved at type ID `0x41` — a new message type, not a longer `0x40` — because a length that does not fit `u8` cannot be expressed in that header at all. A family-wide widening of `Message Length` would remove that constraint and make a longer `0x40` expressible, superseding the need for `0x41`; such a change is not in the gift of this spec. See [Depth Parameter](#depth-parameter).
+- Define new message types in reserved type-ID ranges (old decoders skip unknown types via the length field).
+- Define new values for enumerated fields and new `Book Flags` / `Level Flags` bits. Decoders MUST accept any value and ignore unknown bits.
+- **Raise or reduce** the depth constant *N*, which changes `BookDepth`'s length and therefore requires a Schema Version bump. Under 0.2.0 framing the ceiling is the datagram budget: `24 + 40N ≤ 1208` at the 1,232-byte maximum frame size admits *N* ≤ 29. A deeper book is a longer `0x40`, not a new message type — which is why `0x41` is reserved but unused. Raising *N* costs packing density and per-instrument bandwidth proportionally (see [Wire Efficiency and Bandwidth](#wire-efficiency-and-bandwidth)), so it should follow a stated consumer requirement rather than available headroom.
+- Carry the re-emission period *T* in band, by defining the two reserved bytes at `ManifestSummary` offset 10 as a `u16` seconds value. That is a change to the shared [Reference Data Distribution supplement](../reference-data/spec.md) and belongs to the family, not to this spec; until it happens *T* is required subscriber configuration (see [Re-Emission Period *T* Is Subscriber Configuration](#re-emission-period-t-is-subscriber-configuration)).
 
 Existing field layouts and semantics will not change within the v0.x line without a Schema Version bump.
