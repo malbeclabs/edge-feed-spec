@@ -23,7 +23,7 @@ This document specifies version **0.1.1**: the transport, message types, `PerpSt
 
 This feed uses the same 24-byte frame header and 4-byte application message header as the top-of-book feed. These are defined in the [Top-of-Book & Trades Feed spec](../top-of-book/spec.md) and are not restated here — **except for the `Magic` value**.
 
-The frame `Magic` is `0x4450` ("DP", wire bytes `[0x50, 0x44]`). It is distinct from the top-of-book feed's `0x445A`, the market-by-order feed's `0x4444`, the midpoint feed's `0x4D44`, and the order-intent feed's `0x494F`, to prevent cross-protocol misrouting. A consumer MUST validate that a received frame's `Magic` equals the value for the feed it subscribed to and discard any frame that does not match (for example, another sibling feed's traffic arriving from a misconfigured multicast group). The `Magic` is the only frame-header field that differs from the top-of-book feed.
+The frame `Magic` is `0x4450` ("DP", wire bytes `[0x50, 0x44]`). It is distinct from the top-of-book feed's `0x445A`, the market-by-order feed's `0x4444`, the midpoint feed's `0x4D44`, the order-intent feed's `0x494F`, and the market-by-price feed's `0x4442`, to prevent cross-protocol misrouting. A consumer MUST validate that a received frame's `Magic` equals the value for the feed it subscribed to and discard any frame that does not match (for example, another sibling feed's traffic arriving from a misconfigured multicast group). The `Magic` is the only frame-header field that differs from the top-of-book feed.
 
 ### Two-Port Channel Model
 
@@ -228,4 +228,4 @@ The DoubleZero Perp Stats Feed is one of a family of sibling protocols sharing f
 - The **[Market-by-Order Feed](../market-by-order/spec.md)** carries the full resting-order population per instrument.
 - The **Perp Stats Feed** (this document) carries per-perpetual derived state — funding, mark, oracle, OI, premium — relayed from the venue REST surface on a cadence path.
 
-Sibling feeds share the 24-byte frame header, the 4-byte application message header, and the forward-compatibility rules. They differ in magic value, message type table, and payload. Sibling feeds MUST use distinct Magic values and SHOULD use distinct multicast groups. The Perp Stats feed's `Magic` is `0x4450` (vs. `0x445A` top-of-book, `0x4444` market-by-order, `0x4D44` midpoint, `0x494F` order-intent).
+Sibling feeds share the 24-byte frame header, the 4-byte application message header, and the forward-compatibility rules. They differ in magic value, message type table, and payload. Sibling feeds MUST use distinct Magic values and SHOULD use distinct multicast groups. The Perp Stats feed's `Magic` is `0x4450` (vs. `0x445A` top-of-book, `0x4444` market-by-order, `0x4D44` midpoint, `0x494F` order-intent, `0x4442` market-by-price).

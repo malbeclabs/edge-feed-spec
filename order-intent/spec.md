@@ -77,7 +77,7 @@ v1 uses a single channel (ID 0). The frame header supports instrument sharding a
 
 | Offset | Field | Type | Description |
 |--------|-------|------|-------------|
-| 0 | Magic | `u16` | `0x494F` ("OI", wire bytes `[0x4F, 0x49]`). Frame delimiter. Distinct from the top-of-book feed's `0x445A`, the market-by-order feed's `0x4444`, and the midpoint feed's `0x4D44` to prevent cross-protocol misrouting. |
+| 0 | Magic | `u16` | `0x494F` ("OI", wire bytes `[0x4F, 0x49]`). Frame delimiter. Distinct from the top-of-book feed's `0x445A`, the market-by-order feed's `0x4444`, the midpoint feed's `0x4D44`, and the market-by-price feed's `0x4442` to prevent cross-protocol misrouting. |
 | 2 | Schema Version | `u8` | Protocol version. Starts at `1`. |
 | 3 | Channel ID | `u8` | Logical channel for instrument sharding. `0` in v1. |
 | 4 | Sequence Number | `u64` | Monotonically increasing **per publisher host, per channel, per port**, starting from 0. Resets to 0 when `Reset Count` changes. Used for per-port gap detection. The `mktdata` and `refdata` ports each have an independent series. The frame header carries no Source ID, so a subscriber binding several hosts on one multicast group sees one independent sequence series **per originating host** and MUST track them keyed by transport origin (the datagram's source IP and destination port; each host of a venue publishes on a distinct destination port, and the per-host port offset is a deployment convention defined out of band, not by this spec). Hosts of one venue all carry the **same** Source ID (per-venue; see [Common Event Fields](#common-event-fields)), so the host is identified by transport, not by the in-message Source ID. Sequence gaps are a per-host, per-channel, per-port health signal and never gate delivery. |
@@ -441,7 +441,7 @@ The DoubleZero Order-Intent Feed is a sibling of the [Top-of-Book & Trades Feed]
 
 Distinctions of the order-intent feed:
 
-- `Magic` is `0x494F` (vs. `0x445A` top-of-book, `0x4444` market-by-order, `0x4D44` midpoint).
+- `Magic` is `0x494F` (vs. `0x445A` top-of-book, `0x4444` market-by-order, `0x4D44` midpoint, `0x4442` market-by-price).
 - It has **no session-boundary message** — the siblings end a session with `EndOfSession` (`0x06`); this real-time intent stream has no session concept (a publisher restart is signaled by a `Reset Count` change), so `0x06` is reserved and unused.
 - It carries **pre-consensus intent**, not accepted book state — events are observed submissions, never fills (see [Trust semantics](#doublezero-order-intent-feed)).
 - It does **not** carry `Trade` (`0x04`) or any quote/book payload; those Type IDs are not used here.

@@ -79,7 +79,7 @@ The snapshot stream has a fundamentally different traffic shape from the delta s
 
 | Offset | Field | Type | Description |
 |--------|-------|------|-------------|
-| 0 | Magic | `u16` | `0x4444`. Frame delimiter. Distinct from the top-of-book feed's `0x445A` and the midpoint feed's `0x4D44` to prevent cross-protocol misrouting. |
+| 0 | Magic | `u16` | `0x4444`. Frame delimiter. Distinct from the top-of-book feed's `0x445A`, the midpoint feed's `0x4D44`, and the market-by-price feed's `0x4442` to prevent cross-protocol misrouting. |
 | 2 | Schema Version | `u8` | Protocol version. Starts at `1`. |
 | 3 | Channel ID | `u8` | Logical channel for instrument sharding. |
 | 4 | Sequence Number | `u64` | Monotonically increasing **per channel per port**, starting from 0. Resets to 0 when `Reset Count` changes. Used for per-port gap detection. The `mktdata`, `refdata`, and `snapshot` ports each have an independent `Sequence Number` series; see [Sequence Numbers and Recovery](#sequence-numbers-and-recovery) for how the series relate. |
@@ -761,7 +761,7 @@ The DoubleZero Market-by-Order Feed is a sibling of the [Top-of-Book & Trades Fe
 - The forward-compatibility rules.
 
 Distinctions of the market-by-order feed:
-- `Magic` is `0x4444` (vs. `0x445A` top-of-book, `0x4D44` midpoint).
+- `Magic` is `0x4444` (vs. `0x445A` top-of-book, `0x4D44` midpoint, `0x4442` market-by-price).
 - Three-port channel model (vs. two).
 - Market-by-order-specific payload Type IDs live in `0x10` and above.
 
