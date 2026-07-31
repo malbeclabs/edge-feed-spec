@@ -20,7 +20,7 @@ This document specifies the frame header, application message header, the messag
 8. **In-band recovery only.** Subscribers bootstrap and recover from packet loss via a continuous publisher-driven snapshot stream. No TCP replay, no out-of-band snapshot service, no subscriber-initiated requests.
 9. **Recovery blast radius minimised.** A single lost multicast packet invalidates only the specific instruments whose deltas were in the lost frame, not the whole channel. A per-instrument sequence number carried on every delta message lets subscribers localise the loss.
 10. **Price-keyed, absolute quantity.** A level is identified by its `(Side, Price)`, never by a positional index, and carries the absolute aggregate quantity resting there rather than a signed change. A level update is therefore independently interpretable and cannot compound an earlier error.
-11. **Full depth.** Every price level with resting quantity is carried. A subscriber needing only the inside market is served by the top-of-book feed; this feed does not truncate.
+11. **Depth is carried, and its extent is declared.** The feed is built for the complete book — every price level with resting quantity — and that is the expected case. Where a publisher genuinely cannot observe the whole book it declares the bound rather than presenting a truncated book as complete, so a consumer always knows which it is holding. A subscriber needing only the inside market is served by the top-of-book feed.
 
 ---
 
@@ -101,6 +101,8 @@ Every application message begins with:
 | 0 | Message Type | `u8` | See Message Types table. |
 | 1 | Message Length | `u8` | Total message length including this header. Max 255. |
 | 2 | Flags | `u16` | Bit 0: snapshot (1) vs. incremental (0). Bits 1–15: reserved. |
+
+A publisher MUST set bit 0 on `SnapshotBegin`, `SnapshotLevel` and `SnapshotEnd`, and MUST clear it on every message carried on `mktdata` and `refdata`. This feed is the second sibling with a dedicated snapshot stream, and the bit has until now been defined but never assigned a normative setting anywhere in the family; pinning it here makes it verifiable from a capture. A subscriber MUST NOT rely on it to route a message — the Type ID and the port already determine that — and SHOULD count messages whose bit disagrees with the port they arrived on, as a publisher defect.
 
 No message type on this feed exceeds 80 bytes, so the 255-byte cap is not a binding constraint here.
 
@@ -373,7 +375,9 @@ Each is a publisher defect or an undetected loss, and each is worth surfacing. N
 
 #### Level Index
 
-`Level Index` is the level's rank on its side at the moment the publisher emitted the message, with `0` being the inside market. It is provided so consumers can cheaply filter for updates affecting the top of the book without maintaining their own rank computation, and to preserve rank information from venues whose upstream provides it.
+`Level Index` is the level's rank on its side at the moment the publisher emitted the message, with `0` being the inside market. It exists to preserve rank where an upstream supplies it — a venue whose native feed identifies levels positionally loses that information entirely under price keying — and to hold the concept open should the reserved positional-addressing mode of `0x50`–`0x5F` ever be defined.
+
+It is deliberately not justified as a filtering aid. A subscriber maintains a price-ordered book to consume this feed at all, and bootstraps from a snapshot where rank is not carried, so rank is an O(1) lookup it already has; a wire field would be redundant with the container and staler than it.
 
 It is **not** part of the addressing model and carries no guarantees. A subscriber MUST NOT key book state on it, MUST NOT use it to locate a level, and MUST NOT treat it as valid after any subsequent update to the same side — inserting a level changes the rank of every level beneath it, and this feed does not re-emit those levels. Publishers that cannot supply a rank MUST set `0xFFFF`.
 
@@ -509,7 +513,11 @@ Publishers MUST NOT interleave two snapshot groups for different instruments on 
 
 An instrument with an empty book at capture time is represented by `SnapshotBegin(total_levels=0)` immediately followed by `SnapshotEnd` with no intervening `SnapshotLevel` messages.
 
-**`Depth Bound` exists because a consumer cannot otherwise distinguish "the book ends here" from "the publisher stopped here."** Conflating the two silently under-states available liquidity, which is precisely the failure mode a full-depth feed exists to avoid. Publishers carrying the complete book — the expected case, per design principle 11 — MUST set `0`. A publisher structurally unable to observe the whole book MUST declare the bound rather than present a truncated book as complete, and subscribers MUST treat levels beyond a declared bound as unknown, excluding them from any calculation that assumes an exhaustive book.
+**`Depth Bound` exists because a consumer cannot otherwise distinguish "the book ends here" from "the publisher stopped here."** Conflating the two silently under-states available liquidity, which is precisely the failure mode a full-depth feed exists to avoid. Publishers carrying the complete book — the expected case — MUST set `0`. A publisher structurally unable to observe the whole book MUST declare the bound rather than present a truncated book as complete, and subscribers MUST treat levels beyond a declared bound as unknown, excluding them from any calculation that assumes an exhaustive book.
+
+**A subscriber's depth bound for an instrument is unknown until a `SnapshotBegin` for it establishes one, and MUST default to unknown rather than to `0`.** Defaulting to `0` would make a never-snapshotted instrument assert completeness — the exact failure this field exists to prevent, arrived at through the subscriber's own initialisation rather than through anything the publisher sent. The distinction is between the wire value `0`, which is a positive claim of completeness a publisher made, and the absence of any claim.
+
+The same applies to a subscriber that binds only `mktdata` + `refdata` and forgoes the in-band snapshot stream, as [Three-Port Channel Model](#three-port-channel-model) permits: it never receives a `SnapshotBegin`, so it never learns the bound, and it MUST treat depth as unknown for every instrument on the channel for as long as that holds.
 
 ### 0x42 SnapshotLevel (32 bytes)
 
@@ -605,7 +613,8 @@ instrument_state = {
   status: "awaiting-refdata" | "awaiting-snapshot" | "building-snapshot" | "ready" | "gap",
   book: { bids: sorted map<price, level_state> descending by price,
           asks: sorted map<price, level_state> ascending by price },
-  depth_bound:                 u32 = 0,
+  depth_bound:                 null | u32 = null,   // null = unknown; 0 = complete book;
+                                                    // N = bounded at N levels per side
   last_applied_mktdata_seq:    u64 = null,
   last_applied_instrument_seq: u32 = null,
   required_anchor_seq:         u64 = null,   // set by InstrumentReset; snapshots older than
@@ -760,7 +769,8 @@ A publisher operating the `snapshot` port MUST:
 3. NOT interleave two snapshot groups for different instruments. All frames on the `snapshot` port carrying levels for one instrument MUST precede the first frame carrying levels for another instrument.
 4. Complete one full round-robin cycle (one snapshot per active instrument) within the configured **snapshot cycle period**.
 5. Include an instrument with an empty book at capture time as `SnapshotBegin(total_levels=0) → SnapshotEnd`, with no intervening `SnapshotLevel` messages. An empty book is a valid snapshot.
-6. Set `Depth Bound` to `0` where it carries the complete book, and otherwise to the number of levels per side it does carry. A publisher declaring a non-zero `Depth Bound` MUST NOT emit `Quantity = 0` for a level that merely fell out of its depth window: `Quantity = 0` asserts the level is empty, whereas a level pushed past the window is unknown. It emits nothing for such a level, leaving the subscriber to classify anything at or beyond rank `Depth Bound` as unknown by counting from the inside market.
+6. Set application-header `Flags` bit 0 on every message emitted on this port, and clear it on every `mktdata` and `refdata` message.
+7. Set `Depth Bound` to `0` where it carries the complete book, and otherwise to the number of levels per side it does carry. A publisher declaring a non-zero `Depth Bound` MUST NOT emit `Quantity = 0` for a level that merely fell out of its depth window: `Quantity = 0` asserts the level is empty, whereas a level pushed past the window is unknown. It emits nothing for such a level, leaving the subscriber to classify anything at or beyond rank `Depth Bound` as unknown by counting from the inside market.
 
 Because a snapshot enumerates every level rather than every order, its size scales with book width rather than order count, and the two diverge sharply between venues. The snapshot cycle period is therefore an operator parameter that MUST be tuned to the channel's aggregate level count rather than copied from a sibling feed; see [Wire Efficiency and Bandwidth](#wire-efficiency-and-bandwidth). It is not advertised in-band in this version of the spec. Subscribers MUST NOT assume a specific cycle period; worst-case gap recovery time is whatever the deployment operates at.
 
