@@ -318,7 +318,7 @@ The core message. The aggregate resting quantity at one price level changed.
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 |       Order Count (u16)       |       Level Index (u16)       |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|    Reason     |  Level Flags  |          Reserved             |
+| Update Reason |  Level Flags  |          Reserved             |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 ```
 
@@ -351,7 +351,9 @@ The core message. The aggregate resting quantity at one price level changed.
 
 Publishers SHOULD use the most accurate value available; receivers MUST accept any `u8` value and treat unknowns as `0` (Unknown). New values MAY be defined in future schema versions without a Schema Version bump. `0` exists because this field is informational: a publisher whose upstream does not distinguish an insert from an update states that rather than guessing.
 
-A publisher MUST set `Quantity = 0` when `Action = 3` (Delete), and MUST NOT emit `Quantity = 0` with any other `Action`.
+**`Unknown` covers the New-versus-Change ambiguity only.** A removal is always determinable — the publisher knows the level's quantity reached zero — so `Action = 3` (Delete) is required for it, and a publisher that reports `Unknown` for insertions and updates still reports `Delete` for removals. Without this, a publisher using `Unknown` would have no conformant way to express a removal at all.
+
+A publisher MUST set `Quantity = 0` when `Action = 3` (Delete), and MUST NOT emit `Quantity = 0` with any other `Action`, including `Unknown`.
 
 #### Absolute Apply Semantics
 
@@ -381,7 +383,11 @@ It is deliberately not justified as a filtering aid. A subscriber maintains a pr
 
 It is **not** part of the addressing model and carries no guarantees. A subscriber MUST NOT key book state on it, MUST NOT use it to locate a level, and MUST NOT treat it as valid after any subsequent update to the same side — inserting a level changes the rank of every level beneath it, and this feed does not re-emit those levels. Publishers that cannot supply a rank MUST set `0xFFFF`.
 
-Both `u16` sentinels are `0xFFFF` and both saturate rather than wrap, so a single convention covers "not provided" and "beyond the range this field can express" in one value. A subscriber MUST NOT treat `0xFFFF` in either field as a magnitude.
+#### u16 Sentinels
+
+`Level Index` and `Order Count` share one convention: `0xFFFF` means *not provided, or beyond what this field can express*, and both saturate at it rather than wrapping. A subscriber MUST NOT read `0xFFFF` in either field as a magnitude — it is neither a rank of 65,535 nor a count of 65,535. Genuine values above `0xFFFE` are reported as `0xFFFF`, so the two cases are deliberately not distinguished: a consumer that needs an exact count or rank that deep is not served by a `u16`, and conflating "absent" with "too large to say" is safer than silently truncating either into a plausible-looking number.
+
+`Order Count = 0` is a real value, not a sentinel. It cannot occur at a level carried in a snapshot, where `Quantity` is non-zero by rule, but it is well-defined on a `LevelUpdate`.
 
 #### Update Reason
 
@@ -397,7 +403,7 @@ This is a distinct field from the market-by-order feed's `Reason` on `OrderCance
 | 5 | VenueAction | Change forced by the venue (expiry, risk action, self-match prevention) |
 | 255 | Other | Venue-specific; documented out of band |
 
-`Reason` is what survives of order-level causality after price aggregation. It lets a consumer distinguish a level shrinking because it traded from a level shrinking because it was cancelled, which price and quantity alone cannot express.
+`Update Reason` is what survives of order-level causality after price aggregation. It lets a consumer distinguish a level shrinking because it traded from a level shrinking because it was cancelled, which price and quantity alone cannot express.
 
 Publishers SHOULD use the most accurate value available; receivers MUST accept any `u8` value and treat unknowns as `0` (Unknown). New values MAY be defined in future schema versions without a Schema Version bump.
 
@@ -475,7 +481,7 @@ Publisher signal that one instrument's on-wire state is being discarded and re-b
 **Subscriber behaviour:** on receipt of `InstrumentReset(I, new_anchor_seq=S')`:
 1. Discard all level state for instrument `I`, including any in-flight snapshot for `I`.
 2. Discard any buffered deltas for `I` with `mktdata_seq ≤ S'`.
-3. Mark `I` as awaiting a snapshot with `Anchor Seq == S'`.
+3. Mark `I` as awaiting a snapshot, recording `S'` as the required anchor: any snapshot for `I` with an older `Anchor Seq` MUST be discarded. See [Instrument Reset](#instrument-reset) for the full rule.
 4. Buffer further deltas for `I` with `mktdata_seq > S'` until the recovery snapshot arrives, then apply per [Cold Start](#cold-start) steps 4–6.
 
 **Publisher behaviour during active snapshot:** if the publisher issues `InstrumentReset(I)` while a snapshot for `I` is in flight on the `snapshot` port, it MUST either (a) complete and invalidate the in-flight snapshot (subscribers will detect the `Anchor Seq` mismatch and discard), or (b) abort the in-flight snapshot on the publisher side. Publishers MUST then emit a fresh snapshot with the new `Anchor Seq`. The choice between (a) and (b) is publisher-defined.
@@ -508,6 +514,8 @@ Opens a per-instrument snapshot group on the `snapshot` port.
 | 36 | Depth Bound | `u32` | `0` when this snapshot carries the complete book. Otherwise the number of levels per side the publisher carries, beyond which level state is **unknown rather than empty**. See below. |
 
 **Bytes 0–35 are byte-for-byte the market-by-order feed's 36-byte `0x20`**, with `Total Orders` reading as `Total Levels` — the same field at the same offset, counting the records that follow. `Depth Bound` is appended at offset 36, so a decoder written against either spec reads the shared prefix correctly and one written against the shorter layout skips the tail via `Message Length`, exactly as the forward-compatibility rules intend.
+
+`Timestamp` sits at offset 28 and is therefore not 8-byte aligned within the message. **This is deliberate and inherited, not a cost of the prefix-superset**: the sibling's layout already places it there, and `InstrumentReset` — byte-identical across both feeds — likewise carries `New Anchor Seq` at 12 and `Timestamp` at 20. Every message this feed defines from scratch is 8-aligned throughout. Realigning would fork the layout from the sibling for no practical gain, because message-relative alignment does not produce buffer-relative alignment anyway: messages pack at arbitrary offsets behind the 24-byte frame header and at sizes that are not all multiples of 8, so a field's address depends on what preceded it in the frame. Both target architectures handle unaligned 8-byte loads in hardware at negligible cost.
 
 Publishers MUST NOT interleave two snapshot groups for different instruments on the `snapshot` port. A `SnapshotBegin` for instrument A is always followed by exactly `Total Levels` `SnapshotLevel` messages for A and then a `SnapshotEnd` for A, before any `SnapshotBegin` for a different instrument.
 
@@ -618,7 +626,8 @@ instrument_state = {
   last_applied_mktdata_seq:    u64 = null,
   last_applied_instrument_seq: u32 = null,
   required_anchor_seq:         u64 = null,   // set by InstrumentReset; snapshots older than
-                                             // this MUST be discarded
+                                             // this MUST be discarded. Cleared when any
+                                             // snapshot at or after it completes.
   open_snapshot:               null | { snapshot_id, anchor_seq, received_levels, total_levels,
                                         last_instrument_seq, depth_bound }
 }
@@ -645,7 +654,7 @@ A subscriber bootstrapping from scratch MUST:
 3. Buffer every `mktdata` delta message (`LevelUpdate`, `BookClear`, `InstrumentReset`) tagged with its frame `mktdata_seq`. Discard deltas for instruments not present in the current manifest.
 4. On receipt of `SnapshotBegin(I, anchor_seq=S, snapshot_id=N, total_levels=T, last_instrument_seq=K, depth_bound=D)`:
    - If `I.status == "ready"`, see [Snapshot while ready](#snapshot-while-ready); the rest of step 4 does not apply.
-   - If `I.required_anchor_seq` is set and `S < I.required_anchor_seq`, discard this snapshot and keep awaiting; see [Instrument Reset](#instrument-reset).
+   - If `I.required_anchor_seq` is set and `S < I.required_anchor_seq`, discard this snapshot and keep awaiting; see [Instrument Reset](#instrument-reset). Otherwise clear `I.required_anchor_seq` when this snapshot completes at step 6.
    - Otherwise (`I` is `awaiting-snapshot`, `gap`, or `building-snapshot`):
      - If `I` was already in `building-snapshot` (a previous snapshot for `I` was in flight), discard the partial book from the previous snapshot.
      - Move `I` to `building-snapshot`.
@@ -721,7 +730,7 @@ An instrument in `gap` status is recovered by the next `SnapshotBegin` for it, v
 On receipt of `InstrumentReset(I, new_anchor_seq=S', reason=R)`:
 1. Discard `I`'s level state and any open snapshot for `I`.
 2. Discard buffered deltas for `I` with `mktdata_seq ≤ S'`.
-3. Mark `I` as `awaiting-snapshot`, recording `S'` as the required anchor. While an instrument has a required anchor, the subscriber **MUST discard any `SnapshotBegin` for `I` whose `Anchor Seq` is older than `S'`** and continue awaiting. Without this, a snapshot captured before the reset but delivered after it — the two travel on separate ports, so the skew is ordinary — is accepted, and because the publisher pauses deltas for `I` until the recovery snapshot is emitted, the subsequent replay is sequence-continuous and passes every other check. The instrument would end `ready` holding exactly the diverged book the reset existed to discard, with no gap and no counter. The required anchor is cleared once a snapshot with `Anchor Seq == S'` completes.
+3. Mark `I` as `awaiting-snapshot`, recording `S'` as the required anchor. While an instrument has a required anchor, the subscriber **MUST discard any `SnapshotBegin` for `I` whose `Anchor Seq` is older than `S'`** and continue awaiting. Without this, a snapshot captured before the reset but delivered after it — the two travel on separate ports, so the skew is ordinary — is accepted, and because the publisher pauses deltas for `I` until the recovery snapshot is emitted, the subsequent replay is sequence-continuous and passes every other check. The instrument would end `ready` holding exactly the diverged book the reset existed to discard, with no gap and no counter. The required anchor is cleared once **any** accepted snapshot for `I` completes — that is, any whose `Anchor Seq` is `S'` or newer — not only one matching `S'` exactly. The publisher is required to emit a snapshot at exactly `S'`, but that snapshot can itself be lost, in which case the next round-robin snapshot carries `Anchor Seq > S'` and is a perfectly good recovery. Clearing only on an exact match would leave the required anchor set permanently in that case.
 4. Continue buffering deltas for `I` with `mktdata_seq > S'` until the recovery snapshot arrives, then apply per cold-start steps 4–6.
 
 ### Channel Reset
