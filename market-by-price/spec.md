@@ -140,13 +140,13 @@ Sharding the active instrument set across multiple publisher instances — each 
 | `0x06` | EndOfSession | 12 | mktdata | Inherited. No more data for this session. |
 | `0x07` | ManifestSummary | 24 | refdata | Active instrument set summary. Inherited; see the [Reference Data Distribution supplement](../reference-data/spec.md). |
 | `0x08` | Liquidation | 48 | mktdata | Trade-companion annotation. **Identical byte-for-byte to the top-of-book feed's Liquidation.** Emitted in the same frame as its `Trade`. |
+| `0x13` | BatchBoundary | 16 | mktdata | Atomic-batch delimiter. **Byte-for-byte identical to the market-by-order feed's `0x13`.** Required of batching publishers, absent on non-batching channels. |
+| `0x14` | InstrumentReset | 28 | mktdata | Per-instrument surgical resync signal. **Byte-for-byte identical to the market-by-order feed's `0x14`.** |
+| `0x20` | SnapshotBegin | 40 | snapshot | Start of a per-instrument snapshot group. Prefix-superset of the market-by-order feed's 36-byte `0x20`; see below. |
+| `0x22` | SnapshotEnd | 20 | snapshot | End of a per-instrument snapshot group. **Byte-for-byte identical to the market-by-order feed's `0x22`.** |
 | `0x40` | LevelUpdate | 48 | mktdata | A price level's aggregate quantity changed. The core message. |
 | `0x41` | BookClear | 36 | mktdata | Bulk removal of levels from one or both sides. |
-| `0x42` | BatchBoundary | 16 | mktdata | Atomic-batch delimiter. Required of batching publishers, absent on non-batching channels. |
-| `0x43` | InstrumentReset | 28 | mktdata | Per-instrument surgical resync signal. |
-| `0x48` | SnapshotBegin | 40 | snapshot | Start of a per-instrument snapshot group. |
-| `0x49` | SnapshotLevel | 32 | snapshot | One price level in a snapshot. |
-| `0x4A` | SnapshotEnd | 20 | snapshot | End of a per-instrument snapshot group. |
+| `0x42` | SnapshotLevel | 32 | snapshot | One price level in a snapshot. |
 
 A decoder encountering an unknown type MUST skip the message using its `Message Length` field and continue parsing the frame.
 
@@ -154,7 +154,11 @@ A decoder encountering an unknown type MUST skip the message using its `Message 
 
 A message Type ID that appears in more than one sibling feed MUST carry the same semantic meaning in each. The shared Type IDs at this writing are `0x01` (Heartbeat), `0x02` (InstrumentDefinition), `0x04` (Trade), `0x06` (EndOfSession), `0x07` (ManifestSummary), and `0x08` (Liquidation). Heartbeat, EndOfSession, and ManifestSummary are byte-for-byte identical across every sibling that carries them. Trade and Liquidation are byte-for-byte identical between the top-of-book feed, the market-by-order feed, and this feed. InstrumentDefinition shares the Type ID but each sibling defines its own layout — this feed, market-by-order, and top-of-book share the 80-byte layout; the midpoint feed carries a slimmed 64-byte variant.
 
-This feed's own payload Type IDs occupy the **`0x40`–`0x4F` range**, which does not overlap any sibling feed. A Type ID used by one sibling for a given payload MUST NOT be reassigned to a different payload here; where a sibling does not carry that payload, the slot is reserved.
+Four payloads are shared with the market-by-order feed at its own Type IDs rather than renumbered into this feed's range, because they are the same payload and reassignment is what the policy forbids: `BatchBoundary` (`0x13`), `InstrumentReset` (`0x14`) and `SnapshotEnd` (`0x22`) are byte-for-byte identical, and `SnapshotBegin` (`0x20`) is a prefix-superset — its first 36 bytes are the market-by-order layout, with `Depth Bound` appended at offset 36. `InstrumentDefinition` is the precedent for one Type ID carrying different lengths across siblings (80 bytes here and in top-of-book, 64 in midpoint).
+
+Renumbering these would have gained nothing: the misroute-rejection rationale that motivates a distinct range does not apply to an identical payload, since decoding a market-by-order `0x13` under this feed's dispatch yields a correct `BatchBoundary`. `Magic` is what rejects a misrouted frame.
+
+This feed's genuinely new payloads — `LevelUpdate` (`0x40`), `BookClear` (`0x41`) and `SnapshotLevel` (`0x42`) — take fresh Type IDs in the **`0x40`–`0x4F` range**, which does not overlap any sibling. `SnapshotLevel` cannot reuse the market-by-order feed's `0x21` (`SnapshotOrder`): the payloads differ, and that is exactly the reassignment the policy prohibits. A Type ID used by one sibling for a given payload MUST NOT be reassigned to a different payload here; where a sibling does not carry that payload, the slot is reserved.
 
 The **`0x50`–`0x5F` range is reserved** for a future positional-index addressing mode (see [Versioning and Forward Compatibility](#versioning-and-forward-compatibility)). Because such a mode would occupy its own Type IDs rather than reinterpreting these, a subscriber implementing only the price-keyed messages defined here skips index-keyed messages by `Message Length` exactly as it skips any other unknown type. There is no addressing-mode negotiation and no mode field.
 
@@ -322,18 +326,30 @@ The core message. The aggregate resting quantity at one price level changed.
 | 4  | Instrument ID | `u32` | Instrument this level belongs to |
 | 8  | Source ID | `u16` | Originating source. |
 | 10 | Side | `u8` | `0`=Bid/Buy, `1`=Ask/Sell |
-| 11 | Action | `u8` | `0`=New, `1`=Change, `2`=Delete. **Informational only**; see [Absolute Apply Semantics](#absolute-apply-semantics). |
+| 11 | Action | `u8` | See Action table. **Informational only**; see [Absolute Apply Semantics](#absolute-apply-semantics). |
 | 12 | Per-Instrument Seq | `u32` | See [Per-Instrument Delta Sequence](#per-instrument-delta-sequence). Same type and offset as the market-by-order feed's. |
 | 16 | Price | `price` | The level's price. Uses instrument's Price Exponent. **This is the level's key.** |
 | 24 | Quantity | `qty` | **Absolute** aggregate resting quantity at this price after the change, not a delta. `0` removes the level. |
 | 32 | Timestamp | `ts_ns` | Venue time of the change |
-| 40 | Order Count | `u16` | Number of resting orders aggregated at this price. `0` if the venue does not expose it. |
-| 42 | Level Index | `u16` | Rank of this level on its side at emission time, `0` = inside market. **Informational only**; `0xFFFF` when the publisher does not provide it. See [Level Index](#level-index). |
-| 44 | Reason | `u8` | See Update Reason table. |
+| 40 | Order Count | `u16` | Number of resting orders aggregated at this price. `0xFFFF` when the venue does not expose it or the true count exceeds `0xFFFE`. `0` is a real value. |
+| 42 | Level Index | `u16` | Rank of this level on its side at emission time, `0` = inside market. **Informational only**; `0xFFFF` when the publisher does not provide it or the true rank is `0xFFFF` or deeper. See [Level Index](#level-index). |
+| 44 | Update Reason | `u8` | See Update Reason table. |
 | 45 | Level Flags | `u8` | See Level Flags table. |
 | 46 | Reserved | 2B | Padding to 48 bytes. |
 
-A publisher MUST set `Quantity = 0` when `Action = 2` (Delete), and MUST NOT emit `Quantity = 0` with any other `Action`.
+#### Action
+
+| Value | Name | Meaning |
+|-------|------|---------|
+| 0 | Unknown | Publisher could not determine which transition this is |
+| 1 | New | No quantity rested at this price before the change |
+| 2 | Change | Quantity rested at this price and its total changed |
+| 3 | Delete | The level is being removed |
+| 255 | Other | Venue-specific; documented out of band |
+
+Publishers SHOULD use the most accurate value available; receivers MUST accept any `u8` value and treat unknowns as `0` (Unknown). New values MAY be defined in future schema versions without a Schema Version bump. `0` exists because this field is informational: a publisher whose upstream does not distinguish an insert from an update states that rather than guessing.
+
+A publisher MUST set `Quantity = 0` when `Action = 3` (Delete), and MUST NOT emit `Quantity = 0` with any other `Action`.
 
 #### Absolute Apply Semantics
 
@@ -348,10 +364,10 @@ else:              set (Side, Price) to Quantity
 
 `Action` exists so that a subscriber can detect divergence between the publisher's view and its own. A subscriber SHOULD count, without altering the applied result:
 
-- `Action = 0` (New) for a `(Side, Price)` already present in its book,
-- `Action = 1` (Change) for a `(Side, Price)` absent from its book,
-- `Action = 2` (Delete) carrying a non-zero `Quantity`,
-- `Quantity = 0` carried with `Action = 0` or `Action = 1`, which the publisher rule above forbids.
+- `Action = 1` (New) for a `(Side, Price)` already present in its book,
+- `Action = 2` (Change) for a `(Side, Price)` absent from its book,
+- `Action = 3` (Delete) carrying a non-zero `Quantity`,
+- `Quantity = 0` carried with any `Action` other than `3`, which the publisher rule above forbids.
 
 Each is a publisher defect or an undetected loss, and each is worth surfacing. None is a reason to take a different code path: an `Action` byte that is wrong must never be able to corrupt a book.
 
@@ -361,13 +377,17 @@ Each is a publisher defect or an undetected loss, and each is worth surfacing. N
 
 It is **not** part of the addressing model and carries no guarantees. A subscriber MUST NOT key book state on it, MUST NOT use it to locate a level, and MUST NOT treat it as valid after any subsequent update to the same side — inserting a level changes the rank of every level beneath it, and this feed does not re-emit those levels. Publishers that cannot supply a rank MUST set `0xFFFF`.
 
+Both `u16` sentinels are `0xFFFF` and both saturate rather than wrap, so a single convention covers "not provided" and "beyond the range this field can express" in one value. A subscriber MUST NOT treat `0xFFFF` in either field as a magnitude.
+
 #### Update Reason
+
+This is a distinct field from the market-by-order feed's `Reason` on `OrderCancel`, with its own value space: aggregation collapses that feed's six cancel reasons into a single `Cancel` here, because a level shrinking by cancellation does not carry which order's cancellation caused it. Do not map the two enums onto each other.
 
 | Value | Name | Meaning |
 |-------|------|---------|
 | 0 | Unknown | No reason available |
 | 1 | Trade | Quantity was consumed by an execution |
-| 2 | Cancel | Quantity was withdrawn by order cancellation |
+| 2 | Cancel | Quantity was withdrawn by order cancellation, for any reason |
 | 3 | NewOrder | Quantity was added by a newly resting order |
 | 4 | Amend | Quantity changed by in-place modification of a resting order |
 | 5 | VenueAction | Change forced by the venue (expiry, risk action, self-match prevention) |
@@ -394,17 +414,17 @@ Bulk removal of levels. Used where a venue removes many levels at once and enume
 | 0  | Header | 4B | Type=`0x41`, Length=36 |
 | 4  | Instrument ID | `u32` | |
 | 8  | Source ID | `u16` | |
-| 10 | Side | `u8` | `0`=Bid, `1`=Ask, `2`=Both |
+| 10 | Clear Side | `u8` | `0`=Bid, `1`=Ask, `2`=Both. Deliberately **not** named `Side`: it extends the shared `Side` enum with a value no other message in this feed or any sibling accepts, so it carries a distinct name rather than making the shared encoding message-local. |
 | 11 | Scope | `u8` | `0` = clear the entire side(s), `From Price` ignored. `1` = clear from `From Price` outward to the far end of the side. |
 | 12 | Per-Instrument Seq | `u32` | Ordered in the same series as `LevelUpdate` |
 | 16 | From Price | `price` | Inclusive bound when `Scope = 1`. For bids, clears every level at or below it; for asks, every level at or above it. |
 | 24 | Timestamp | `ts_ns` | Venue time of the clear |
-| 32 | Reason | `u8` | See Clear Reason table. |
+| 32 | Clear Reason | `u8` | See Clear Reason table. |
 | 33 | Reserved | 3B | Padding |
 
-`Scope = 1` requires `Side` to be `0` or `1`. A message with `Scope = 1` and `Side = 2` is malformed, because one price cannot bound both sides; a subscriber MUST discard and count it.
+`Scope = 1` requires `Clear Side` to be `0` or `1`. A message with `Scope = 1` and `Clear Side = 2` is malformed, because one price cannot bound both sides; a subscriber MUST discard and count it.
 
-`BookClear` is not a resynchronization signal. It asserts that the named levels are gone, and a subscriber that applies it stays `ready`. A publisher that has lost confidence in its own book state MUST use [0x43 InstrumentReset](#0x43-instrumentreset-28-bytes) instead.
+`BookClear` is not a resynchronization signal. It asserts that the named levels are gone, and a subscriber that applies it stays `ready`. A publisher that has lost confidence in its own book state MUST use [0x14 InstrumentReset](#0x14-instrumentreset-28-bytes) instead.
 
 #### Clear Reason
 
@@ -419,7 +439,7 @@ Bulk removal of levels. Used where a venue removes many levels at once and enume
 
 Publishers SHOULD use the most accurate value available; receivers MUST accept any `u8` value.
 
-### 0x42 BatchBoundary (16 bytes)
+### 0x13 BatchBoundary (16 bytes)
 
 Delimiter marking an atomic batch of updates. Publishers whose upstream has natural batch semantics (blockchain blocks, matching-engine rounds, exchange message-group boundaries) MUST emit this message after every batch of deltas. Publishers whose upstream streams changes one at a time MAY omit it entirely. Subscribers MUST tolerate its absence, since it is legitimately absent on non-batching channels.
 
@@ -429,19 +449,19 @@ Subscribers with strict atomicity requirements MAY buffer deltas between boundar
 
 | Offset | Field | Type | Description |
 |--------|-------|------|-------------|
-| 0 | Header | 4B | Type=`0x42`, Length=16 |
+| 0 | Header | 4B | Type=`0x13`, Length=16 |
 | 4 | Batch ID | `u32` | Publisher-defined, monotonically increasing within the current `Reset Count` era. For blockchain sources, SHOULD be the block number truncated to `u32`. |
 | 8 | Batch Time | `ts_ns` | Venue time of the batch |
 
 `BatchBoundary` is informational for book reconstruction — a subscriber that ignores it MUST still produce a correct book state — but it does govern when the comparison in [Crossed-Book Monitoring](#crossed-book-monitoring) applies. Publishers whose upstream batches MUST emit it; see [Publisher Behavior](#delta-stream).
 
-### 0x43 InstrumentReset (28 bytes)
+### 0x14 InstrumentReset (28 bytes)
 
 Publisher signal that one instrument's on-wire state is being discarded and re-bootstrapped. Used when the publisher detects that its internal book state for a single instrument has diverged from the upstream source (e.g., a periodic consistency check against a re-read of the upstream book, or a detected gap in the upstream event stream) and wants to force subscribers to re-bootstrap that instrument only, without tearing down the channel.
 
 | Offset | Field | Type | Description |
 |--------|-------|------|-------------|
-| 0  | Header | 4B | Type=`0x43`, Length=28 |
+| 0  | Header | 4B | Type=`0x14`, Length=28 |
 | 4  | Instrument ID | `u32` | |
 | 8  | Reason | `u8` | See Reset Reason table. |
 | 9  | Reserved | 3B | Padding |
@@ -468,20 +488,22 @@ Publisher signal that one instrument's on-wire state is being discarded and re-b
 
 Publishers SHOULD use the most accurate value available; receivers MUST accept any `u8` value.
 
-### 0x48 SnapshotBegin (40 bytes)
+### 0x20 SnapshotBegin (40 bytes)
 
 Opens a per-instrument snapshot group on the `snapshot` port.
 
 | Offset | Field | Type | Description |
 |--------|-------|------|-------------|
-| 0  | Header | 4B | Type=`0x48`, Length=40 |
+| 0  | Header | 4B | Type=`0x20`, Length=40 |
 | 4  | Instrument ID | `u32` | |
 | 8  | Anchor Seq | `u64` | The `mktdata`-port `Sequence Number` at the moment the publisher captured the book state for this snapshot. See [Snapshot Anchor Seq](#snapshot-anchor-seq) for the precise semantics. |
 | 16 | Total Levels | `u32` | Number of `SnapshotLevel` messages that will follow before the matching `SnapshotEnd`, across both sides. MAY be `0` for an instrument with an empty book at capture time. |
 | 20 | Snapshot ID | `u32` | Monotonically increasing per `(channel_id, instrument_id)` within the current `Reset Count` era. Identifies this snapshot instance, so that subscribers can associate `SnapshotLevel` messages with the correct `SnapshotBegin` and detect stale or out-of-order snapshot fragments. |
 | 24 | Last Instrument Seq | `u32` | The `Per-Instrument Seq` of the last delta applied to this instrument at or before `Anchor Seq`. Subscribers MUST initialise their `last_applied_instrument_seq` tracker to this value after applying the snapshot. `0` if no deltas have been applied for this instrument in the current `Reset Count` era. |
-| 28 | Depth Bound | `u32` | `0` when this snapshot carries the complete book. Otherwise the number of levels per side the publisher carries, beyond which level state is **unknown rather than empty**. See below. |
-| 32 | Timestamp | `ts_ns` | Publisher wall-clock at capture. |
+| 28 | Timestamp | `ts_ns` | Publisher wall-clock at capture. |
+| 36 | Depth Bound | `u32` | `0` when this snapshot carries the complete book. Otherwise the number of levels per side the publisher carries, beyond which level state is **unknown rather than empty**. See below. |
+
+**Bytes 0–35 are byte-for-byte the market-by-order feed's 36-byte `0x20`**, with `Total Orders` reading as `Total Levels` — the same field at the same offset, counting the records that follow. `Depth Bound` is appended at offset 36, so a decoder written against either spec reads the shared prefix correctly and one written against the shorter layout skips the tail via `Message Length`, exactly as the forward-compatibility rules intend.
 
 Publishers MUST NOT interleave two snapshot groups for different instruments on the `snapshot` port. A `SnapshotBegin` for instrument A is always followed by exactly `Total Levels` `SnapshotLevel` messages for A and then a `SnapshotEnd` for A, before any `SnapshotBegin` for a different instrument.
 
@@ -489,30 +511,30 @@ An instrument with an empty book at capture time is represented by `SnapshotBegi
 
 **`Depth Bound` exists because a consumer cannot otherwise distinguish "the book ends here" from "the publisher stopped here."** Conflating the two silently under-states available liquidity, which is precisely the failure mode a full-depth feed exists to avoid. Publishers carrying the complete book — the expected case, per design principle 11 — MUST set `0`. A publisher structurally unable to observe the whole book MUST declare the bound rather than present a truncated book as complete, and subscribers MUST treat levels beyond a declared bound as unknown, excluding them from any calculation that assumes an exhaustive book.
 
-### 0x49 SnapshotLevel (32 bytes)
+### 0x42 SnapshotLevel (32 bytes)
 
 One price level in a snapshot. The Instrument ID is implied by the containing `SnapshotBegin`; it is not repeated on each level.
 
 | Offset | Field | Type | Description |
 |--------|-------|------|-------------|
-| 0  | Header | 4B | Type=`0x49`, Length=32 |
+| 0  | Header | 4B | Type=`0x42`, Length=32 |
 | 4  | Snapshot ID | `u32` | MUST match the containing `SnapshotBegin`'s Snapshot ID. Subscribers MUST discard any `SnapshotLevel` whose `Snapshot ID` does not match the currently-open `SnapshotBegin`. |
 | 8  | Price | `price` | The level's price |
 | 16 | Quantity | `qty` | Aggregate resting quantity at capture. MUST be non-zero; an empty level is represented by its absence. |
-| 24 | Order Count | `u16` | Number of resting orders aggregated at this price. `0` if the venue does not expose it. |
+| 24 | Order Count | `u16` | Number of resting orders aggregated at this price. `0xFFFF` when the venue does not expose it or the true count exceeds `0xFFFE`, matching `LevelUpdate`. |
 | 26 | Side | `u8` | `0`=Bid, `1`=Ask |
 | 27 | Level Flags | `u8` | Same semantics as `LevelUpdate`'s Level Flags field |
 | 28 | Reserved | 4B | Padding |
 
 Publishers SHOULD emit a snapshot's levels best-to-worst within each side, but subscribers MUST NOT depend on ordering: the levels of a snapshot group are a set, and the subscriber's own sorted container establishes rank.
 
-### 0x4A SnapshotEnd (20 bytes)
+### 0x22 SnapshotEnd (20 bytes)
 
 Closes a per-instrument snapshot group.
 
 | Offset | Field | Type | Description |
 |--------|-------|------|-------------|
-| 0  | Header | 4B | Type=`0x4A`, Length=20 |
+| 0  | Header | 4B | Type=`0x22`, Length=20 |
 | 4  | Instrument ID | `u32` | MUST match the opening `SnapshotBegin` |
 | 8  | Anchor Seq | `u64` | MUST match the opening `SnapshotBegin` |
 | 16 | Snapshot ID | `u32` | MUST match the opening `SnapshotBegin` |
@@ -635,8 +657,12 @@ A subscriber bootstrapping from scratch MUST:
 
 A subscriber with `I` in `ready` status can receive a periodic round-robin snapshot for `I` even though its delta stream has been continuous. Two cases:
 
-- If `anchor_seq > I.last_applied_mktdata_seq`, the subscriber is behind (possibly an undetected gap). The subscriber MUST re-bootstrap `I` by processing the current `SnapshotBegin` as if `I.status` were `awaiting-snapshot` (the short-circuit at the top of [Cold Start](#cold-start) step 4 does not apply) and then continuing with steps 5–6 on the subsequent `SnapshotLevel` and `SnapshotEnd` messages. The resulting book replaces the current one.
-- If `anchor_seq ≤ I.last_applied_mktdata_seq`, the subscriber has advanced past the snapshot. The snapshot MAY be ignored, or — when no deltas have been applied past `anchor_seq` — MAY be compared directly against the current book as a consistency check. Reconstructing an earlier state by rewinding is not available: a `Quantity = 0` delete carries no pre-image, so rewinding would require journaling every level's prior quantity. The spec does not mandate consistency checking.
+**The discriminator is `Last Instrument Seq`, not `Anchor Seq`.** Let `K` be the snapshot's `Last Instrument Seq`:
+
+- If `K > I.last_applied_instrument_seq`, the subscriber is genuinely behind: the snapshot was captured after deltas this subscriber never applied. It MUST re-bootstrap `I` by processing the current `SnapshotBegin` as if `I.status` were `awaiting-snapshot` (the short-circuit at the top of [Cold Start](#cold-start) step 4 does not apply) and then continuing with steps 5–6 on the subsequent `SnapshotLevel` and `SnapshotEnd` messages. The resulting book replaces the current one.
+- If `K ≤ I.last_applied_instrument_seq`, the subscriber is current or has advanced past the snapshot, which is the ordinary case — deltas routinely arrive between the publisher's capture and the snapshot's delivery. The snapshot MAY be ignored, or — when `K` equals the tracker exactly — MAY be compared directly against the current book as a consistency check. Reconstructing an earlier state by rewinding is not available: a `Quantity = 0` delete carries no pre-image, so rewinding would require journaling every level's prior quantity. The spec does not mandate consistency checking.
+
+`Anchor Seq` MUST NOT be used for this comparison. It is a **channel-wide** `mktdata` sequence, while `last_applied_mktdata_seq[I]` advances only on `I`'s own deltas — every frame for every other instrument, and every `Heartbeat`, moves one and not the other. Comparing them makes `anchor_seq > last_applied_mktdata_seq[I]` true for nearly every instrument on nearly every cycle, so a subscriber would discard and rebuild a perfectly good book for every instrument on every rotation, and the "subscriber is behind" branch would never be false. `Anchor Seq` remains the composition point for buffered-delta replay ([Snapshot Anchor Seq](#snapshot-anchor-seq)); the per-instrument counter is what decides whether an instrument is stale.
 
 ### Steady State
 
@@ -670,6 +696,12 @@ Two limits are worth stating plainly, so the counter is not mistaken for an inte
 Evaluating only at boundaries is what makes the counter meaningful on a batching channel: intermediate states within a batch are explicitly not consistency points, and a transient cross there is legal rather than a defect.
 
 A locked book (`bids.first().price == asks.first().price`) is routine on some venues, so the comparison above is strict `>` and does not count locking as crossed. A subscriber on a venue that never locks MAY use `>=` instead.
+
+### Delta Buffer Sizing
+
+`delta_buffer` holds deltas for instruments that are not yet `ready` — every instrument at cold start, and any instrument in `gap` — until the next snapshot for each arrives. Its worst case is therefore one full snapshot cycle of channel traffic, which this feed sizes larger than its siblings do: [Wire Efficiency and Bandwidth](#wire-efficiency-and-bandwidth) recommends stretching `T` for deep books, and buffer footprint scales with it. At the figures used there — 500 instruments, ~1,000 level updates/s, `T = 60 s` — a cold start can accumulate on the order of 30 M messages, roughly 1.4 GB at 48 bytes each. Operators tuning `T` upward for bandwidth are also tuning subscriber memory upward, and the two knobs are the same knob.
+
+A subscriber MUST therefore bound the buffer, by message count or by bytes, and MUST define an overflow policy. The recommended policy is to drop the buffered deltas for the instrument holding the most buffered data, mark that instrument `gap`, and continue; it recovers on its next snapshot exactly as any other `gap` instrument does. A subscriber MUST NOT let buffer growth take down the channel, and MUST count overflow events — sustained overflow means `T` is too long for the deployment's memory budget, and that is a tuning signal an operator needs.
 
 ### Gap Recovery
 
@@ -706,7 +738,7 @@ A publisher operating the `mktdata` port MUST:
 1. Emit every book-affecting event as a `LevelUpdate` or a `BookClear`.
 2. Set `Quantity` on every `LevelUpdate` to the absolute aggregate resting quantity at that price after the change, never to a signed difference, and to `0` when the level is removed.
 3. On each delta for instrument `I`, set `Per-Instrument Seq` to exactly one greater than the last `Per-Instrument Seq` emitted for `I` in the current `Reset Count` era. `Per-Instrument Seq` starts at 1 after each `Reset Count` change and is NOT reset at snapshot boundaries.
-4. Set `Action` to reflect the publisher's own view of the change — `New` where no quantity previously rested at that price, `Change` where some did, `Delete` where the level is being removed — accepting that subscribers apply by `Quantity` regardless. An inaccurate `Action` is a defect that will surface in subscriber divergence counters.
+4. Set `Action` to reflect the publisher's own view of the change — `New` where no quantity previously rested at that price, `Change` where some did, `Delete` where the level is being removed, `Unknown` where the upstream does not distinguish them — accepting that subscribers apply by `Quantity` regardless. An inaccurate `Action` is a defect that will surface in subscriber divergence counters.
 5. Set `Level Index` to the level's rank at emission where the publisher can determine it, and to `0xFFFF` otherwise. A publisher MUST NOT re-emit unchanged levels solely to correct their rank after an insertion.
 6. Not emit a settled crossed book: where the publisher's own state shows `best_bid ≥ best_ask` outside a batch, it MUST resolve the condition before emitting rather than propagate it.
 7. Pack multiple messages into a single frame where the total does not exceed the MTU.
@@ -782,15 +814,17 @@ Per-message wire costs:
 
 For a channel with `N` active instruments, total price-level count `L` across those instruments, snapshot cycle period `T` seconds:
 
-- Cycle wire volume ≈ `L × 32 B + N × (40 B + 20 B)` (levels plus SnapshotBegin/SnapshotEnd overhead per instrument).
-- Continuous snapshot bandwidth ≈ cycle wire volume / `T`.
+- Cycle **payload** volume ≈ `L × 32 B + N × (40 B + 20 B)` (levels plus SnapshotBegin/SnapshotEnd overhead per instrument).
+- Continuous snapshot payload bandwidth ≈ cycle payload volume / `T`, before per-datagram overhead.
 
 Worked example at moderate scale (`N = 500`, `L = 250,000`, `T = 15 s`):
 
-- Cycle wire volume ≈ `250,000 × 32 + 500 × 60 ≈ 8.0 MB`.
-- Continuous bandwidth ≈ `8.0 MB / 15 s ≈ 535 KB/s ≈ 4.3 Mbps`.
+- Cycle payload volume ≈ `250,000 × 32 + 500 × 60 ≈ 8.0 MB`.
+- Continuous payload bandwidth ≈ `8.0 MB / 15 s ≈ 535 KB/s ≈ 4.3 Mbps`, or about `4.5 Mbps` on the wire.
 
-**`T` must be sized against `L`, not adopted from a sibling feed.** Aggregate level count is the dominant term and varies by more than an order of magnitude across venue types. The same 500-instrument channel carrying deep books with long dust tails (`L = 2,500,000`) costs `80 MB` per cycle — `42.7 Mbps` at `T = 15 s`, and `10.7 Mbps` at `T = 60 s`. A channel of instruments on a coarse price grid, where tick size and price bounds cap a book at a few dozen levels, may run under `1 Mbps` at `T = 15 s`. Shorter cycle periods trade bandwidth for worst-case gap recovery time; longer cycle periods do the reverse. Channel sharding (splitting `L` across multiple channels) compounds favorably because per-channel cycle bandwidth falls and per-channel gap recovery time falls, at the cost of aggregate bandwidth going up modestly.
+**Every figure in this section is application payload only.** A full frame carries 37 `SnapshotLevel` messages — 1,184 bytes — under a 24-byte frame header, and each datagram then adds IP and UDP headers plus the GRE encapsulation the 1,232-byte MTU exists to accommodate. That is roughly 76 bytes of per-datagram overhead against 1,184 bytes of payload, about **6%**. Apply that factor when planning capacity; it matters most where the numbers are already large.
+
+**`T` must be sized against `L`, not adopted from a sibling feed.** Aggregate level count is the dominant term and varies by more than an order of magnitude across venue types. The same 500-instrument channel carrying deep books with long dust tails (`L = 2,500,000`) costs `80 MB` per cycle — `42.7 Mbps` of payload at `T = 15 s` (about `45 Mbps` on the wire), and `10.7 Mbps` at `T = 60 s`. A channel of instruments on a coarse price grid, where tick size and price bounds cap a book at a few dozen levels, may run under `1 Mbps` at `T = 15 s`. Shorter cycle periods trade bandwidth for worst-case gap recovery time; longer cycle periods do the reverse. Channel sharding (splitting `L` across multiple channels) compounds favorably because per-channel cycle bandwidth falls and per-channel gap recovery time falls, at the cost of aggregate bandwidth going up modestly.
 
 Instrument-level depth is an empirical property of the venue and its participants. `Tick Size` and `Price Bound` from `InstrumentDefinition` bound it structurally, but usefully so only for instruments on a bounded price domain; for unbounded instruments the structural ceiling is far above realised depth and should not be used for capacity planning.
 
@@ -818,7 +852,7 @@ The DoubleZero Market-by-Price Feed is a sibling of the [Top-of-Book & Trades Fe
 Distinctions of the market-by-price feed:
 - `Magic` is `0x4442` (vs. `0x445A` top-of-book, `0x4444` market-by-order, `0x4D44` midpoint, `0x494F` order-intent, `0x4450` perp-stats).
 - Three-port channel model (vs. two), shared with the market-by-order feed.
-- Market-by-price payload Type IDs occupy `0x40`–`0x4F`, with `0x50`–`0x5F` reserved.
+- New market-by-price payloads occupy `0x40`–`0x4F`, with `0x50`–`0x5F` reserved. `BatchBoundary` (`0x13`), `InstrumentReset` (`0x14`), `SnapshotBegin` (`0x20`) and `SnapshotEnd` (`0x22`) are shared with the market-by-order feed at its Type IDs rather than renumbered, because they are the same payload; `SnapshotBegin` is a prefix-superset with `Depth Bound` appended at offset 36.
 - `Per-Instrument Seq` is a `u32` at offset 12, identical in type, placement, and comparison semantics to the market-by-order feed's.
 
 Divergences that change subscriber or publisher code, beyond the message set itself:
