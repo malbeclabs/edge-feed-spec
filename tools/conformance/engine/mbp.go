@@ -58,7 +58,10 @@ type mbpOpenSnap struct {
 }
 
 type mbpState struct {
-	instr map[mbpInstrKey]*mbpInstr
+	// oracleRuns counts completed reconstruction comparisons, so a clean run can be
+	// told apart from one where every instrument was skipped as unverifiable.
+	oracleRuns int
+	instr      map[mbpInstrKey]*mbpInstr
 	// open is the single group in flight. The spec forbids interleaving two groups
 	// for different instruments, so one slot is the correct shape — a map would
 	// model something the wire does not permit.
@@ -179,10 +182,16 @@ func (e *Engine) checkMBPSeq(in *mbpInstr, k mbpInstrKey, got uint32, seq uint64
 	// boundaries — it restarts only on a Reset Count change. Without that, a
 	// subscriber that missed a snapshot but then saw seq 1 could not tell a fresh
 	// post-snapshot delta from a late duplicate of an old one.
-	if in.sawSnapshotSinceDelta && got <= in.lastSeq {
+	//
+	// Scoped to an actual *restart*, not to any backwards step. A delta carrying a
+	// number at or below the tracker right after a group is the ordinary in-flight
+	// case — the two ports are independent, so a delta captured before the snapshot
+	// can be delivered after it — and the spec has the subscriber discard it as a
+	// duplicate rather than complain.
+	if in.sawSnapshotSinceDelta && got == 1 && in.lastSeq > 1 {
 		e.Emit("MBP.DELTA.PERINSTR_NO_SNAPSHOT_RESET", core.Violation, core.PortMktData, seq, ch, k.instrID,
-			fmt.Sprintf("Per-Instrument Seq went %d -> %d across a snapshot boundary; the series must not reset",
-				in.lastSeq, got))
+			fmt.Sprintf("Per-Instrument Seq restarted at 1 after a snapshot (tracker was %d); the series restarts only on a Reset Count change",
+				in.lastSeq))
 		return
 	}
 
@@ -198,18 +207,15 @@ func (e *Engine) checkMBPSeq(in *mbpInstr, k mbpInstrKey, got uint32, seq uint64
 			fmt.Sprintf("Per-Instrument Seq jumped %d -> %d (expected %d)", in.lastSeq, got, in.lastSeq+1))
 		in.gapped = true
 	default:
-		// `<= lastSeq` is a repeat or a backwards step, and unlike a forward gap it
-		// is unambiguously the publisher's: loss can only ever *remove* messages, so
-		// it cannot manufacture a number the series already used. Frame-level
-		// duplication is caught separately by FRAME.SEQ_DUP_DIVERGENT, so a fresh
-		// frame carrying a stale per-instrument number is a publisher defect.
+		// `<= lastSeq` is a duplicate or a late message, which is exactly what the
+		// monotonic-within-era rule exists to make readable — and the spec has the
+		// subscriber "discard silently", not report. Multicast duplicates, and a
+		// snapshot adopted at `K` legitimately precedes deltas at or below `K` that
+		// were already in flight.
 		//
-		// It also poisons the reconstruction, because applying it mutates the ladder
-		// without advancing the tracker — the ladder is then neither as-of `lastSeq`
-		// nor as-of anything the publisher will snapshot at.
-		e.Emit("MBP.DELTA.PERINSTR_DENSITY", core.Violation, core.PortMktData, seq, ch, k.instrID,
-			fmt.Sprintf("Per-Instrument Seq went backwards %d -> %d; the series is monotonic within an era",
-				in.lastSeq, got))
+		// It is still not applied, and it still costs the reconstruction: a
+		// duplicate mutates the ladder without advancing the tracker, so the book is
+		// no longer as-of any point the publisher will snapshot at.
 		in.gapped = true
 	}
 }
@@ -346,6 +352,7 @@ func (e *Engine) finishMBPSnapshot(m wire.Message, ch uint8, seq uint64) {
 		// The publisher captured at a different point than we have applied. Routine
 		// — deltas flow between capture and delivery — and not comparable.
 	default:
+		e.mbp.oracleRuns++
 		if d := diffMBPLevels(in.book.clone(), open.levels); len(d) > 0 {
 			e.Emit("MBP.SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT", core.Violation, core.PortSnapshot, seq, ch,
 				open.key.instrID,
@@ -354,16 +361,48 @@ func (e *Engine) finishMBPSnapshot(m wire.Message, ch uint8, seq uint64) {
 		}
 	}
 
-	// Adopt the snapshot as the authoritative ladder either way: it is the
-	// publisher's own state, and it is what a subscriber would hold.
-	in.book.levels = open.levels
+	// **A group captured behind our tracker is not a usable baseline.**
+	//
+	// The spec's subscriber buffers deltas and, on `SnapshotEnd`, replays those
+	// above the anchor onto the adopted ladder. This consumer has no such buffer —
+	// it applies deltas as they arrive — so when a capture starts mid-stream it can
+	// hold deltas past `K` with no baseline they were ever applied to. Adopting the
+	// group then produces a ladder that is as-of `K` while the tracker says
+	// otherwise, and the next delta reads as a forward gap: that is what produced a
+	// "jumped 404 -> 447" against a capture whose wire sequence was provably dense,
+	// and the level mismatch that followed it.
+	//
+	// Waiting costs one rotation and is honest. The next group is captured at or
+	// after where we are, and from there ladder and tracker agree.
+	if in.lastSeqSet && open.lastK < in.lastSeq {
+		in.gapped = true
+		in.sawSnapshotSinceDelta = true
+		return
+	}
+
+	// **Adopt only when genuinely behind, and never rewind the tracker.**
+	// *Snapshot while ready* makes `Last Instrument Seq` the discriminator: with
+	// `K <= last_applied` the subscriber is current or has advanced past the
+	// capture, which is the ordinary case — deltas routinely arrive between the
+	// publisher's capture and the snapshot's delivery — and the group MAY simply be
+	// ignored.
+	//
+	// Rewinding here is a bug that looks like a publisher defect. Ports drain
+	// independently, so the deltas after a capture are frequently classified before
+	// the group that precedes them; setting `lastSeq = K` then moves the tracker
+	// backwards, and the very next delta reads as a forward gap. That produced a
+	// "Per-Instrument Seq jumped 404 -> 447" against a capture whose wire sequence
+	// was provably dense.
+	if !in.ready || open.lastK > in.lastSeq {
+		in.book.levels = open.levels
+		if open.lastK > 0 {
+			in.lastSeq = open.lastK
+			in.lastSeqSet = true
+		}
+	}
 	in.ready = true
 	in.gapped = false
 	in.sawSnapshotSinceDelta = true
-	if open.lastK > 0 {
-		in.lastSeq = open.lastK
-		in.lastSeqSet = true
-	}
 }
 
 // describeMBPDiff renders up to three differing levels, so a report is actionable

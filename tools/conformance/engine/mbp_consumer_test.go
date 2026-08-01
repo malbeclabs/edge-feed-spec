@@ -168,11 +168,25 @@ func TestMBPPerInstrDensity(t *testing.T) {
 	if shared.violated(t, "MBP.DELTA.PERINSTR_DENSITY") {
 		t.Error("one series spanning both message types must not be reported")
 	}
-	split := newTape().
+	// A BookClear participates in the density check, so a gap introduced by one is
+	// caught like any other.
+	clearGap := newTape().
+		delta(1, mbpClearSideBid, mbpActionNew, 100, 5).
+		clear(5, mbpClearSideBid, mbpScopeWholeSide, 0)
+	if !clearGap.violated(t, "MBP.DELTA.PERINSTR_DENSITY") {
+		t.Error("a gap introduced by a BookClear must be reported")
+	}
+
+	// A repeat is NOT reported. The spec has the subscriber "discard silently" any
+	// `Per-Instrument Seq <= last_applied`: multicast duplicates, and a snapshot
+	// adopted at K legitimately precedes in-flight deltas at or below K. An earlier
+	// revision of this rule reported it, which fired against a real capture whose
+	// wire sequence was provably dense.
+	repeat := newTape().
 		delta(1, mbpClearSideBid, mbpActionNew, 100, 5).
 		clear(1, mbpClearSideBid, mbpScopeWholeSide, 0)
-	if !split.violated(t, "MBP.DELTA.PERINSTR_DENSITY") {
-		t.Error("a BookClear restarting the series must be reported")
+	if repeat.violated(t, "MBP.DELTA.PERINSTR_DENSITY") {
+		t.Error("a duplicate or late delta is discarded, not reported")
 	}
 }
 
@@ -195,7 +209,18 @@ func TestMBPPerInstrSeqSurvivesASnapshotBoundary(t *testing.T) {
 		group(1, 0, 1, 5, 0, bid(100, 5)).
 		delta(1, mbpClearSideBid, mbpActionChange, 100, 6)
 	if !bad.violated(t, "MBP.DELTA.PERINSTR_NO_SNAPSHOT_RESET") {
-		t.Error("restarting the series at a snapshot boundary must be reported")
+		t.Error("restarting the series at 1 after a snapshot must be reported")
+	}
+
+	// But a delta at or below the tracker that is merely *late* is not a restart.
+	// The two ports are independent, so a delta captured before the snapshot can be
+	// delivered after it — ordinary, and the spec discards it as a duplicate.
+	late := newTape().
+		delta(5, mbpClearSideBid, mbpActionNew, 100, 5).
+		group(1, 0, 1, 5, 0, bid(100, 5)).
+		delta(5, mbpClearSideBid, mbpActionChange, 100, 6)
+	if late.violated(t, "MBP.DELTA.PERINSTR_NO_SNAPSHOT_RESET") {
+		t.Error("an in-flight delta delivered after the snapshot is not a reset")
 	}
 }
 
