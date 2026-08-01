@@ -49,6 +49,12 @@ var Rules = []RuleMeta{
 	{"HEARTBEAT.CADENCE", Info, 2, StateCounters, allFeeds, true},
 	{"BATCH.ID_MONOTONIC", Should, 2, StateCounters, mboOnly, false},
 	{"FRAME.SEQ_RESET_GAP", Must, 2, StateCounters, allFeeds, false},
+	// --- Market-by-price: per-instrument sequencing and the reconstruction oracle ---
+	{"MBP.DELTA.PERINSTR_DENSITY", Must, 2, StateCounters, mbpOnly, false},
+	{"MBP.DELTA.PERINSTR_NO_SNAPSHOT_RESET", Must, 2, StateCounters, mbpOnly, false},
+	{"MBP.DELTA.ABSOLUTE_APPLY", Must, 2, StateCounters, mbpOnly, false},
+	{"MBP.SNAP.GROUP_STRUCTURE", Must, 2, StateSnapshotGroup, mbpOnly, false},
+	{"MBP.SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT", Must, 2, StateFullBook, mbpOnly, false},
 	// --- MBO referential integrity (consumer, order_id_set) ---
 	{"REF.EXEC_DANGLING_ORDER", Must, 2, StateOrderIDSet, mboOnly, false},
 	{"REF.CANCEL_DANGLING_ORDER", Must, 2, StateOrderIDSet, mboOnly, false},

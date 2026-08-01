@@ -3,8 +3,8 @@ package core
 import "testing"
 
 func TestRegistryComplete(t *testing.T) {
-	if len(Rules) != 83 {
-		t.Fatalf("registry has %d rules, want 83", len(Rules))
+	if len(Rules) != 88 {
+		t.Fatalf("registry has %d rules, want 88", len(Rules))
 	}
 	seen := map[string]bool{}
 	for _, r := range Rules {

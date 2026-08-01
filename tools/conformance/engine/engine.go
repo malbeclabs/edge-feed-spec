@@ -37,6 +37,8 @@ type Engine struct {
 	// mbo holds per-instrument MBO sequencing state (Task 18+).
 	// Lazily initialized on the first MBO mktdata frame.
 	mbo *mboState
+	// Market-by-price consumer state; lazily initialised by ensureMBP.
+	mbp *mbpState
 }
 
 // New constructs an Engine with the given config and reporter.
@@ -150,6 +152,10 @@ func (e *Engine) Process(f *wire.Frame, port core.Port, sf []wire.StructFinding)
 		// on ANY port are never checked against stale old-era trackers. Handling only
 		// the mktdata-leads case (the prior approach) left a false-positive window
 		// when the snapshot port observed the reset first (F4).
+		if e.cfg.Feed == core.FeedMBP {
+			e.ensureMBP()
+			e.mbp.onResetCount()
+		}
 		if e.cfg.Feed == core.FeedMBO {
 			e.ensureMBO()
 			wiped := e.mbo.onResetCountForEra(res.newEra)
@@ -305,12 +311,17 @@ func (e *Engine) classify(item *bufferItem, pt *portTracker) {
 			e.checkMidpoint(f, port, f.Header.ChannelID)
 		case core.FeedMBO:
 			e.checkMBO(f, f.Header.ChannelID)
+		case core.FeedMBP:
+			e.checkMBP(f, f.Header.ChannelID)
 		}
 	}
 
 	// Snapshot-port routing: MBO snapshot counters rules.
 	if port == core.PortSnapshot && e.cfg.Feed == core.FeedMBO {
 		e.checkMBOSnapshot(f, f.Header.ChannelID, f.Header.Sequence)
+	}
+	if port == core.PortSnapshot && e.cfg.Feed == core.FeedMBP {
+		e.checkMBPSnapshot(f, f.Header.ChannelID, f.Header.Sequence)
 	}
 }
 
