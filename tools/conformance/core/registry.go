@@ -10,10 +10,11 @@ type RuleMeta struct {
 }
 
 var (
-	allFeeds = []Feed{FeedTOB, FeedMidpoint, FeedMBO}
+	allFeeds = []Feed{FeedTOB, FeedMidpoint, FeedMBO, FeedMBP}
 	mboOnly  = []Feed{FeedMBO}
 	tobOnly  = []Feed{FeedTOB}
 	midOnly  = []Feed{FeedMidpoint}
+	mbpOnly  = []Feed{FeedMBP}
 )
 
 // Rules is the source of truth for the rule registry, transcribed from the
@@ -27,6 +28,7 @@ var Rules = []RuleMeta{
 	{"MSG.LENGTH_PER_TYPE", Must, 1, StateNone, allFeeds, false},
 	{"MSG.WRONG_PORT_PLACEMENT", Must, 1, StateNone, allFeeds, false},
 	{"MSG.UNKNOWN_TYPE_SKIPPED", Info, 1, StateNone, allFeeds, false},
+	{"MSG.SNAPSHOT_FLAG_MATCHES_PORT", Must, 1, StateNone, mbpOnly, false},
 	{"MSG.RESERVED_TYPE_0X03_0X05", Should, 1, StateNone, mboOnly, false},
 	{"RESERVED.FIELD_BITS_ZERO", Should, 1, StateNone, mboOnly, false},
 	{"HEARTBEAT.CHANNEL_ID_MATCH", Should, 1, StateNone, allFeeds, false},

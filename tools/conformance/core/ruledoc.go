@@ -63,6 +63,7 @@ var ruleDocs = map[string]RuleDoc{
 	"MSG.LENGTH_PER_TYPE":               {"Each message type carries its mandated byte length (OrderAdd 52, Cancel 32, Execute 56, …)."},
 	"MSG.WRONG_PORT_PLACEMENT":          {"A known message type only appears on the port it belongs to."},
 	"MSG.UNKNOWN_TYPE_SKIPPED":          {"Unknown/reserved message types are skipped via Message Length and reported, never silently dropped."},
+	"MSG.SNAPSHOT_FLAG_MATCHES_PORT":    {"Market-by-price: application-header Flags bit 0 is set on every snapshot-port message and cleared on every mktdata and refdata message."},
 	"MSG.RESERVED_TYPE_0X03_0X05":       {"Reserved MBO type IDs 0x03 and 0x05 are never emitted."},
 	"RESERVED.FIELD_BITS_ZERO":          {"Reserved flag bits and padding are zero (OrderAdd flags 5–7, Execute flags 2–7, named padding)."},
 	"HEARTBEAT.CHANNEL_ID_MATCH":        {"A Heartbeat's embedded Channel ID matches the frame header's Channel ID."},

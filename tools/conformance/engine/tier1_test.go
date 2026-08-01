@@ -357,6 +357,21 @@ func tier1Cases() []struct {
 			bad:  wb.Frame(wire.MagicMBO).Msg(wire.TypeSnapshotOrder, 44, snapshotOrderBody(2 /*bad side*/, 0, 10)).Bytes(),
 			good: wb.Frame(wire.MagicMBO).Msg(wire.TypeSnapshotOrder, 44, snapshotOrderBody(0, 0, 10)).Bytes(),
 		},
+		// ---- MBP: the snapshot flag is normative and port-scoped ----
+		{
+			rule:  "MSG.SNAPSHOT_FLAG_MATCHES_PORT",
+			feed:  core.FeedMBP,
+			magic: wire.MagicMBP,
+			port:  core.PortRefData,
+			// Bad: a refdata message built with the snapshot header — bit 0 set on
+			// a port the spec requires it cleared on. This is exactly the shape a
+			// publisher produces by reaching for the wrong MsgHeader constructor,
+			// and it is invisible to a round-trip test.
+			bad: wb.Frame(wire.MagicMBP).
+				MsgFlags(wire.TypeManifest, 24, 0x0001, func(b *wb.Body) { b.Pad(20) }).Bytes(),
+			good: wb.Frame(wire.MagicMBP).
+				MsgFlags(wire.TypeManifest, 24, 0x0000, func(b *wb.Body) { b.Pad(20) }).Bytes(),
+		},
 		// ---- TOB Quote rules ----
 		{
 			rule:  "TOB.QUOTE.STRUCT_LEN_TYPE",

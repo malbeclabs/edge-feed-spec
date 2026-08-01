@@ -50,6 +50,7 @@ const (
 	FeedTOB      Feed = "tob"
 	FeedMidpoint Feed = "midpoint"
 	FeedMBO      Feed = "mbo"
+	FeedMBP      Feed = "mbp"
 )
 
 type Port uint8

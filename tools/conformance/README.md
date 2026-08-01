@@ -97,6 +97,15 @@ go build -o dz-conformance .
   --mktdata-port 7011 \
   --refdata-port 7012 \
   --interface doublezero1
+
+# Market-by-price feed (three ports, like MBO)
+./dz-conformance \
+  --feed mbp \
+  --group 239.10.10.20 \
+  --mktdata-port 7021 \
+  --refdata-port 7022 \
+  --snapshot-port 7023 \
+  --interface doublezero1
 ```
 
 Runs until SIGINT or SIGTERM.

@@ -33,6 +33,7 @@ var testedRules = map[string]string{
 	"MSG.LENGTH_PER_TYPE":               "TestTier1Rules/MSG.LENGTH_PER_TYPE (tier1_test.go)",
 	"MSG.WRONG_PORT_PLACEMENT":          "TestTier1Rules/MSG.WRONG_PORT_PLACEMENT (tier1_test.go)",
 	"MSG.UNKNOWN_TYPE_SKIPPED":          "TestTier1Rules/MSG.UNKNOWN_TYPE_SKIPPED (tier1_test.go)",
+	"MSG.SNAPSHOT_FLAG_MATCHES_PORT":    "TestTier1Rules/MSG.SNAPSHOT_FLAG_MATCHES_PORT (tier1_test.go)",
 	"MSG.RESERVED_TYPE_0X03_0X05":       "TestTier1Rules/MSG.RESERVED_TYPE_0X03_0X05 (tier1_test.go)",
 	"RESERVED.FIELD_BITS_ZERO":          "TestTier1Rules/RESERVED.FIELD_BITS_ZERO (tier1_test.go)",
 	"HEARTBEAT.CHANNEL_ID_MATCH":        "TestTier1Rules/HEARTBEAT.CHANNEL_ID_MATCH (tier1_test.go)",

@@ -25,6 +25,8 @@ func magicFor(feed core.Feed) uint16 {
 		return wire.MagicTOB
 	case core.FeedMidpoint:
 		return wire.MagicMid
+	case core.FeedMBP:
+		return wire.MagicMBP
 	default: // FeedMBO
 		return wire.MagicMBO
 	}

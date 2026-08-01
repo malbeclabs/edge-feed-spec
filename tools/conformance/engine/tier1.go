@@ -57,11 +57,37 @@ func expectedMsgLen(feed core.Feed, typ uint8) uint8 {
 	case wire.TypeInstrReset:
 		return 28
 	case wire.TypeSnapshotBegin:
+		// **MBP is a prefix-superset**: bytes 0-35 are MBO's layout, with
+		// `Depth Bound` appended at offset 36. Same Type ID, different length —
+		// `InstrumentDefinition` is the precedent for that across siblings.
+		if feed == core.FeedMBP {
+			return 40
+		}
 		return 36
 	case wire.TypeSnapshotOrder:
 		return 44
 	case wire.TypeSnapshotEnd:
 		return 20
+	case wire.TypeLiquidation: // 0x08
+		if feed == core.FeedMidpoint {
+			return 0 // reserved in midpoint
+		}
+		return 48
+	case wire.TypeLevelUpdate: // 0x40
+		if feed == core.FeedMBP {
+			return 48
+		}
+		return 0
+	case wire.TypeBookClear: // 0x41
+		if feed == core.FeedMBP {
+			return 36
+		}
+		return 0
+	case wire.TypeSnapshotLevel: // 0x42
+		if feed == core.FeedMBP {
+			return 32
+		}
+		return 0
 	}
 	return 0
 }
@@ -103,6 +129,23 @@ func knownTypes(feed core.Feed) map[uint8]bool {
 			wire.TypeSnapshotBegin: true,
 			wire.TypeSnapshotOrder: true,
 			wire.TypeSnapshotEnd:   true,
+		}
+	case core.FeedMBP:
+		return map[uint8]bool{
+			wire.TypeHeartbeat:     true,
+			wire.TypeInstrumentDef: true,
+			// 0x03 and 0x05 are reserved here too.
+			wire.TypeTrade:         true,
+			wire.TypeEndOfSession:  true,
+			wire.TypeManifest:      true,
+			wire.TypeLiquidation:   true,
+			wire.TypeBatchBoundary: true,
+			wire.TypeInstrReset:    true,
+			wire.TypeSnapshotBegin: true,
+			wire.TypeSnapshotEnd:   true,
+			wire.TypeLevelUpdate:   true,
+			wire.TypeBookClear:     true,
+			wire.TypeSnapshotLevel: true,
 		}
 	}
 	return nil
@@ -155,6 +198,26 @@ func portAllowed(feed core.Feed, typ uint8, port core.Port) bool {
 				typ == wire.TypeSnapshotOrder ||
 				typ == wire.TypeSnapshotEnd
 		}
+	case core.FeedMBP:
+		// Three-port model, per the spec's Message Types table.
+		switch port {
+		case core.PortMktData:
+			return typ == wire.TypeHeartbeat ||
+				typ == wire.TypeTrade ||
+				typ == wire.TypeLiquidation ||
+				typ == wire.TypeEndOfSession ||
+				typ == wire.TypeLevelUpdate ||
+				typ == wire.TypeBookClear ||
+				typ == wire.TypeBatchBoundary ||
+				typ == wire.TypeInstrReset
+		case core.PortRefData:
+			return typ == wire.TypeInstrumentDef ||
+				typ == wire.TypeManifest
+		case core.PortSnapshot:
+			return typ == wire.TypeSnapshotBegin ||
+				typ == wire.TypeSnapshotLevel ||
+				typ == wire.TypeSnapshotEnd
+		}
 	}
 	return false
 }
@@ -194,6 +257,23 @@ func (e *Engine) checkTier1(f *wire.Frame, port core.Port) {
 		if !portAllowed(e.cfg.Feed, m.Type, port) {
 			e.Emit("MSG.WRONG_PORT_PLACEMENT", core.Violation, port, seq, ch, 0,
 				fmt.Sprintf("type 0x%02X not permitted on %s port", m.Type, port))
+		}
+
+		// MSG.SNAPSHOT_FLAG_MATCHES_PORT: bit 0 of the application-header Flags
+		// distinguishes snapshot from incremental. The market-by-price spec is the
+		// first in the family to give it a normative setting — "Set application
+		// header Flags bit 0 on every message emitted on this port, and clear it on
+		// every mktdata and refdata message" — precisely so it is verifiable from a
+		// capture, and it tells subscribers to count a mismatch as a publisher
+		// defect. Checked by port rather than by type, which is what catches a
+		// refdata message built with the snapshot header constructor.
+		if e.cfg.Feed == core.FeedMBP {
+			isSnap := m.Flags&0x0001 != 0
+			if want := port == core.PortSnapshot; isSnap != want {
+				e.Emit("MSG.SNAPSHOT_FLAG_MATCHES_PORT", core.Violation, port, seq, ch, 0,
+					fmt.Sprintf("type 0x%02X on %s port: Flags bit 0 is %d, expected %d",
+						m.Type, port, b2i(isSnap), b2i(want)))
+			}
 		}
 
 		// Per-type field checks.
@@ -453,4 +533,12 @@ func (e *Engine) checkTier1Mid(m wire.Message, port core.Port, ch uint8, seq uin
 		e.Emit("MID.TIMESTAMP_ORDERING", core.Violation, port, seq, ch, 0,
 			fmt.Sprintf("compute_ts %d < book_ts %d", computeTS, bookTS))
 	}
+}
+
+// b2i renders a bool as the 0/1 the wire uses, for message text.
+func b2i(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }

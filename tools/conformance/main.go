@@ -21,13 +21,13 @@ func main() {
 	fs := flag.NewFlagSet("dz-conformance", flag.ExitOnError)
 
 	// Feed selection
-	feedStr := fs.String("feed", "mbo", "feed to monitor: tob, midpoint, or mbo")
+	feedStr := fs.String("feed", "mbo", "feed to monitor: tob, midpoint, mbo, or mbp")
 
 	// Network binding
 	group := fs.String("group", "", "multicast group address (required for live capture)")
 	mktdataPort := fs.Int("mktdata-port", 0, "UDP port for market-data feed")
 	refdataPort := fs.Int("refdata-port", 0, "UDP port for reference-data feed")
-	snapshotPort := fs.Int("snapshot-port", 0, "UDP port for snapshot feed (MBO only)")
+	snapshotPort := fs.Int("snapshot-port", 0, "UDP port for snapshot feed (MBO and MBP)")
 	iface := fs.String("interface", "", "network interface for live multicast capture")
 
 	// Replay
@@ -70,8 +70,10 @@ func main() {
 		feed = core.FeedMidpoint
 	case "mbo":
 		feed = core.FeedMBO
+	case "mbp":
+		feed = core.FeedMBP
 	default:
-		fmt.Fprintf(os.Stderr, "dz-conformance: unknown feed %q; must be tob, midpoint, or mbo\n", *feedStr)
+		fmt.Fprintf(os.Stderr, "dz-conformance: unknown feed %q; must be tob, midpoint, mbo, or mbp\n", *feedStr)
 		os.Exit(2)
 	}
 
