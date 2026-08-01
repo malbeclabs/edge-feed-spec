@@ -256,9 +256,9 @@ func TestMBPAbsoluteApplyPairsZeroWithDelete(t *testing.T) {
 // --- MBP.SNAP.GROUP_STRUCTURE ---
 
 func TestMBPSnapshotGroupStructure(t *testing.T) {
-	if newTape().group(1, 0, 1, 0, 0, bid(100, 5), bid(99, 3)).
+	if newTape().group(1, 0, 1, 0, 0, bid(100, 5), bid(99, 3), ask(101, 4)).
 		violated(t, "MBP.SNAP.GROUP_STRUCTURE") {
-		t.Error("a well-formed group must not be reported")
+		t.Error("a well-formed two-sided group must not be reported")
 	}
 
 	// Declared 2, carried 1. A subscriber discards the group on that mismatch, so

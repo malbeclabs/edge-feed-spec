@@ -4,6 +4,10 @@ import "github.com/malbeclabs/edge-feed-spec/tools/conformance/wire"
 
 // Market-by-price field accessors. Offsets are the spec's, minus the 4-byte
 // application header that `wire.Message.Body` already strips.
+//
+// Only fields a rule actually reads have an accessor: the full layout is in the
+// comment above each message, and `unused` rightly rejects the rest. Add one when
+// a rule needs it.
 
 // --- LevelUpdate (0x40, 48 bytes total) ---
 // spec  4 Instrument ID | 8 Source ID | 10 Side | 11 Action
@@ -11,16 +15,11 @@ import "github.com/malbeclabs/edge-feed-spec/tools/conformance/wire"
 //	12 Per-Instrument Seq | 16 Price | 24 Quantity | 32 Timestamp
 //	40 Order Count | 42 Level Index | 44 Update Reason | 45 Level Flags
 func levelUpdateInstrumentID(m wire.Message) uint32 { return bodyU32LE(m, 0) }
-func levelUpdateSourceID(m wire.Message) uint16     { return bodyU16LE(m, 4) }
 func levelUpdateSide(m wire.Message) uint8          { return bodyU8(m, 6) }
 func levelUpdateAction(m wire.Message) uint8        { return bodyU8(m, 7) }
 func levelUpdatePerInstrSeq(m wire.Message) uint32  { return bodyU32LE(m, 8) }
 func levelUpdatePrice(m wire.Message) int64         { return int64(bodyU64LE(m, 12)) }
 func levelUpdateQuantity(m wire.Message) uint64     { return bodyU64LE(m, 20) }
-func levelUpdateOrderCount(m wire.Message) uint16   { return bodyU16LE(m, 36) }
-func levelUpdateLevelIndex(m wire.Message) uint16   { return bodyU16LE(m, 38) }
-func levelUpdateReason(m wire.Message) uint8        { return bodyU8(m, 40) }
-func levelUpdateLevelFlags(m wire.Message) uint8    { return bodyU8(m, 41) }
 
 // --- BookClear (0x41, 36 bytes total) ---
 // spec  4 Instrument ID | 8 Source ID | 10 Clear Side | 11 Scope
@@ -31,7 +30,6 @@ func bookClearClearSide(m wire.Message) uint8     { return bodyU8(m, 6) }
 func bookClearScope(m wire.Message) uint8         { return bodyU8(m, 7) }
 func bookClearPerInstrSeq(m wire.Message) uint32  { return bodyU32LE(m, 8) }
 func bookClearFromPrice(m wire.Message) int64     { return int64(bodyU64LE(m, 12)) }
-func bookClearReason(m wire.Message) uint8        { return bodyU8(m, 28) }
 
 // --- SnapshotBegin (0x20, 40 bytes on this feed) ---
 // Bytes 0-35 are market-by-order's layout; `Depth Bound` is appended at 36.
@@ -45,9 +43,7 @@ func snapshotBeginDepthBound(m wire.Message) uint32 { return bodyU32LE(m, 32) }
 func snapshotLevelSnapshotID(m wire.Message) uint32 { return bodyU32LE(m, 0) }
 func snapshotLevelPrice(m wire.Message) int64       { return int64(bodyU64LE(m, 4)) }
 func snapshotLevelQuantity(m wire.Message) uint64   { return bodyU64LE(m, 12) }
-func snapshotLevelOrderCount(m wire.Message) uint16 { return bodyU16LE(m, 20) }
 func snapshotLevelSide(m wire.Message) uint8        { return bodyU8(m, 22) }
-func snapshotLevelFlags(m wire.Message) uint8       { return bodyU8(m, 23) }
 
 // Action values (0x40). The table starts at Unknown, not at New — a publisher
 // numbering New/Change/Delete from zero puts every removal on the wire as a
