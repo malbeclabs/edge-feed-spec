@@ -25,6 +25,34 @@ type mbpInstrKey struct {
 	instrID uint32
 }
 
+// mbpJournalEntry is one applied delta, kept so the consumer can reconstruct its
+// own state **as of any per-instrument seq** in the window.
+//
+// That is the whole reason a journal exists rather than a plain buffer. A
+// snapshot is captured at some `K`, and by the time the group is classified the
+// consumer has usually applied past it — the ports drain independently. Rewinding
+// is not available: `Quantity = 0` carries no pre-image, so the spec says so
+// outright. Replaying forward from the last adopted snapshot is.
+type mbpJournalEntry struct {
+	perSeq uint32
+	// clear is set for a BookClear; the level fields are then its scope.
+	clear     bool
+	side      uint8
+	scope     uint8
+	price     int64
+	qty       uint64
+	fromPrice int64
+}
+
+// maxMBPJournal bounds the per-instrument journal.
+//
+// The spec requires a bounded buffer and a defined overflow policy, for the same
+// reason it gives: worst case is one snapshot cycle of channel traffic, and an
+// operator stretching the cycle for bandwidth is also stretching this. On
+// overflow the instrument goes unverifiable until its next group rather than
+// growing without limit — it recovers exactly as any gapped instrument does.
+const maxMBPJournal = 4096
+
 type mbpInstr struct {
 	book *mbpBook
 	// lastSeq is the last applied Per-Instrument Seq; lastSeqSet distinguishes
@@ -42,6 +70,41 @@ type mbpInstr struct {
 	// sawSnapshotSinceDelta tracks whether a snapshot completed since the last
 	// delta, so a delta restarting at 1 across that boundary is attributable.
 	sawSnapshotSinceDelta bool
+	// base is the last adopted snapshot's ladder, as of baseK; journal holds every
+	// delta applied since, in arrival order. Together they reconstruct the
+	// consumer's state at any seq in the window.
+	base     map[mbpLevelKey]uint64
+	baseK    uint32
+	baseSet  bool
+	journal  []mbpJournalEntry
+	overflow bool
+}
+
+// stateAsOf replays the base ladder plus every journalled delta at or below k.
+func (in *mbpInstr) stateAsOf(k uint32) map[mbpLevelKey]uint64 {
+	b := &mbpBook{levels: make(map[mbpLevelKey]uint64, len(in.base))}
+	for key, v := range in.base {
+		b.levels[key] = v
+	}
+	for _, e := range in.journal {
+		if e.perSeq > k {
+			break
+		}
+		if e.clear {
+			b.applyBookClear(e.side, e.scope, e.fromPrice)
+			continue
+		}
+		b.applyLevelUpdate(e.side, e.price, e.qty)
+	}
+	return b.levels
+}
+
+func (in *mbpInstr) record(e mbpJournalEntry) {
+	if len(in.journal) >= maxMBPJournal {
+		in.overflow = true
+		return
+	}
+	in.journal = append(in.journal, e)
 }
 
 // mbpOpenSnap is a snapshot group in flight on the snapshot port.
@@ -125,8 +188,11 @@ func (e *Engine) checkMBP(f *wire.Frame, ch uint8) {
 					fmt.Sprintf("Action = Delete carrying Quantity = %d, which must be 0", qty))
 			}
 
-			e.checkMBPSeq(in, k, levelUpdatePerInstrSeq(m), seq, ch)
-			in.book.applyLevelUpdate(levelUpdateSide(m), levelUpdatePrice(m), qty)
+			perSeq := levelUpdatePerInstrSeq(m)
+			e.checkMBPSeq(in, k, perSeq, seq, ch)
+			side, price := levelUpdateSide(m), levelUpdatePrice(m)
+			in.book.applyLevelUpdate(side, price, qty)
+			in.record(mbpJournalEntry{perSeq: perSeq, side: side, price: price, qty: qty})
 
 		case wire.TypeBookClear:
 			if m.Length != 36 {
@@ -144,8 +210,11 @@ func (e *Engine) checkMBP(f *wire.Frame, ch uint8) {
 					"BookClear with Scope = 1 and Clear Side = Both is malformed: one price cannot bound both sides")
 				continue
 			}
-			e.checkMBPSeq(in, k, bookClearPerInstrSeq(m), seq, ch)
-			in.book.applyBookClear(side, scope, bookClearFromPrice(m))
+			perSeq := bookClearPerInstrSeq(m)
+			e.checkMBPSeq(in, k, perSeq, seq, ch)
+			from := bookClearFromPrice(m)
+			in.book.applyBookClear(side, scope, from)
+			in.record(mbpJournalEntry{perSeq: perSeq, clear: true, side: side, scope: scope, fromPrice: from})
 
 		case wire.TypeInstrReset:
 			if m.Length != 28 {
@@ -159,6 +228,7 @@ func (e *Engine) checkMBP(f *wire.Frame, ch uint8) {
 			in.ready = false
 			in.gapped = false
 			in.lastSeqSet = false
+			in.base, in.baseSet, in.journal, in.overflow = nil, false, nil, false
 		}
 	}
 }
@@ -337,23 +407,38 @@ func (e *Engine) finishMBPSnapshot(m wire.Message, ch uint8, seq uint64) {
 	in.book.depthBound = &db
 
 	// MBP.SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT — the check the rest of this
-	// exists to enable. Compared only when the reconstruction is trustworthy and
-	// the two states are as-of the same point: `Last Instrument Seq` is the
-	// discriminator, exactly as *Snapshot while ready* prescribes, because
-	// `Anchor Seq` is a channel-wide number that moves on every other instrument's
-	// deltas and on every Heartbeat.
+	// exists to enable.
+	//
+	// **Compared as of the snapshot's own `Last Instrument Seq`, replayed from the
+	// journal.** An earlier revision required `K == lastSeq` and skipped otherwise,
+	// so it only compared when the consumer happened to sit exactly at the capture
+	// point: 102 of 344 groups on a real capture, and structurally never for the
+	// busiest instruments, because the ports drain independently and the deltas
+	// after a capture are routinely classified before the group that precedes them.
+	// Replaying forward from the last adopted ladder makes a group comparable
+	// regardless of that ordering, which is what the spec's subscriber does with
+	// its delta buffer.
+	//
+	// `Last Instrument Seq` is the discriminator, never `Anchor Seq`: the anchor is
+	// a channel-wide mktdata number that moves on every other instrument's deltas
+	// and on every Heartbeat.
 	switch {
-	case in.gapped || !in.lastSeqSet:
-		// Loss, or nothing applied yet. Never reported as non-conformance.
-	case !in.ready:
-		// First completed group for this instrument: adopt it as the baseline
-		// rather than diffing against a ladder built from a partial delta history.
-	case open.lastK != in.lastSeq:
-		// The publisher captured at a different point than we have applied. Routine
-		// — deltas flow between capture and delivery — and not comparable.
+	case in.gapped || in.overflow:
+		// Loss, or a journal we bounded. Never reported as non-conformance.
+	case !in.baseSet:
+		// No adopted ladder to replay from yet; this group becomes it.
+	case open.lastK < in.baseK:
+		// Captured before our own baseline: nothing to replay it against.
+	case !in.lastSeqSet || open.lastK > in.lastSeq:
+		// **We have not applied through K yet.** Replaying "as of K" with a journal
+		// that stops short of it silently yields the state as of wherever the
+		// journal ends, and the diff then blames the publisher for deltas we simply
+		// have not classified — the group and the deltas travel on separate ports.
+		// Caught exactly this way: a group at K=579 diffed against a ladder missing
+		// the delete that delta 579 carried.
 	default:
 		e.mbp.oracleRuns++
-		if d := diffMBPLevels(in.book.clone(), open.levels); len(d) > 0 {
+		if d := diffMBPLevels(in.stateAsOf(open.lastK), open.levels); len(d) > 0 {
 			e.Emit("MBP.SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT", core.Violation, core.PortSnapshot, seq, ch,
 				open.key.instrID,
 				fmt.Sprintf("at Last Instrument Seq %d the delta-reconstructed ladder differs from the snapshot in %d level(s): %s",
@@ -361,48 +446,27 @@ func (e *Engine) finishMBPSnapshot(m wire.Message, ch uint8, seq uint64) {
 		}
 	}
 
-	// **A group captured behind our tracker is not a usable baseline.**
-	//
-	// The spec's subscriber buffers deltas and, on `SnapshotEnd`, replays those
-	// above the anchor onto the adopted ladder. This consumer has no such buffer —
-	// it applies deltas as they arrive — so when a capture starts mid-stream it can
-	// hold deltas past `K` with no baseline they were ever applied to. Adopting the
-	// group then produces a ladder that is as-of `K` while the tracker says
-	// otherwise, and the next delta reads as a forward gap: that is what produced a
-	// "jumped 404 -> 447" against a capture whose wire sequence was provably dense,
-	// and the level mismatch that followed it.
-	//
-	// Waiting costs one rotation and is honest. The next group is captured at or
-	// after where we are, and from there ladder and tracker agree.
-	if in.lastSeqSet && open.lastK < in.lastSeq {
-		in.gapped = true
-		in.sawSnapshotSinceDelta = true
-		return
-	}
-
-	// **Adopt only when genuinely behind, and never rewind the tracker.**
-	// *Snapshot while ready* makes `Last Instrument Seq` the discriminator: with
-	// `K <= last_applied` the subscriber is current or has advanced past the
-	// capture, which is the ordinary case — deltas routinely arrive between the
-	// publisher's capture and the snapshot's delivery — and the group MAY simply be
-	// ignored.
-	//
-	// Rewinding here is a bug that looks like a publisher defect. Ports drain
-	// independently, so the deltas after a capture are frequently classified before
-	// the group that precedes them; setting `lastSeq = K` then moves the tracker
-	// backwards, and the very next delta reads as a forward gap. That produced a
-	// "Per-Instrument Seq jumped 404 -> 447" against a capture whose wire sequence
-	// was provably dense.
-	if !in.ready || open.lastK > in.lastSeq {
-		in.book.levels = open.levels
-		if open.lastK > 0 {
-			in.lastSeq = open.lastK
-			in.lastSeqSet = true
+	// Adopt this group as the new baseline and drop the journal it subsumes.
+	in.base = open.levels
+	in.baseK = open.lastK
+	in.baseSet = true
+	kept := in.journal[:0]
+	for _, ent := range in.journal {
+		if ent.perSeq > open.lastK {
+			kept = append(kept, ent)
 		}
 	}
+	in.journal = kept
+	in.overflow = false
+	// The live ladder is the new baseline plus whatever the journal still holds.
+	in.book.levels = in.stateAsOf(^uint32(0))
 	in.ready = true
 	in.gapped = false
 	in.sawSnapshotSinceDelta = true
+	if open.lastK > in.lastSeq {
+		in.lastSeq = open.lastK
+		in.lastSeqSet = true
+	}
 }
 
 // describeMBPDiff renders up to three differing levels, so a report is actionable

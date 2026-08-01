@@ -105,16 +105,6 @@ func (b *mbpBook) crossed() bool {
 	return hasBid && hasAsk && bid > ask
 }
 
-// clone snapshots the ladder, for diffing against a snapshot group captured at an
-// earlier anchor while the live book keeps advancing.
-func (b *mbpBook) clone() map[mbpLevelKey]uint64 {
-	out := make(map[mbpLevelKey]uint64, len(b.levels))
-	for k, v := range b.levels {
-		out[k] = v
-	}
-	return out
-}
-
 // diffLevels returns the keys that differ between two ladders, with both values.
 // Used to report a reconstruction mismatch concretely rather than as a count.
 type mbpLevelDiff struct {
