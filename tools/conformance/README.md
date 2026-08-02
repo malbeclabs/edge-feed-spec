@@ -64,7 +64,15 @@ echo "exit: $?"   # 0
 echo "exit: $?"   # 1
 ```
 
-`conformant_tob.pcap` and `conformant_midpoint.pcap` are also provided (mktdata + refdata only). Add `--json-report /tmp/report.json` for a per-rule status dump, or `-v` to surface `Unverifiable`/info findings.
+`conformant_tob.pcap` and `conformant_midpoint.pcap` are also provided (mktdata + refdata only).
+
+`nonconformant_mbp.pcap` is different in kind: a real capture from a live publisher on venue data, on ports `31000`/`41000`/`51000`, taken **before** its defects were fixed. It carries oversized frames and the snapshot flag set on refdata, so it exits 1 by design — it is a regression fixture for the market-by-price rules, not a conformant sample. It is also two orders of magnitude larger than the hand-built captures, which is the cost of covering a feed whose snapshot stream is most of its bytes. That cost bought something: three defects in the consumer survived the synthetic tests and were found only by running against this data.
+
+```bash
+# Exits 1: the capture's known defects are reported.
+./dz-conformance --feed mbp --pcap testdata/nonconformant_mbp.pcap \
+  --mktdata-port 31000 --refdata-port 41000 --snapshot-port 51000
+``` Add `--json-report /tmp/report.json` for a per-rule status dump, or `-v` to surface `Unverifiable`/info findings.
 
 ### Live capture
 
