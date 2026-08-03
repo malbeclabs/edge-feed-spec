@@ -152,10 +152,8 @@ func (e *Engine) Process(f *wire.Frame, port core.Port, sf []wire.StructFinding)
 		// on ANY port are never checked against stale old-era trackers. Handling only
 		// the mktdata-leads case (the prior approach) left a false-positive window
 		// when the snapshot port observed the reset first (F4).
-		if e.cfg.Feed == core.FeedMBP {
-			e.ensureMBP()
-			e.mbp.onResetCount()
-		}
+		// MBP handles the reset from classify instead (see mbpObserveEra): it must
+		// also see the era a port *seeds* without advancing, which never reaches here.
 		if e.cfg.Feed == core.FeedMBO {
 			e.ensureMBO()
 			wiped := e.mbo.onResetCountForEra(res.newEra)
@@ -233,6 +231,10 @@ func (e *Engine) classify(item *bufferItem, pt *portTracker) {
 	// item.era: old-era items are classified before advanceEra() in Process,
 	// and new-era items are classified after. So seq tracking is always active.
 	e.beginFrame(f.Header.SchemaVersion)
+
+	// Channel-wide reset bookkeeping for MBP, driven by every accepted frame on any
+	// port rather than by the per-port era advance in Process.
+	e.mbpObserveEra(port, item.era)
 
 	// FRAME.SEQ_RESET_GAP: backward seq motion without a reset-count change is
 	// a publisher violation. A plain forward gap is transport loss (not a violation).
@@ -383,6 +385,9 @@ func (e *Engine) Flush() {
 // SNAP.BEGIN_ORDER_END_GROUPING (Task 21): any snapshot group still open at
 // end-of-stream (SnapshotBegin without SnapshotEnd) is a grouping violation.
 //
+// MBP.SNAP.GROUP_STRUCTURE: the market-by-price equivalent, reported as
+// Unverifiable — see flushOpenMBPSnaps for why the two differ.
+//
 // RESET.SNAPSHOT_FOLLOWS (Task 22): any instrument still awaiting a recovery
 // snapshot at end-of-stream fires this rule.
 //
@@ -395,6 +400,7 @@ func (e *Engine) Flush() {
 func (e *Engine) EndRun() {
 	// Flush any snapshot groups that were opened but never closed.
 	e.flushOpenSnaps()
+	e.flushOpenMBPSnaps()
 
 	// Task 22: reset-recovery and round-robin end-of-run checks.
 	e.checkResetSnapshotFollows()

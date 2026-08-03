@@ -9,6 +9,15 @@ package engine
 // the same book, so a level is identified by `(Side, Price)` and carries the
 // absolute aggregate resting there. Sharing a type would mean modelling orders
 // this feed never sees.
+//
+// **`depthBound`, `inside()` and `crossed()` are groundwork, not coverage.** No
+// rule reads them yet: the two they exist for — `Depth Bound` enforcement and
+// crossed-book monitoring — are the remaining market-by-price detectors, and both
+// need a rule ID, a registry entry and a doc line before they can fire. They are
+// kept rather than dropped because each carries a decision that is easy to get
+// wrong on a second attempt (unknown-vs-zero for the bound, locked-is-not-crossed
+// for the inside), and each is tested. Anyone scanning this file for what the tool
+// currently checks should skip them.
 
 // mbpLevelKey identifies a level. Rank is deliberately absent: the spec makes
 // `(Side, Price)` the addressing model and says a subscriber MUST NOT key book

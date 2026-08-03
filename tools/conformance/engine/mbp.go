@@ -118,6 +118,17 @@ type mbpOpenSnap struct {
 	levels  map[mbpLevelKey]uint64
 	count   uint32
 	dupKeys int
+	// dirty is set by a snapshot-port sequence gap observed **during** this group,
+	// which is the precise condition under which loss can account for a structural
+	// anomaly in it: a dropped datagram can carry away a `SnapshotLevel` or the
+	// `SnapshotEnd` itself. Gaps before the Begin do not set it — the Begin
+	// re-established everything this group needs.
+	dirty bool
+	// lastSnapPortSeq is the snapshot-port sequence of the most recent frame seen
+	// for this group. Tracked with an explicit `set` flag rather than a zero
+	// sentinel because seq 0 is the first frame of an era, not "unset".
+	lastSnapPortSeq    uint64
+	lastSnapPortSeqSet bool
 }
 
 type mbpState struct {
@@ -125,14 +136,26 @@ type mbpState struct {
 	// told apart from one where every instrument was skipped as unverifiable.
 	oracleRuns int
 	instr      map[mbpInstrKey]*mbpInstr
-	// open is the single group in flight. The spec forbids interleaving two groups
-	// for different instruments, so one slot is the correct shape — a map would
-	// model something the wire does not permit.
-	open *mbpOpenSnap
+	// open holds the group in flight, **keyed by channel**.
+	//
+	// The spec's non-interleaving rule scopes to one instrument stream, and a
+	// channel is an independent state machine with its own snapshot cycle — the
+	// frame header carries `Channel ID` precisely because a deployment may shard
+	// instruments across channels and carry more than one of them on a port. A
+	// single slot made two conformant channels sharing a snapshot port look like an
+	// interleaving publisher, and silently discarded one of their groups.
+	open map[uint8]*mbpOpenSnap
+	// resetEra is the Reset Count this state was last wiped for, so the second and
+	// third port to cross the same reset do not wipe again.
+	resetEra    uint8
+	resetEraSet bool
 }
 
 func newMBPState() *mbpState {
-	return &mbpState{instr: make(map[mbpInstrKey]*mbpInstr)}
+	return &mbpState{
+		instr: make(map[mbpInstrKey]*mbpInstr),
+		open:  make(map[uint8]*mbpOpenSnap),
+	}
 }
 
 func (s *mbpState) get(k mbpInstrKey) *mbpInstr {
@@ -144,17 +167,71 @@ func (s *mbpState) get(k mbpInstrKey) *mbpInstr {
 	return in
 }
 
-// onResetCount wipes per-instrument state: Per-Instrument Seq restarts at 1 and
-// Snapshot ID is scoped to the era, so carrying either across a reset would judge
-// new-era messages against discarded numbers.
-func (s *mbpState) onResetCount() {
+// onEraObserved records the Reset Count of an accepted frame and wipes
+// per-instrument state when that era is newer than the one this state was built
+// for. Per-Instrument Seq restarts at 1 and Snapshot ID is scoped to the era, so
+// carrying either across a reset would judge new-era messages against discarded
+// numbers.
+//
+// **Once per era, no matter which port sees it.** Reset Count is channel-wide but
+// each of the three ports observes it independently, and the wipe used to run
+// per-port: the second and third port to cross one reset destroyed state the first
+// had already rebuilt, so a real per-instrument gap right after a reset was
+// swallowed by the tool's own bookkeeping and any snapshot group in flight was
+// silently dropped.
+//
+// **Called on every accepted frame, not only on a port's era advance** — which is
+// where this diverges from `mboState.onResetCountForEra`. A port seeds its era from
+// whatever `ResetCount` arrives first without that counting as an advance, so a
+// capture whose mktdata frames all begin in era 1 while refdata still carries an
+// era-0 frame gets no advance on mktdata at all, and refdata's later advance is
+// then the *first* wipe — landing on state mktdata has already built. Seeding here
+// closes that: the first era observed is recorded rather than applied, and only a
+// genuinely newer one wipes.
+//
+// Returns true when it actually wiped.
+func (s *mbpState) onEraObserved(era uint8) bool {
+	if !s.resetEraSet {
+		// First era of the run: nothing has been built against another one.
+		s.resetEra, s.resetEraSet = era, true
+		return false
+	}
+	// Only forward. An old-era straggler classified after another port advanced
+	// must not wipe the new era's state back out.
+	if eraRelation(s.resetEra, era) != eraNewer {
+		return false
+	}
+	s.resetEra = era
 	s.instr = make(map[mbpInstrKey]*mbpInstr)
-	s.open = nil
+	clear(s.open)
+	return true
 }
 
 func (e *Engine) ensureMBP() {
 	if e.mbp == nil {
 		e.mbp = newMBPState()
+	}
+}
+
+// mbpObserveEra feeds one accepted frame's Reset Count to the channel-wide reset
+// bookkeeping, and taints the snapshot port when a *different* port led the reset.
+//
+// That taint is what keeps the wipe's own consequences off the publisher's record:
+// the group the wipe just dropped may still have frames in flight on the snapshot
+// port, and without it each one is a false MBP.SNAP.GROUP_STRUCTURE orphan. The
+// snapshot port clears the flag when it advances its own era. Skipped when the
+// snapshot port led the reset, since it has already advanced and its new-era groups
+// are clean (F4).
+func (e *Engine) mbpObserveEra(port core.Port, era uint8) {
+	if e.cfg.Feed != core.FeedMBP {
+		return
+	}
+	e.ensureMBP()
+	if !e.mbp.onEraObserved(era) || port == core.PortSnapshot {
+		return
+	}
+	if snapPT, ok := e.ports[core.PortSnapshot]; ok {
+		snapPT.dirtyWindow = true
 	}
 }
 
@@ -189,7 +266,9 @@ func (e *Engine) checkMBP(f *wire.Frame, ch uint8) {
 			}
 
 			perSeq := levelUpdatePerInstrSeq(m)
-			e.checkMBPSeq(in, k, perSeq, seq, ch)
+			if !e.checkMBPSeq(in, k, perSeq, seq, ch) {
+				continue
+			}
 			side, price := levelUpdateSide(m), levelUpdatePrice(m)
 			in.book.applyLevelUpdate(side, price, qty)
 			in.record(mbpJournalEntry{perSeq: perSeq, side: side, price: price, qty: qty})
@@ -208,10 +287,22 @@ func (e *Engine) checkMBP(f *wire.Frame, ch uint8) {
 			if scope == mbpScopeFromPrice && side == mbpClearSideBoth {
 				e.Emit("MBP.DELTA.ABSOLUTE_APPLY", core.Violation, core.PortMktData, seq, ch, k.instrID,
 					"BookClear with Scope = 1 and Clear Side = Both is malformed: one price cannot bound both sides")
+				// **The sequence check still runs.** `Per-Instrument Seq` is readable
+				// whatever the scope/side combination says, and skipping the tracker made
+				// the next well-formed delta a false `PERINSTR_DENSITY` finding on top of
+				// this one — two findings for one defect, the second naming the wrong
+				// problem. The mutation is discarded, because a malformed clear has no
+				// defined one, and the instrument goes untrusted until its next completed
+				// group so the reconstruction oracle does not report the same defect a
+				// third time.
+				e.checkMBPSeq(in, k, bookClearPerInstrSeq(m), seq, ch)
+				in.gapped = true
 				continue
 			}
 			perSeq := bookClearPerInstrSeq(m)
-			e.checkMBPSeq(in, k, perSeq, seq, ch)
+			if !e.checkMBPSeq(in, k, perSeq, seq, ch) {
+				continue
+			}
 			from := bookClearFromPrice(m)
 			in.book.applyBookClear(side, scope, from)
 			in.record(mbpJournalEntry{perSeq: perSeq, clear: true, side: side, scope: scope, fromPrice: from})
@@ -228,6 +319,7 @@ func (e *Engine) checkMBP(f *wire.Frame, ch uint8) {
 			in.ready = false
 			in.gapped = false
 			in.lastSeqSet = false
+			in.sawSnapshotSinceDelta = false
 			in.base, in.baseSet, in.journal, in.overflow = nil, false, nil, false
 		}
 	}
@@ -237,15 +329,21 @@ func (e *Engine) checkMBP(f *wire.Frame, ch uint8) {
 //
 // Both `LevelUpdate` and `BookClear` share one series, because both mutate the
 // book and their relative order is significant.
-func (e *Engine) checkMBPSeq(in *mbpInstr, k mbpInstrKey, got uint32, seq uint64, ch uint8) {
-	defer func() {
-		in.lastSeq = got
-		in.lastSeqSet = true
-		in.sawSnapshotSinceDelta = false
-	}()
+//
+// **Returns false when the message MUST NOT be applied.** The tracker advances
+// only on a path the subscriber accepts; a duplicate or late delta advances
+// nothing and mutates nothing, which is what the spec means by discarding it
+// silently.
+func (e *Engine) checkMBPSeq(in *mbpInstr, k mbpInstrKey, got uint32, seq uint64, ch uint8) bool {
+	// Cleared on every *observed* delta, accepted or not: the flag exists only to
+	// make a restart-at-1 immediately after a group attributable, and one delta has
+	// now answered that question either way.
+	sawSnapshot := in.sawSnapshotSinceDelta
+	in.sawSnapshotSinceDelta = false
 
 	if !in.lastSeqSet {
-		return
+		in.lastSeq, in.lastSeqSet = got, true
+		return true
 	}
 
 	// MBP.DELTA.PERINSTR_NO_SNAPSHOT_RESET: the series is NOT reset at snapshot
@@ -258,24 +356,34 @@ func (e *Engine) checkMBPSeq(in *mbpInstr, k mbpInstrKey, got uint32, seq uint64
 	// case — the two ports are independent, so a delta captured before the snapshot
 	// can be delivered after it — and the spec has the subscriber discard it as a
 	// duplicate rather than complain.
-	if in.sawSnapshotSinceDelta && got == 1 && in.lastSeq > 1 {
+	if sawSnapshot && got == 1 && in.lastSeq > 1 {
 		e.Emit("MBP.DELTA.PERINSTR_NO_SNAPSHOT_RESET", core.Violation, core.PortMktData, seq, ch, k.instrID,
 			fmt.Sprintf("Per-Instrument Seq restarted at 1 after a snapshot (tracker was %d); the series restarts only on a Reset Count change",
 				in.lastSeq))
-		return
+		// Reported and discarded: the publisher's numbering no longer corresponds to
+		// the tracker, so nothing can be applied with confidence until the next
+		// completed group re-establishes both.
+		in.gapped = true
+		return false
 	}
 
 	switch {
 	case got == in.lastSeq+1:
 		// Dense, as required.
+		in.lastSeq = got
+		return true
 	case got > in.lastSeq+1:
 		// A forward gap. Publishers MUST emit densely, but loss is
 		// indistinguishable from a skip at this layer, so this is reported and the
 		// instrument's reconstruction is marked untrustworthy until its next
-		// snapshot rather than blamed for a later mismatch.
+		// snapshot rather than blamed for a later mismatch. The tracker advances to
+		// the number actually on the wire: the following delta is dense against
+		// *this* one, not against the number the gap skipped.
 		e.Emit("MBP.DELTA.PERINSTR_DENSITY", core.Violation, core.PortMktData, seq, ch, k.instrID,
 			fmt.Sprintf("Per-Instrument Seq jumped %d -> %d (expected %d)", in.lastSeq, got, in.lastSeq+1))
 		in.gapped = true
+		in.lastSeq = got
+		return true
 	default:
 		// `<= lastSeq` is a duplicate or a late message, which is exactly what the
 		// monotonic-within-era rule exists to make readable — and the spec has the
@@ -283,17 +391,56 @@ func (e *Engine) checkMBPSeq(in *mbpInstr, k mbpInstrKey, got uint32, seq uint64
 		// snapshot adopted at `K` legitimately precedes deltas at or below `K` that
 		// were already in flight.
 		//
-		// It is still not applied, and it still costs the reconstruction: a
-		// duplicate mutates the ladder without advancing the tracker, so the book is
-		// no longer as-of any point the publisher will snapshot at.
-		in.gapped = true
+		// **Neither applied nor counted against the tracker.** Advancing it here
+		// rewound the tracker on a late duplicate, which turned the very next dense
+		// delta into a false `PERINSTR_DENSITY` finding and left the journal
+		// non-monotonic, so `stateAsOf` replayed a stale quantity and the oracle
+		// blamed the publisher for it. Dropping it outright is what the spec's
+		// subscriber does, and it leaves the reconstruction exactly as-of `lastSeq` —
+		// still comparable, so the instrument is not marked gapped either.
+		return false
 	}
+}
+
+// mbpGroupStatus is the status a `GROUP_STRUCTURE` finding carries when transport
+// loss could account for it.
+//
+// **A conformance tool must not report ordinary transport reality as publisher
+// misconduct** — that is the one failure mode that trains an operator to ignore
+// the tool. One lost snapshot datagram used to yield one MUST finding per
+// surviving level of the group it belonged to. `open` is nil for an orphan, where
+// there is no group flag to consult and the era-wide window is all there is.
+func (e *Engine) mbpGroupStatus(open *mbpOpenSnap) core.Status {
+	if open != nil && open.dirty {
+		return core.Unverifiable
+	}
+	if !e.gateDetectorSnap() {
+		return core.Unverifiable
+	}
+	return core.Violation
+}
+
+// mbpReason renders the bounded metric reason that pairs with the status above.
+func mbpReason(st core.Status) string {
+	if st == core.Unverifiable {
+		return "loss"
+	}
+	return ""
 }
 
 // checkMBPSnapshot validates snapshot-group structure and runs the reconstruction
 // diff when a group completes.
 func (e *Engine) checkMBPSnapshot(f *wire.Frame, ch uint8, seq uint64) {
 	e.ensureMBP()
+
+	// An intra-group snapshot-port gap is more precise than the era-wide dirty
+	// window: only loss after this group's Begin can have cost this group a message.
+	if open := e.mbp.open[ch]; open != nil {
+		if open.lastSnapPortSeqSet && seq > open.lastSnapPortSeq+1 {
+			open.dirty = true
+		}
+		open.lastSnapPortSeq, open.lastSnapPortSeqSet = seq, true
+	}
 
 	for _, m := range f.Messages {
 		switch m.Type {
@@ -302,43 +449,54 @@ func (e *Engine) checkMBPSnapshot(f *wire.Frame, ch uint8, seq uint64) {
 				continue
 			}
 			k := mbpInstrKey{ch: ch, instrID: snapshotBeginInstrumentID(m)}
-			// A Begin while another group is open means the publisher interleaved
-			// two instruments, which the spec forbids outright: all frames carrying
-			// levels for one instrument MUST precede the first frame for another.
-			if e.mbp.open != nil && e.mbp.open.key != k {
-				e.Emit("MBP.SNAP.GROUP_STRUCTURE", core.Violation, core.PortSnapshot, seq, ch, k.instrID,
+			// A Begin while another group is open **on the same channel** means the
+			// publisher interleaved two instruments, which the spec forbids outright:
+			// all frames carrying levels for one instrument MUST precede the first
+			// frame for another. Gated, because a dropped SnapshotEnd produces exactly
+			// this shape from a conformant publisher.
+			if prev := e.mbp.open[ch]; prev != nil && prev.key != k {
+				st := e.mbpGroupStatus(prev)
+				e.Emit("MBP.SNAP.GROUP_STRUCTURE", st, core.PortSnapshot, seq, ch, k.instrID,
 					fmt.Sprintf("SnapshotBegin for instrument %d while a group for %d is still open",
-						k.instrID, e.mbp.open.key.instrID))
+						k.instrID, prev.key.instrID), mbpReason(st))
 			}
-			e.mbp.open = &mbpOpenSnap{
-				key:    k,
-				snapID: snapshotBeginSnapshotID(m),
-				anchor: snapshotBeginAnchorSeq(m),
-				total:  snapshotBeginTotalOrders(m), // Total Orders reads as Total Levels
-				lastK:  snapshotBeginLastInstrumentSeq(m),
-				depth:  snapshotBeginDepthBound(m),
-				levels: make(map[mbpLevelKey]uint64),
+			e.mbp.open[ch] = &mbpOpenSnap{
+				key:                k,
+				snapID:             snapshotBeginSnapshotID(m),
+				anchor:             snapshotBeginAnchorSeq(m),
+				total:              snapshotBeginTotalOrders(m), // Total Orders reads as Total Levels
+				lastK:              snapshotBeginLastInstrumentSeq(m),
+				depth:              snapshotBeginDepthBound(m),
+				levels:             make(map[mbpLevelKey]uint64),
+				lastSnapPortSeq:    seq,
+				lastSnapPortSeqSet: true,
 			}
 
 		case wire.TypeSnapshotLevel:
 			if m.Length != 32 {
 				continue
 			}
-			open := e.mbp.open
+			open := e.mbp.open[ch]
 			if open == nil {
-				e.Emit("MBP.SNAP.GROUP_STRUCTURE", core.Violation, core.PortSnapshot, seq, ch, 0,
-					"SnapshotLevel with no open SnapshotBegin")
+				st := e.mbpGroupStatus(nil)
+				e.Emit("MBP.SNAP.GROUP_STRUCTURE", st, core.PortSnapshot, seq, ch, 0,
+					"SnapshotLevel with no open SnapshotBegin", mbpReason(st))
 				continue
 			}
 			if id := snapshotLevelSnapshotID(m); id != open.snapID {
-				e.Emit("MBP.SNAP.GROUP_STRUCTURE", core.Violation, core.PortSnapshot, seq, ch, open.key.instrID,
-					fmt.Sprintf("SnapshotLevel Snapshot ID %d does not match the open group's %d", id, open.snapID))
+				st := e.mbpGroupStatus(open)
+				e.Emit("MBP.SNAP.GROUP_STRUCTURE", st, core.PortSnapshot, seq, ch, open.key.instrID,
+					fmt.Sprintf("SnapshotLevel Snapshot ID %d does not match the open group's %d", id, open.snapID),
+					mbpReason(st))
 				continue
 			}
 			qty := snapshotLevelQuantity(m)
 			// On this port an absent level is represented by absence. A zero
 			// quantity here is malformed, not a removal — removals are a mktdata
 			// concept.
+			//
+			// Ungated: loss drops whole datagrams, it does not rewrite a field, so this
+			// is a publisher defect however dirty the port is.
 			if qty == 0 {
 				e.Emit("MBP.SNAP.GROUP_STRUCTURE", core.Violation, core.PortSnapshot, seq, ch, open.key.instrID,
 					"SnapshotLevel carries Quantity = 0; an empty level is represented by absence")
@@ -360,37 +518,53 @@ func (e *Engine) checkMBPSnapshot(f *wire.Frame, ch uint8, seq uint64) {
 }
 
 func (e *Engine) finishMBPSnapshot(m wire.Message, ch uint8, seq uint64) {
-	open := e.mbp.open
+	open := e.mbp.open[ch]
 	instrID := snapshotEndInstrumentID(m)
 	if open == nil {
-		e.Emit("MBP.SNAP.GROUP_STRUCTURE", core.Violation, core.PortSnapshot, seq, ch, instrID,
-			"SnapshotEnd with no open SnapshotBegin")
+		st := e.mbpGroupStatus(nil)
+		e.Emit("MBP.SNAP.GROUP_STRUCTURE", st, core.PortSnapshot, seq, ch, instrID,
+			"SnapshotEnd with no open SnapshotBegin", mbpReason(st))
 		return
 	}
-	e.mbp.open = nil
+	delete(e.mbp.open, ch)
 
 	// A subscriber discards the group unless the End matches the Begin on all
 	// three fields AND the level count matches exactly. Each is checked so the
 	// report names which one failed.
+	//
+	// The three field mismatches and an under-count are all shapes a dropped
+	// datagram produces from a conformant publisher — a lost SnapshotEnd leaves the
+	// *next* group's End to be matched against this Begin — so each is gated. An
+	// over-count and a repeated key are not: loss removes messages, it never adds
+	// one.
+	gated := e.mbpGroupStatus(open)
 	ok := true
 	if instrID != open.key.instrID {
-		e.Emit("MBP.SNAP.GROUP_STRUCTURE", core.Violation, core.PortSnapshot, seq, ch, instrID,
-			fmt.Sprintf("SnapshotEnd instrument %d does not match the group's %d", instrID, open.key.instrID))
+		e.Emit("MBP.SNAP.GROUP_STRUCTURE", gated, core.PortSnapshot, seq, ch, instrID,
+			fmt.Sprintf("SnapshotEnd instrument %d does not match the group's %d", instrID, open.key.instrID),
+			mbpReason(gated))
 		ok = false
 	}
 	if a := snapshotEndAnchorSeq(m); a != open.anchor {
-		e.Emit("MBP.SNAP.GROUP_STRUCTURE", core.Violation, core.PortSnapshot, seq, ch, open.key.instrID,
-			fmt.Sprintf("SnapshotEnd Anchor Seq %d does not match the group's %d", a, open.anchor))
+		e.Emit("MBP.SNAP.GROUP_STRUCTURE", gated, core.PortSnapshot, seq, ch, open.key.instrID,
+			fmt.Sprintf("SnapshotEnd Anchor Seq %d does not match the group's %d", a, open.anchor),
+			mbpReason(gated))
 		ok = false
 	}
 	if id := snapshotEndSnapshotID(m); id != open.snapID {
-		e.Emit("MBP.SNAP.GROUP_STRUCTURE", core.Violation, core.PortSnapshot, seq, ch, open.key.instrID,
-			fmt.Sprintf("SnapshotEnd Snapshot ID %d does not match the group's %d", id, open.snapID))
+		e.Emit("MBP.SNAP.GROUP_STRUCTURE", gated, core.PortSnapshot, seq, ch, open.key.instrID,
+			fmt.Sprintf("SnapshotEnd Snapshot ID %d does not match the group's %d", id, open.snapID),
+			mbpReason(gated))
 		ok = false
 	}
 	if open.count != open.total {
-		e.Emit("MBP.SNAP.GROUP_STRUCTURE", core.Violation, core.PortSnapshot, seq, ch, open.key.instrID,
-			fmt.Sprintf("group declared Total Levels = %d but carried %d", open.total, open.count))
+		st := core.Violation
+		if open.count < open.total {
+			st = gated
+		}
+		e.Emit("MBP.SNAP.GROUP_STRUCTURE", st, core.PortSnapshot, seq, ch, open.key.instrID,
+			fmt.Sprintf("group declared Total Levels = %d but carried %d", open.total, open.count),
+			mbpReason(st))
 		ok = false
 	}
 	if open.dupKeys > 0 {
@@ -467,6 +641,29 @@ func (e *Engine) finishMBPSnapshot(m wire.Message, ch uint8, seq uint64) {
 		in.lastSeq = open.lastK
 		in.lastSeqSet = true
 	}
+}
+
+// flushOpenMBPSnaps reports the snapshot groups still in flight at end-of-run.
+//
+// **Unverifiable, never a Violation — deliberately unlike MBO's
+// `flushOpenSnaps`.** A capture that ends mid-group is the ordinary case: the
+// observation window closed, which is not something the publisher did, and a
+// truncated group is the shape every finite capture ends in. Silence is wrong too
+// — a group counted as neither conformant nor not is exactly what an operator
+// needs told — so it is reported as unverifiable and the reason names the cause.
+func (e *Engine) flushOpenMBPSnaps() {
+	if e.mbp == nil {
+		return
+	}
+	for ch, open := range e.mbp.open {
+		if open == nil {
+			continue
+		}
+		e.Emit("MBP.SNAP.GROUP_STRUCTURE", core.Unverifiable, core.PortSnapshot, 0, ch, open.key.instrID,
+			fmt.Sprintf("SnapshotBegin (Snapshot ID %d) never followed by a SnapshotEnd: %d of %d level(s) seen at end of stream",
+				open.snapID, open.count, open.total), "truncated")
+	}
+	clear(e.mbp.open)
 }
 
 // describeMBPDiff renders up to three differing levels, so a report is actionable

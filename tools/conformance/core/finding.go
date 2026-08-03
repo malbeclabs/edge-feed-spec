@@ -84,7 +84,7 @@ type Finding struct {
 	Seq          uint64
 	Detail       string // free-form, for logs only — NEVER a metric label (unbounded)
 	// Reason is a bounded, low-cardinality code (e.g. "loss", "cold_start",
-	// "bound_subset", "reorder", "transition") used for the unverifiable_total
+	// "bound_subset", "reorder", "transition", "truncated") used for the unverifiable_total
 	// metric's `reason` label. Empty is treated as "unspecified". Keep it enum-like.
 	Reason string
 	At     time.Time
