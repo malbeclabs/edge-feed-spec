@@ -36,12 +36,22 @@ import (
 // Keep this list at zero entries where you can. An exemption is the one way this
 // test can be defeated, so a rule belongs here only when its trigger is provably
 // absent, never because the assertion is inconvenient.
+// buildMBOGoldenEntries emits Manifest, InstrumentDefinition, OrderAdd, OrderCancel,
+// Heartbeat and two snapshot groups. Everything below is a consequence of what that
+// list does *not* contain, which makes all four entries one gap in the capture rather
+// than four independent excuses — worth closing by extending it (an InstrumentReset
+// plus its recovery snapshot, and one OrderExecute) so this map can go back to empty.
 var noOpportunity = map[string]string{
-	// buildMBOGoldenEntries emits OrderAdd, OrderCancel, Heartbeat and two snapshot
-	// groups — no OrderExecute, so nothing ever carries an execution price. Its
-	// sibling FIELD.ORDERADD_PRICE_BOUND shares every line of the gate and is
-	// asserted below, so the path itself is covered.
+	// No OrderExecute, so nothing ever carries an execution price. Its sibling
+	// FIELD.ORDERADD_PRICE_BOUND shares every line of the gate and is asserted below,
+	// so the path itself is covered.
 	"mbo/REF.EXEC_PRICE_BOUND": "the capture contains no OrderExecute",
+	// No InstrumentReset, so no instrument ever awaits recovery and none of the three
+	// reset rules has anything to judge. Their pass arms are asserted directly in
+	// engine.TestResetHappyPath, which drives a real reset.
+	"mbo/RESET.SNAPSHOT_FOLLOWS":                       "the capture contains no InstrumentReset",
+	"mbo/RESET.RECOVERY_SNAPSHOT_ANCHOR_MATCHES_RESET": "the capture contains no InstrumentReset",
+	"mbo/RESET.NO_DANGLING_DELTAS_AT_OR_BELOW_ANCHOR":  "the capture contains no InstrumentReset",
 }
 
 func TestConditionalRulesReportADenominator(t *testing.T) {

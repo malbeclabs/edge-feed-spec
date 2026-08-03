@@ -631,13 +631,20 @@ func (e *Engine) applyDeltaSeq(ch uint8, instrID uint32, perSeq uint32, frameSeq
 		// snapshot defines the expected continuation point, not seq=1.
 		if t.recoveryKSet {
 			if perSeq != t.recoveryK+1 {
-				st := core.Violation
+				st, reason := core.Violation, ""
 				if !gapless {
-					st = core.Unverifiable
+					st, reason = core.Unverifiable, core.ReasonLoss
 				}
 				e.Emit("RESET.NO_DANGLING_DELTAS_AT_OR_BELOW_ANCHOR", st, core.PortMktData, frameSeq, ch, instrID,
 					fmt.Sprintf("instrument %d: first post-reset delta seq is %d (expected recoveryK+1=%d)",
-						instrID, perSeq, t.recoveryK+1))
+						instrID, perSeq, t.recoveryK+1), reason)
+			} else {
+				// The one opportunity this rule gets per recovery, and it took it. Silence
+				// here made a stream with no reset at all and a stream whose every recovery
+				// resumed correctly report the same nothing (engine/denominator.go).
+				e.passed("RESET.NO_DANGLING_DELTAS_AT_OR_BELOW_ANCHOR", core.PortMktData, frameSeq, ch, instrID,
+					fmt.Sprintf("instrument %d: first post-reset delta resumes at recoveryK+1=%d as required",
+						instrID, perSeq))
 			}
 			// When perSeq == recoveryK+1 the recovery sequence is correct and seq
 			// continuity is established. We intentionally do NOT set bookTrusted here:
@@ -1108,9 +1115,21 @@ func (e *Engine) onSnapGroupComplete(ch uint8, instrID uint32, anchorSeq uint64,
 	// mktdata port to be gapless (gateDetector). If either has a gap → Unverifiable.
 	if dt.awaitingRecovery {
 		gapless := !dirty && e.gateDetector()
+		// RESET.SNAPSHOT_FOLLOWS passes here, and here is the only place it can: a
+		// recovery snapshot arrived after the reset, which is the whole requirement —
+		// whether its anchor is right is the *other* rule's business, so this passes
+		// even on a wrong anchor (the inverse of that is asserted in
+		// TestResetRecoveryWrongAnchor). Both of that rule's other arms are violations
+		// at other sites, so without this it had a numerator and no denominator at all.
+		e.passed("RESET.SNAPSHOT_FOLLOWS", core.PortSnapshot, snapPortSeq, ch, instrID,
+			fmt.Sprintf("instrument %d: recovery snapshot completed after its InstrumentReset (anchor seq %d)",
+				instrID, dt.awaitingRecoveryAnchor))
 		if anchorSeq == dt.awaitingRecoveryAnchor {
 			// Correct recovery anchor — recovery satisfied. Clear the flag.
 			dt.awaitingRecovery = false
+			e.passed("RESET.RECOVERY_SNAPSHOT_ANCHOR_MATCHES_RESET", core.PortSnapshot, snapPortSeq, ch, instrID,
+				fmt.Sprintf("instrument %d: recovery snapshot anchor seq %d matches the InstrumentReset",
+					instrID, anchorSeq))
 		} else {
 			st := core.Violation
 			if !gapless {
@@ -1314,29 +1333,53 @@ func (e *Engine) snapTrack(ch uint8, instrID uint32, anchorSeq uint64, snapID ui
 
 	// SNAP.ANCHOR_MONOTONIC_PER_INSTRUMENT: successive snapshots for the same
 	// instrument must have non-decreasing Anchor Seq.
-	if st.lastAnchorSeq != nil && anchorSeq < *st.lastAnchorSeq {
-		status := core.Violation
+	//
+	// **Both monotonic rules below compare against a predecessor, so both report the
+	// first snapshot as a cold start rather than saying nothing.** A capture holding
+	// one snapshot per instrument gives them nothing to compare and used to look
+	// exactly like a capture where every anchor was monotonic — the same shape as the
+	// reconstruction oracle's missing baseline (engine/denominator.go).
+	switch {
+	case st.lastAnchorSeq == nil:
+		e.unverified("SNAP.ANCHOR_MONOTONIC_PER_INSTRUMENT", core.ReasonColdStart, core.PortSnapshot, snapPortSeq, ch, instrID,
+			fmt.Sprintf("instrument %d: first snapshot observed, no prior anchor seq to compare against", instrID))
+	case anchorSeq < *st.lastAnchorSeq:
+		status, reason := core.Violation, ""
 		if !gapless {
-			status = core.Unverifiable
+			status, reason = core.Unverifiable, core.ReasonLoss
 		}
 		e.Emit("SNAP.ANCHOR_MONOTONIC_PER_INSTRUMENT", status, core.PortSnapshot, snapPortSeq, ch, instrID,
 			fmt.Sprintf("instrument %d: anchor seq decreased %d→%d",
-				instrID, *st.lastAnchorSeq, anchorSeq))
+				instrID, *st.lastAnchorSeq, anchorSeq), reason)
+	default:
+		e.passed("SNAP.ANCHOR_MONOTONIC_PER_INSTRUMENT", core.PortSnapshot, snapPortSeq, ch, instrID,
+			fmt.Sprintf("instrument %d: anchor seq %d→%d is non-decreasing", instrID, *st.lastAnchorSeq, anchorSeq))
 	}
 
 	// SNAP.SNAPSHOT_ID_MONOTONIC: Snapshot ID must be strictly non-decreasing
 	// (forward skips OK; strictly-decreasing/equal at higher snap-port seq is
 	// the violation).
-	if st.lastSnapshotID != nil && st.lastSnapPortSeq != nil {
-		if snapPortSeq > *st.lastSnapPortSeq && snapID <= *st.lastSnapshotID {
-			status := core.Violation
-			if !gapless {
-				status = core.Unverifiable
-			}
-			e.Emit("SNAP.SNAPSHOT_ID_MONOTONIC", status, core.PortSnapshot, snapPortSeq, ch, instrID,
-				fmt.Sprintf("instrument %d: snapshot id %d not greater than last %d (snap port seq %d>%d)",
-					instrID, snapID, *st.lastSnapshotID, snapPortSeq, *st.lastSnapPortSeq))
+	switch {
+	case st.lastSnapshotID == nil || st.lastSnapPortSeq == nil:
+		e.unverified("SNAP.SNAPSHOT_ID_MONOTONIC", core.ReasonColdStart, core.PortSnapshot, snapPortSeq, ch, instrID,
+			fmt.Sprintf("instrument %d: first snapshot observed, no prior Snapshot ID to compare against", instrID))
+	case snapPortSeq <= *st.lastSnapPortSeq:
+		// This group is not later on the wire than the one held, so the two cannot be
+		// ordered and "not greater than last" proves nothing about the publisher.
+		e.unverified("SNAP.SNAPSHOT_ID_MONOTONIC", core.ReasonReorder, core.PortSnapshot, snapPortSeq, ch, instrID,
+			fmt.Sprintf("instrument %d: snapshot-port seq %d is not later than the compared group's %d",
+				instrID, snapPortSeq, *st.lastSnapPortSeq))
+	case snapID <= *st.lastSnapshotID:
+		status, reason := core.Violation, ""
+		if !gapless {
+			status, reason = core.Unverifiable, core.ReasonLoss
 		}
+		e.Emit("SNAP.SNAPSHOT_ID_MONOTONIC", status, core.PortSnapshot, snapPortSeq, ch, instrID,
+			fmt.Sprintf("instrument %d: snapshot id %d not greater than last %d (snap port seq %d>%d)",
+				instrID, snapID, *st.lastSnapshotID, snapPortSeq, *st.lastSnapPortSeq), reason)
+	default:
+		e.passed("SNAP.SNAPSHOT_ID_MONOTONIC", core.PortSnapshot, snapPortSeq, ch, instrID,
+			fmt.Sprintf("instrument %d: snapshot id %d→%d is increasing", instrID, *st.lastSnapshotID, snapID))
 	}
 
 	// SNAP.LAST_INSTRUMENT_SEQ_CONSISTENT_WITH_DELTAS: SnapshotBegin's Last

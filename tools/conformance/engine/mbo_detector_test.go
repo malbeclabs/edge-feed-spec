@@ -474,6 +474,13 @@ func TestSnapAnchorMonotonicPerInstrument(t *testing.T) {
 				t.Errorf("non-decreasing anchor must not emit violation: %s", fn.Detail)
 			}
 		}
+		// The second snapshot is the first one with a predecessor to compare against, so
+		// it is the only opportunity here — and the pass is what distinguishes this
+		// vector from a capture holding a single snapshot, where the rule cannot run at
+		// all (engine/denominator.go).
+		if !hasPass(ac, "SNAP.ANCHOR_MONOTONIC_PER_INSTRUMENT") {
+			t.Error("non-decreasing anchor must report a pass; without one this case is vacuous")
+		}
 	})
 
 	t.Run("violation_decreasing_anchor", func(t *testing.T) {
@@ -649,6 +656,12 @@ func TestResetNoDanglingDeltasAtOrBelowAnchor(t *testing.T) {
 				t.Errorf("conformant post-reset delta must not emit violation: %s", fn.Detail)
 			}
 		}
+		// The rule runs only once a recovery snapshot has set recoveryK, so "no
+		// violation" is equally what a stream with no reset produces. The pass is the
+		// assertion that this vector actually reached the check (engine/denominator.go).
+		if !hasPass(ac, "RESET.NO_DANGLING_DELTAS_AT_OR_BELOW_ANCHOR") {
+			t.Error("conformant post-reset delta must report a pass; without one this case is vacuous")
+		}
 	})
 
 	t.Run("violation_wrong_seq_after_reset", func(t *testing.T) {
@@ -683,6 +696,11 @@ func TestResetNoDanglingDeltasAtOrBelowAnchor(t *testing.T) {
 			if fn.Status == core.Violation {
 				t.Errorf("gapped channel must not emit Violation for NO_DANGLING_DELTAS: %s", fn.Detail)
 			}
+		}
+		// Downgraded, not dropped: the wrong seq is still reported, with loss named as
+		// the reason it is not the publisher's fault.
+		if !hasUnverifiable(ac, "RESET.NO_DANGLING_DELTAS_AT_OR_BELOW_ANCHOR", core.ReasonLoss) {
+			t.Error("gapped channel must still report the wrong post-reset seq as unverifiable/loss")
 		}
 	})
 }

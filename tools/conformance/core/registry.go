@@ -155,6 +155,16 @@ var conditionalExec = map[string]struct{}{
 	"TOB.QUOTE.REFDATA_KNOWN":      {},
 	"MID.METHOD0_REQUIRES_DEFAULT": {},
 	"MID.PRICE_BOUND":              {},
+	// Reset recovery: nothing to judge until an InstrumentReset has happened, so on a
+	// stream with no reset these are silent — and used to be silent in the same way
+	// when every recovery was correct.
+	"RESET.SNAPSHOT_FOLLOWS":                       {},
+	"RESET.RECOVERY_SNAPSHOT_ANCHOR_MATCHES_RESET": {},
+	"RESET.NO_DANGLING_DELTAS_AT_OR_BELOW_ANCHOR":  {},
+	// Monotonicity across successive snapshots: needs a predecessor, so a capture
+	// with one snapshot per instrument never runs them.
+	"SNAP.ANCHOR_MONOTONIC_PER_INSTRUMENT": {},
+	"SNAP.SNAPSHOT_ID_MONOTONIC":           {},
 	// End-of-window rules: need enough observed cycles to conclude anything.
 	"SNAP.ROUND_ROBIN_COVERS_MANIFEST":  {},
 	"REFDATA.DEFINITION_CYCLE_COVERAGE": {},
