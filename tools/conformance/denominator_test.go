@@ -36,11 +36,12 @@ import (
 // Keep this list at zero entries where you can. An exemption is the one way this
 // test can be defeated, so a rule belongs here only when its trigger is provably
 // absent, never because the assertion is inconvenient.
-// buildMBOGoldenEntries emits Manifest, InstrumentDefinition, OrderAdd, OrderCancel,
-// Heartbeat and two snapshot groups. Everything below is a consequence of what that
-// list does *not* contain, which makes all four entries one gap in the capture rather
-// than four independent excuses — worth closing by extending it (an InstrumentReset
-// plus its recovery snapshot, and one OrderExecute) so this map can go back to empty.
+//
+// Every entry below is a consequence of what buildMBOGoldenEntries does *not*
+// contain — it emits Manifest, InstrumentDefinition, OrderAdd, OrderCancel,
+// Heartbeat and two snapshot groups. So these are one gap in the capture rather than
+// four independent excuses, and adding an InstrumentReset with its recovery snapshot
+// plus one OrderExecute would empty the map.
 var noOpportunity = map[string]string{
 	// No OrderExecute, so nothing ever carries an execution price. Its sibling
 	// FIELD.ORDERADD_PRICE_BOUND shares every line of the gate and is asserted below,
@@ -166,4 +167,97 @@ func replayPcapInto(t *testing.T, gc *goldenCapture, feed core.Feed, magic uint1
 	}
 	eng.Flush()
 	eng.EndRun()
+}
+
+// The denominator invariant has one hole it cannot close from inside the engine: a
+// rule whose only driver is a snapshot-port frame reports nothing at all when
+// --snapshot-port is unset, because the emitting code is never entered. That is not
+// a rule going quiet, it is a rule with no input — and it still reads as a pass.
+//
+// This test pins the two halves of the fix: that core's snapshotDriven set names
+// exactly the rules which disappear without the port, and that the CLI accounts for
+// each of them as NA when it is unset.
+// incidentalToSnapshotPort names rules that vanish with --snapshot-port removed for a
+// reason that has nothing to do with being snapshot-driven: they apply to every port,
+// and it is only *this capture* that happens to carry their violating frames on that
+// one. They must stay out of core's snapshotDriven set — reporting them starved would
+// tell an operator a rule cannot run when it runs on every frame the tool sees.
+var incidentalToSnapshotPort = map[string]bool{
+	// nonconformant_mbp.pcap's oversized frames are all on the snapshot port. The rule
+	// is a Tier-1 structural check that fires on any port.
+	"FRAME.LENGTH_CONSISTENCY": true,
+}
+
+func TestStarvedRulesAreExactlyTheSnapshotDrivenOnes(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		feed  core.Feed
+		magic uint16
+		pcap  string
+		ports map[int]core.Port
+	}{
+		{
+			name: "mbp", feed: core.FeedMBP, magic: wire.MagicMBP,
+			pcap: filepath.Join("testdata", "nonconformant_mbp.pcap"),
+			ports: map[int]core.Port{
+				31000: core.PortMktData, 41000: core.PortRefData, 51000: core.PortSnapshot,
+			},
+		},
+		{
+			name: "mbo", feed: core.FeedMBO, magic: wire.MagicMBO,
+			pcap: filepath.Join("testdata", "conformant_mbo.pcap"),
+			ports: map[int]core.Port{
+				18001: core.PortMktData, 18002: core.PortRefData, 18003: core.PortSnapshot,
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Same capture, twice: once with the snapshot port mapped, once without.
+			withSnap := replayIDs(t, tc.feed, tc.magic, tc.pcap, tc.ports)
+			noSnap := map[int]core.Port{}
+			for p, lp := range tc.ports {
+				if lp != core.PortSnapshot {
+					noSnap[p] = lp
+				}
+			}
+			without := replayIDs(t, tc.feed, tc.magic, tc.pcap, noSnap)
+
+			driven := map[string]bool{}
+			for _, id := range core.SnapshotDrivenRules(tc.feed) {
+				driven[id] = true
+			}
+
+			// Every rule this capture loses with the port removed must be either listed as
+			// snapshot-driven, or one of the incidental cases below.
+			for id := range withSnap {
+				if without[id] || driven[id] || incidentalToSnapshotPort[id] {
+					continue
+				}
+				t.Errorf("%s disappears when --snapshot-port is dropped but is not listed as "+
+					"snapshot-driven: either add it to core's snapshotDriven set or explain why "+
+					"its absence is visible some other way", id)
+			}
+			// And nothing listed as snapshot-driven may still report without the port — that
+			// would make the NA a lie.
+			for id := range driven {
+				if without[id] {
+					t.Errorf("%s is listed as snapshot-driven but still reports without the port, "+
+						"so reporting it starved would be wrong", id)
+				}
+			}
+		})
+	}
+}
+
+// replayIDs runs the engine over a capture with the given port map and returns the
+// set of rule IDs that reported anything at all.
+func replayIDs(t *testing.T, feed core.Feed, magic uint16, path string, ports map[int]core.Port) map[string]bool {
+	t.Helper()
+	gc := &goldenCapture{}
+	replayPcapInto(t, gc, feed, magic, path, ports)
+	out := map[string]bool{}
+	for _, f := range gc.findings {
+		out[f.RuleID] = true
+	}
+	return out
 }

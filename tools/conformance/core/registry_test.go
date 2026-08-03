@@ -57,3 +57,32 @@ func TestRuleLookup(t *testing.T) {
 		t.Fatal("unknown id resolved")
 	}
 }
+
+// snapshotDriven is a third list beside Rules and can drift out of it the same way,
+// with a worse consequence: a stale ID makes SnapshotDrivenRules silently drop it, so
+// the CLI stops reporting a rule that an unbound snapshot port genuinely starves.
+func TestSnapshotDrivenRulesExist(t *testing.T) {
+	for id := range snapshotDriven {
+		if _, ok := Lookup(id); !ok {
+			t.Errorf("snapshotDriven lists %q, which is not in the rule catalog", id)
+		}
+	}
+	claimed := map[string]bool{}
+	for _, feed := range allFeeds {
+		for _, id := range SnapshotDrivenRules(feed) {
+			claimed[id] = true
+		}
+	}
+	for id := range snapshotDriven {
+		if !claimed[id] {
+			t.Errorf("snapshotDriven lists %q but no feed claims it", id)
+		}
+	}
+	// Only the two snapshot-bearing feeds have such rules; a TOB or Midpoint run has
+	// no snapshot port and must not be warned about one.
+	for _, feed := range []Feed{FeedTOB, FeedMidpoint} {
+		if got := SnapshotDrivenRules(feed); len(got) != 0 {
+			t.Errorf("feed %s has no snapshot port but claims snapshot-driven rules: %v", feed, got)
+		}
+	}
+}

@@ -65,6 +65,25 @@ Five of the capture's 38 completed snapshot groups were compared and matched; 29
 
 `core.ConditionalExec` marks the rules that owe a denominator, `engine/denominator.go` states the invariant, and `TestConditionalRulesReportADenominator` fails a run where one of them goes quiet. Rules gated on an `--expect-*` flag are a separate axis: they report nothing when the flag is unset, and `rule_info` says so statically before a frame arrives.
 
+### Rules an unbound port starves
+
+The invariant above cannot close one hole from inside the engine. A refdata-gated rule with no `--refdata-port` still reports — it is driven by mktdata messages and merely *gated* on reference data, so each message it cannot judge becomes an `unverifiable`/`cold_start`. But a **snapshot-driven** rule with no `--snapshot-port` has no driver at all: the code that would emit is never entered, so there are zero opportunities, zero findings, and zero findings is what a clean feed looks like.
+
+That produced a two-step trap in which neither step looks wrong:
+
+1. Operator runs an MBP feed without `--snapshot-port`, gets exit 1 and a real violation.
+2. They fix the publisher, re-run the same command, get **exit 0 and an empty report** — and read it as a pass, while every `MBP.SNAP.*` rule was starved.
+
+So the CLI now reports it from the only place that knows, the flags: a warning on stderr at bind time (regardless of `-v`) and an `na` finding per unreachable rule, which lands in the JSON report and in `checks_total{result="na"}`.
+
+```
+dz-conformance: WARNING --snapshot-port is not set, so 2 mbp rule(s) have no frames to
+evaluate and are reported as na, NOT as passes. The exit code does not cover them:
+[MBP.SNAP.GROUP_STRUCTURE MBP.SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT]
+```
+
+**The exit code is deliberately unchanged.** A two-port run is legitimate and failing it would break anyone doing one on purpose; what matters is that exit 0 is not read as "those rules passed". `core.SnapshotDrivenRules` is the set, and `TestStarvedRulesAreExactlyTheSnapshotDrivenOnes` proves each member disappears when the port is dropped and reappears when it is restored — so the `na` is never a false claim.
+
 ## MBO snapshot oracle (headline capability)
 
 For the MBO feed the engine reconstructs the order book independently from both the delta stream and the periodic snapshot stream, then diffs them at every snapshot (`SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT`). This catches a publisher whose internal book has silently diverged from the deltas it emitted — exactly the class of bug invisible to structural or sequence checks alone. Loss is never treated as publisher non-conformance: a per-instrument gap forces the affected instrument to `Unverifiable`, not `Violation`.
@@ -189,7 +208,7 @@ With `--pcap`, the tool replays the capture in order and exits when the file is 
 | `--log-throttle` | `1s` | Minimum wall-clock interval between identical `(rule, status)` log lines. `0` disables throttling. Affects log lines only — metrics and the exit code always count every finding. |
 | `--version` | | Print version and exit |
 
-**Port note.** At least one port flag must be non-zero or the tool exits with code 2. Rule behavior when a port is omitted is rule-specific — some rules are effectively unreachable with no traffic on that port, while others may still fire from related activity on a bound port.
+**Port note.** At least one port flag must be non-zero or the tool exits with code 2. Rule behavior when a port is omitted is rule-specific — some rules are effectively unreachable with no traffic on that port, while others may still fire from related activity on a bound port. Omitting `--snapshot-port` on an MBO or MBP feed is called out explicitly at startup, because those rules would otherwise vanish from the output entirely: see [Rules an unbound port starves](#rules-an-unbound-port-starves).
 
 **Interface note.** On a multi-NIC host, the default IGMP join may use the wrong interface. Pass `--interface doublezero1` (or whatever the GRE tunnel interface is named) to join on the correct one.
 

@@ -1,5 +1,10 @@
 package core
 
+import (
+	"slices"
+	"sort"
+)
+
 type RuleMeta struct {
 	ID          string
 	Severity    Severity
@@ -175,6 +180,64 @@ var conditionalExec = map[string]struct{}{
 // ConditionalExec reports whether the rule's execution is conditional, and so
 // whether it owes a per-opportunity denominator.
 func ConditionalExec(id string) bool { _, ok := conditionalExec[id]; return ok }
+
+// snapshotDriven lists the rules whose every emit path runs off a snapshot-port
+// frame, so with `--snapshot-port` unset they cannot report *anything* — not even
+// the unverifiable that the denominator invariant would otherwise require.
+//
+// **That is a hole the invariant cannot close by itself**, and it is worth being
+// precise about why. A refdata-gated rule with no `--refdata-port` still reports:
+// it is driven by mktdata messages and merely *gated* on reference data, so every
+// message it cannot judge becomes an `unverifiable`/`cold_start`. These rules have
+// no such driver. No snapshot frames means no code path executes, so zero
+// opportunities, so silence — and silence reads as a clean pass. Concretely: run a
+// market-by-price feed without `--snapshot-port`, fix whatever unrelated violation
+// the run reported, re-run the same command, and the tool exits 0 with an empty
+// report while every MBP.SNAP.* rule was starved.
+//
+// So the CLI reports them as NA at startup instead, from configuration rather than
+// from traffic. See reportStarvedRules in run.go, and
+// TestStarvedRulesAreExactlyTheSnapshotDrivenOnes, which proves each entry
+// disappears without the port and appears with it.
+//
+// `RESET.SNAPSHOT_FOLLOWS` is deliberately absent: it also emits from the mktdata
+// path and from EndRun, where it already downgrades to NA on an unbound snapshot
+// port, so listing it would double-report.
+var snapshotDriven = map[string]struct{}{
+	"MBP.SNAP.GROUP_STRUCTURE":                        {},
+	"MBP.SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT":    {},
+	"RESET.RECOVERY_SNAPSHOT_ANCHOR_MATCHES_RESET":    {},
+	"SNAP.ANCHOR_IS_MKTDATA_SEQ":                      {},
+	"SNAP.ANCHOR_LE_OR_GT_LAST_APPLIED_HANDLING":      {},
+	"SNAP.ANCHOR_MONOTONIC_PER_INSTRUMENT":            {},
+	"SNAP.BEGIN_ORDER_END_GROUPING":                   {},
+	"SNAP.EMPTY_BOOK_WELL_FORMED":                     {},
+	"SNAP.END_FIELDS_MATCH_BEGIN":                     {},
+	"SNAP.LAST_INSTRUMENT_SEQ_CONSISTENT_WITH_DELTAS": {},
+	"SNAP.ORDER_PRICE_BOUND":                          {},
+	"SNAP.ORDER_SNAPSHOT_ID_MATCH":                    {},
+	"SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT":        {},
+	"SNAP.SNAPSHOT_ID_MONOTONIC":                      {},
+	"SNAP.SNAPSHOT_ORDER_NO_DUP_ORDER_ID":             {},
+	"SNAP.TOTAL_ORDERS_COUNT_MATCH":                   {},
+}
+
+// SnapshotDrivenRules returns the rule IDs applicable to feed that can only ever
+// fire from a snapshot-port frame — the rules an operator silently loses by leaving
+// --snapshot-port unset. Sorted, so callers report them deterministically.
+func SnapshotDrivenRules(feed Feed) []string {
+	var out []string
+	for _, r := range Rules {
+		if _, ok := snapshotDriven[r.ID]; !ok {
+			continue
+		}
+		if slices.Contains(r.Feeds, feed) {
+			out = append(out, r.ID)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
 
 // ConditionalExecRules returns the conditional-execution rule IDs applicable to
 // feed, so a test can assert each one reported a denominator.
