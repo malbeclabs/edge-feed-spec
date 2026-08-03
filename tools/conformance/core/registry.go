@@ -128,6 +128,62 @@ var Rules = []RuleMeta{
 	{"MID.PRICE_BOUND", Must, 2, StateRefdata, midOnly, false},
 }
 
+// conditionalExec lists the rules whose *execution* is conditional: they run only
+// when their preconditions line up, so silence from one of them is ambiguous —
+// full coverage and never having run once produce the same empty output.
+//
+// Each of these MUST account for every opportunity it gets, with a `pass` when the
+// property held and an `unverifiable`/`na` naming what stopped it otherwise. That
+// makes `checks_total{rule_id}` the rule's denominator. See
+// engine/denominator.go for the invariant and `TestConditionalRulesReportADenominator`
+// for its enforcement.
+//
+// **Not the same as `RuleMeta.Conditional`**, which means the rule is off until its
+// `--expect-*` flag is set. That is a static fact, visible in `rule_info` before a
+// frame arrives; this is about stream state.
+var conditionalExec = map[string]struct{}{
+	// The two reconstruction oracles: comparable only once a baseline ladder/book
+	// exists and the delta side has been applied through the snapshot's K.
+	"MBP.SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT": {},
+	"SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT":     {},
+	// Snapshot-group structure: decided only when a group completes.
+	"MBP.SNAP.GROUP_STRUCTURE": {},
+	// Refdata-gated: need the instrument's definition before they can judge.
+	"FIELD.ORDERADD_PRICE_BOUND":   {},
+	"REF.EXEC_PRICE_BOUND":         {},
+	"SNAP.ORDER_PRICE_BOUND":       {},
+	"TOB.QUOTE.REFDATA_KNOWN":      {},
+	"MID.METHOD0_REQUIRES_DEFAULT": {},
+	"MID.PRICE_BOUND":              {},
+	// End-of-window rules: need enough observed cycles to conclude anything.
+	"SNAP.ROUND_ROBIN_COVERS_MANIFEST":  {},
+	"REFDATA.DEFINITION_CYCLE_COVERAGE": {},
+	"REFDATA.NO_BURST_DEFINITIONS":      {},
+	"REFDATA.NEVER_REACHES_READY":       {},
+}
+
+// ConditionalExec reports whether the rule's execution is conditional, and so
+// whether it owes a per-opportunity denominator.
+func ConditionalExec(id string) bool { _, ok := conditionalExec[id]; return ok }
+
+// ConditionalExecRules returns the conditional-execution rule IDs applicable to
+// feed, so a test can assert each one reported a denominator.
+func ConditionalExecRules(feed Feed) []string {
+	var out []string
+	for _, r := range Rules {
+		if !ConditionalExec(r.ID) {
+			continue
+		}
+		for _, f := range r.Feeds {
+			if f == feed {
+				out = append(out, r.ID)
+				break
+			}
+		}
+	}
+	return out
+}
+
 var byID = func() map[string]RuleMeta {
 	m := make(map[string]RuleMeta, len(Rules))
 	for _, r := range Rules {

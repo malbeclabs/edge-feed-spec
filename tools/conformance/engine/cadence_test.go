@@ -382,6 +382,12 @@ func TestDefinitionCycleCoverageComplete(t *testing.T) {
 	if hasViolation(ac, "REFDATA.DEFINITION_CYCLE_COVERAGE") {
 		t.Error("REFDATA.DEFINITION_CYCLE_COVERAGE: must not fire when all defs retransmitted")
 	}
+	// And it must have actually closed a cycle to reach that conclusion. Without this
+	// the assertion above is also satisfied by a tumbling window that never closed —
+	// which is the state this rule was structurally in for a while, and no test said so.
+	if !hasPass(ac, "REFDATA.DEFINITION_CYCLE_COVERAGE") {
+		t.Error("REFDATA.DEFINITION_CYCLE_COVERAGE: no pass reported, so the cycle never closed and the clean result above is vacuous")
+	}
 }
 
 // TestDefinitionCycleCoverageWrongInstruments: cycle 2 only retransmits instrID
@@ -538,6 +544,9 @@ func TestNoBurstDefinitionsPaced(t *testing.T) {
 	if hasViolation(ac, "REFDATA.NO_BURST_DEFINITIONS") {
 		t.Error("REFDATA.NO_BURST_DEFINITIONS: must not fire for paced defs at distinct SendTS values")
 	}
+	if !hasPass(ac, "REFDATA.NO_BURST_DEFINITIONS") {
+		t.Error("REFDATA.NO_BURST_DEFINITIONS: no pass reported, so pacing was never judged and the clean result above is vacuous")
+	}
 }
 
 // TestNoBurstDefinitionsUnconfigured: without --expect-definition-cycle, burst
@@ -626,6 +635,11 @@ func TestNeverReachesReadyDoesNotFireWhenReady(t *testing.T) {
 	if hasViolation(ac, "REFDATA.NEVER_REACHES_READY") {
 		t.Error("REFDATA.NEVER_REACHES_READY: must not fire when channel has reached ready")
 	}
+	// Reaching ready is this rule *passing*, and saying so is what separates it from a
+	// run where EndRun never looked at the channel at all.
+	if !hasPass(ac, "REFDATA.NEVER_REACHES_READY") {
+		t.Error("REFDATA.NEVER_REACHES_READY: a channel that reached ready must be reported as a pass")
+	}
 }
 
 // TestNeverReachesReadyUnconfigured: without both --expect-* values, EndRun
@@ -672,5 +686,11 @@ func TestNeverReachesReadyWindowTooShort(t *testing.T) {
 
 	if hasViolation(ac, "REFDATA.NEVER_REACHES_READY") {
 		t.Error("REFDATA.NEVER_REACHES_READY: must not fire when observation span < window")
+	}
+	// A window too short to conclude anything is the most common reason this rule says
+	// nothing, so it says which: a short capture must not read as a channel that
+	// converged (engine/denominator.go).
+	if !hasUnverifiable(ac, "REFDATA.NEVER_REACHES_READY", core.ReasonInsufficientWindow) {
+		t.Error("REFDATA.NEVER_REACHES_READY: a span shorter than the window must be reported as unverifiable/insufficient_window")
 	}
 }

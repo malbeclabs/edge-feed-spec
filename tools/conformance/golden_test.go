@@ -474,6 +474,18 @@ func goldenOpts(feed core.Feed, pcapPath string) RunOpts {
 	}
 }
 
+// goldenEngineConfig is the engine config every golden replay uses. Shared with
+// denominator_test.go so both read the same stream: cadence flags stay at zero, so
+// timing-based conditional rules never fire on synthetic captures.
+func goldenEngineConfig(feed core.Feed) engine.Config {
+	return engine.Config{
+		Feed:                feed,
+		Strict:              false,
+		OracleConfirmCycles: 2,
+		ReorderWindow:       1,
+	}
+}
+
 // runGoldenCapture runs the engine directly over the golden entries using a
 // capturing reporter and returns the count of Must+Violation findings.
 // This is the stronger assertion: it counts must-violations without going
@@ -481,13 +493,7 @@ func goldenOpts(feed core.Feed, pcapPath string) RunOpts {
 func runGoldenCapture(t *testing.T, feed core.Feed, magic uint16, entries []goldenPcapEntry) int {
 	t.Helper()
 	gc := &goldenCapture{}
-	cfg := engine.Config{
-		Feed:                feed,
-		Strict:              false,
-		OracleConfirmCycles: 2,
-		ReorderWindow:       1,
-	}
-	eng := engine.New(cfg, gc)
+	eng := engine.New(goldenEngineConfig(feed), gc)
 
 	portMap := goldenPortMap
 	for _, e := range entries {

@@ -36,6 +36,35 @@ Rules are partitioned into two tiers based on when they can fire:
 
 This split is what makes lossless pcap replay yield near-100% verifiable coverage — the tool is strong in CI without producing false alarms on live feeds with normal multicast loss.
 
+## Coverage vs. silence
+
+A Tier-2 rule whose **execution** is conditional runs only when its preconditions line up, and that creates a failure mode worse than a false positive: a rule that quietly stops running reports the same thing as a rule that checked everything and found nothing — nothing. A clean report then means "no violations found", not "no violations exist", and there is no way to tell which from the output.
+
+So every such rule accounts for each opportunity it gets, with exactly one finding:
+
+| Result | Meaning |
+|--------|---------|
+| `pass` | the check ran and the property held |
+| `violation` | the check ran and the publisher broke it |
+| `unverifiable` | the check could not run; `reason` names what stopped it |
+| `na` | the check does not apply to this opportunity at all |
+
+`checks_total{rule_id}` is therefore the rule's **denominator** and its `result="pass"` series the coverage actually achieved. `unverifiable_total{rule_id,reason}` breaks the shortfall down by cause, which is what separates a healthy run from a broken feed: 33 `cold_start` skips mean instruments still adopting their first baseline, while 33 `loss` skips mean a feed dropping frames.
+
+Read them together. On the bundled market-by-price capture the reconstruction oracle reports:
+
+```json
+{
+  "rule_id": "MBP.SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT",
+  "counts": { "pass": 5, "unverifiable": 33 },
+  "unverifiable_by_reason": { "cold_start": 29, "pending": 4 }
+}
+```
+
+Five of the capture's 38 completed snapshot groups were compared and matched; 29 were each an instrument's first group, adopted as its baseline with nothing yet to compare against, and 4 carried a `Last Instrument Seq` the delta port had not yet reached. The capture spans about one snapshot cycle, so one comparison per instrument that got a second group is the ceiling those bytes allow — a fact the previous output could not express, because it reported the same silence a run comparing zero groups would have.
+
+`core.ConditionalExec` marks the rules that owe a denominator, `engine/denominator.go` states the invariant, and `TestConditionalRulesReportADenominator` fails a run where one of them goes quiet. Rules gated on an `--expect-*` flag are a separate axis: they report nothing when the flag is unset, and `rule_info` says so statically before a frame arrives.
+
 ## MBO snapshot oracle (headline capability)
 
 For the MBO feed the engine reconstructs the order book independently from both the delta stream and the periodic snapshot stream, then diffs them at every snapshot (`SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT`). This catches a publisher whose internal book has silently diverged from the deltas it emitted — exactly the class of bug invisible to structural or sequence checks alone. Loss is never treated as publisher non-conformance: a per-instrument gap forces the affected instrument to `Unverifiable`, not `Violation`.
@@ -203,7 +232,7 @@ time=... level=ERROR msg=finding
 
 ### JSON report
 
-Pass `--json-report path` to write a machine-readable summary at the end of the run. The report is a JSON object with a `rules` array; each entry has a `rule_id` and a `counts` map of status name → count (e.g. `{"rule_id": "FRAME.MAGIC_MISMATCH", "counts": {"violation": 1}}`).
+Pass `--json-report path` to write a machine-readable summary at the end of the run. The report is a JSON object with a `rules` array; each entry has a `rule_id` and a `counts` map of status name → count (e.g. `{"rule_id": "FRAME.MAGIC_MISMATCH", "counts": {"violation": 1}}`). A rule with `unverifiable` findings also carries `unverifiable_by_reason`, breaking that count down by cause — this is the only place a `--pcap` CI run reports it, since a one-shot replay has no Prometheus to scrape. See [Coverage vs. silence](#coverage-vs-silence) for how to read the two together.
 
 ### Prometheus metrics
 
@@ -216,8 +245,8 @@ All metrics are prefixed `dz_conformance_`.
 | Name | Type | Labels | Meaning |
 |------|------|--------|---------|
 | `violations_total` | counter | `feed`, `rule_id`, `severity` | Confirmed conformance violations |
-| `unverifiable_total` | counter | `feed`, `rule_id`, `reason` | Checks that could not be verified (`reason` is `unspecified` in current engine code; the field is reserved for future per-cause breakdown) |
-| `checks_total` | counter | `feed`, `rule_id`, `result` | All checks by result |
+| `unverifiable_total` | counter | `feed`, `rule_id`, `reason` | Checks that could not be verified, by cause. `reason` is a closed enum (`core.Reason*`): `loss`, `cold_start`, `reorder`, `pending`, `overflow`, `truncated`, `insufficient_window`, `superseded`, `untrusted`, `bound_subset`, `transition`, `unspecified` |
+| `checks_total` | counter | `feed`, `rule_id`, `result` | All checks by result — the **denominator** for every rule, see [Coverage vs. silence](#coverage-vs-silence) |
 | `transport_loss_total` | counter | `port` | Transport packet-loss events by port (`mktdata`, `refdata`, `snapshot`) |
 | `transport_corruption_total` | counter | `port`, `reason` | Transport corruption events |
 | `snapshot_audits_total` | counter | `result` | Snapshot oracle outcomes (`match`, `mismatch_suspected`, `mismatch_confirmed`, `unverifiable`) |
@@ -297,7 +326,8 @@ open http://127.0.0.1:3000  # admin / GF_ADMIN_PASSWORD
 |------|------|
 | [docker-compose.yml](docker-compose.yml) | `dz-conformance` + `prometheus` + `grafana` (build context is this self-contained module) |
 | [prometheus/prometheus.yml](prometheus/prometheus.yml) | scrapes `dz-conformance` at `127.0.0.1:9094` |
-| [prometheus/alerts/conformance.yml](prometheus/alerts/conformance.yml) | must-violation page + coverage-loss / transport-loss / target-down warnings |
+| [prometheus/alerts/conformance.yml](prometheus/alerts/conformance.yml) | must-violation page + coverage-loss / rule-stopped-verifying / transport-loss / target-down warnings |
+| [prometheus/rule_tests/](prometheus/rule_tests/) | `promtool test rules` unit tests for those alerts (run in CI; kept out of `alerts/` because `prometheus.yml` globs that directory as `rule_files`) |
 | [grafana/dashboards/conformance.json](grafana/dashboards/conformance.json) | the `dz_conformance_*` dashboard, including the per-rule conformance table |
 | [grafana/provisioning/](grafana/provisioning/) | auto-registers the Prometheus datasource and the dashboard |
 
@@ -308,7 +338,7 @@ The tool is correct (no false `Violation`s) and complete for its primary use cas
 - **Single channel per port.** Per-port sequencing/dedup/reorder state is keyed by port, not by `(port, channel_id)`. The edge-feed-spec allows sharding the instrument set across multiple channels; running a *multi-channel* capture where two channel IDs share one UDP port could mis-attribute sequence numbers across channels. Multi-channel support is future work; for a single channel the tool is exact.
 - **Mid-stream join doesn't reconstruct a trusted book.** The referential-integrity and snapshot↔delta oracle checks only run once an instrument's delta book is *trusted*, which today requires observing its delta stream from `Per-Instrument Seq = 1` (i.e. from session start / `Reset Count` boundary). A cold-start or post-`InstrumentReset` recovery snapshot is currently used only to detect divergence, not to *bootstrap* the live book — so an instrument joined mid-stream stays `Unverifiable` for those checks until a fresh era. Capture the publisher from startup to exercise the full oracle. Bootstrapping a trusted book from a clean snapshot is a planned enhancement.
 
-Minor: the `dz_conformance_instruments_state` gauge is registered but not yet populated, and most `Unverifiable` findings currently carry `reason="unspecified"` (the bounded-reason taxonomy is wired only at the cross-port downgrade sites). Neither affects violation detection or the CI exit code.
+Minor: the `dz_conformance_instruments_state` gauge is registered but not yet populated. This does not affect violation detection or the CI exit code.
 
 ## Releasing
 

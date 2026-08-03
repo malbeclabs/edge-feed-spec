@@ -776,14 +776,20 @@ func TestOrderAddPriceBound(t *testing.T) {
 		}
 	})
 
-	t.Run("silent_before_ready", func(t *testing.T) {
+	t.Run("unverifiable_before_ready", func(t *testing.T) {
 		e, ac := newMBOEngineW1()
 		// No refdata setup — engine.refdata is nil.
 		runMktdataSeq(e, buildOrderAddFull(ch, instrID, 1, 42, 0, 1, -100, 0), 1)
 		e.Flush()
 
 		if hasViolation(ac, "FIELD.ORDERADD_PRICE_BOUND") {
-			t.Error("FIELD.ORDERADD_PRICE_BOUND must be silent before refdata is ready")
+			t.Error("FIELD.ORDERADD_PRICE_BOUND must not accuse the publisher before refdata is ready")
+		}
+		// Not silent, though — reported as unverifiable with the cause. A negative price
+		// the tool declined to judge and a negative price it judged and cleared are
+		// different facts, and silence conflated them (engine/denominator.go).
+		if !hasUnverifiable(ac, "FIELD.ORDERADD_PRICE_BOUND", core.ReasonColdStart) {
+			t.Error("FIELD.ORDERADD_PRICE_BOUND: the message went unjudged, which must be reported as unverifiable/cold_start")
 		}
 	})
 
@@ -797,6 +803,9 @@ func TestOrderAddPriceBound(t *testing.T) {
 
 		if hasViolation(ac, "FIELD.ORDERADD_PRICE_BOUND") {
 			t.Error("positive price must not emit FIELD.ORDERADD_PRICE_BOUND")
+		}
+		if !hasPass(ac, "FIELD.ORDERADD_PRICE_BOUND") {
+			t.Error("positive price must report a pass; without one this case is indistinguishable from the gate never opening")
 		}
 	})
 
@@ -833,13 +842,16 @@ func TestExecPriceBound(t *testing.T) {
 		}
 	})
 
-	t.Run("silent_before_ready", func(t *testing.T) {
+	t.Run("unverifiable_before_ready", func(t *testing.T) {
 		e, ac := newMBOEngineW1()
 		runMktdataSeq(e, buildOrderExecuteFull(ch, instrID, 1, 99, 0, 0, 0, -50, 1), 1)
 		e.Flush()
 
 		if hasViolation(ac, "REF.EXEC_PRICE_BOUND") {
-			t.Error("REF.EXEC_PRICE_BOUND must be silent before refdata is ready")
+			t.Error("REF.EXEC_PRICE_BOUND must not accuse the publisher before refdata is ready")
+		}
+		if !hasUnverifiable(ac, "REF.EXEC_PRICE_BOUND", core.ReasonColdStart) {
+			t.Error("REF.EXEC_PRICE_BOUND: the message went unjudged, which must be reported as unverifiable/cold_start")
 		}
 	})
 
@@ -853,6 +865,9 @@ func TestExecPriceBound(t *testing.T) {
 
 		if hasViolation(ac, "REF.EXEC_PRICE_BOUND") {
 			t.Error("positive exec price must not emit REF.EXEC_PRICE_BOUND")
+		}
+		if !hasPass(ac, "REF.EXEC_PRICE_BOUND") {
+			t.Error("positive exec price must report a pass; without one this case is indistinguishable from the gate never opening")
 		}
 	})
 }

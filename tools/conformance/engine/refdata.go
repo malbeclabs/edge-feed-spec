@@ -419,7 +419,18 @@ func (rs *refdataState) onManifestSummary(ch uint8, valid uint8, seq uint16, cou
 		time.Duration(sendTS-s.cycleStartSendTS)*time.Nanosecond >= rs.e.cfg.ExpectDefinitionCycle {
 		// Coverage/burst apply only once the active set is established; before that
 		// this is the bootstrap window, not subject to pacing requirements.
-		if s.setSnapshotSet {
+		//
+		// A closed cycle is one opportunity for each of these two rules, and both
+		// account for it — including the bootstrap and complete-coverage cases, which
+		// were silent and so left "the publisher paced every definition correctly"
+		// looking identical to "the window never closed on an established set". See
+		// engine/denominator.go.
+		if !s.setSnapshotSet {
+			for _, rule := range []string{"REFDATA.DEFINITION_CYCLE_COVERAGE", "REFDATA.NO_BURST_DEFINITIONS"} {
+				rs.e.unverified(rule, core.ReasonColdStart, core.PortRefData, frameSeq, ch, 0,
+					"cycle closed before the active definition set was established (bootstrap window)")
+			}
+		} else {
 			// Coverage: every active def (from the frozen set snapshot) must have
 			// been retransmitted at least once this cycle.  Using setSnapshot (not
 			// just cardinality) detects the publisher retransmitting the right
@@ -432,26 +443,39 @@ func (rs *refdataState) onManifestSummary(ch uint8, valid uint8, seq uint16, cou
 				}
 			}
 			if missing > 0 {
-				st := core.Violation
+				st, reason := core.Violation, ""
 				if dirty {
-					st = core.Unverifiable
+					st, reason = core.Unverifiable, core.ReasonLoss
 				}
 				rs.e.Emit("REFDATA.DEFINITION_CYCLE_COVERAGE", st, core.PortRefData, frameSeq, ch, 0,
 					fmt.Sprintf("cycle window %v: %d/%d definitions not retransmitted",
-						rs.e.cfg.ExpectDefinitionCycle, missing, len(s.setSnapshot)))
+						rs.e.cfg.ExpectDefinitionCycle, missing, len(s.setSnapshot)), reason)
 			} else {
 				coverageOK = true
+				rs.e.passed("REFDATA.DEFINITION_CYCLE_COVERAGE", core.PortRefData, frameSeq, ch, 0,
+					fmt.Sprintf("cycle window %v: all %d definitions retransmitted",
+						rs.e.cfg.ExpectDefinitionCycle, len(s.setSnapshot)))
 			}
 			// Burst: only evaluated when coverage was complete this cycle; otherwise
 			// the primary finding is coverage, not burst.
-			if coverageOK && s.expectedCount > 1 && s.defFramesSeen == 1 {
-				st := core.Violation
+			switch {
+			case !coverageOK:
+				rs.e.unverified("REFDATA.NO_BURST_DEFINITIONS", core.ReasonSuperseded, core.PortRefData, frameSeq, ch, 0,
+					"coverage was incomplete this cycle, which is the finding that matters; pacing is not judged on top of it")
+			case s.expectedCount <= 1:
+				rs.e.inapplicable("REFDATA.NO_BURST_DEFINITIONS", core.PortRefData, frameSeq, ch, 0,
+					fmt.Sprintf("%d definition(s) in the active set: a single definition cannot be bursted", s.expectedCount))
+			case s.defFramesSeen == 1:
+				st, reason := core.Violation, ""
 				if dirty {
-					st = core.Unverifiable
+					st, reason = core.Unverifiable, core.ReasonLoss
 				}
 				rs.e.Emit("REFDATA.NO_BURST_DEFINITIONS", st, core.PortRefData, frameSeq, ch, 0,
 					fmt.Sprintf("all %d definitions emitted in a single frame (burst, not paced)",
-						s.expectedCount))
+						s.expectedCount), reason)
+			default:
+				rs.e.passed("REFDATA.NO_BURST_DEFINITIONS", core.PortRefData, frameSeq, ch, 0,
+					fmt.Sprintf("%d definitions paced across %d frame(s)", s.expectedCount, s.defFramesSeen))
 			}
 		}
 		// Reopen the next tumbling window starting now.

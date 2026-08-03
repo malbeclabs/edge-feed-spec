@@ -62,8 +62,9 @@ func (e *Engine) beginFrame(schemaVersion uint8) { e.curUnknownSchema = schemaVe
 //
 // port and seq are the logical port and frame sequence number of the frame being
 // classified; they are recorded on the Finding for logging and debugging.
-// reason is an optional bounded enum string (e.g. "loss", "cold_start", "reorder")
-// used for the unverifiable_total Prometheus label; at most one value is used.
+// reason is an optional core.Reason* value used for the unverifiable_total
+// Prometheus label; at most one is used. Prefer the passed/unverified/inapplicable
+// helpers in denominator.go, which pick the status and reason together.
 func (e *Engine) Emit(ruleID string, st core.Status, port core.Port, seq uint64, ch uint8, inst uint32, detail string, reason ...string) {
 	meta, ok := core.Lookup(ruleID)
 	if !ok {
@@ -346,7 +347,7 @@ func (e *Engine) checkHeartbeatCadence(f *wire.Frame, port core.Port, pt *portTr
 				reason := ""
 				if pt.dirtyWindow {
 					st = core.Unverifiable
-					reason = "loss"
+					reason = core.ReasonLoss
 				}
 				e.Emit("HEARTBEAT.CADENCE", st, port, f.Header.Sequence, ch, 0,
 					fmt.Sprintf("heartbeat gap %v exceeds --expect-heartbeat %v",
@@ -414,17 +415,33 @@ func (e *Engine) EndRun() {
 	}
 	window := e.cfg.ExpectManifestCadence + e.cfg.ExpectDefinitionCycle
 	refPT, hasPT := e.ports[core.PortRefData]
+	// Each observed channel is one opportunity, and each of the four ways out below
+	// reports it. A channel that reached ready is the rule *passing* — the reason it
+	// was silent is that the check is written as a search for failures, which is
+	// exactly the shape that makes coverage and no-op indistinguishable
+	// (engine/denominator.go).
 	for ch, s := range e.refdata.channels {
-		if s.everReady || !s.firstSendTSSet || !s.lastManifestSendTSSet {
+		if s.everReady {
+			e.passed("REFDATA.NEVER_REACHES_READY", core.PortRefData, 0, ch, 0,
+				fmt.Sprintf("channel %d reached ready state", ch))
+			continue
+		}
+		if !s.firstSendTSSet || !s.lastManifestSendTSSet {
+			e.unverified("REFDATA.NEVER_REACHES_READY", core.ReasonColdStart, core.PortRefData, 0, ch, 0,
+				fmt.Sprintf("channel %d: no ManifestSummary observed, so the observation span is unknown", ch))
 			continue
 		}
 		if s.lastManifestSendTS < s.firstSendTS {
 			// Wire timestamps regressed (FRAME.SEND_TS_MONOTONIC fires separately);
 			// skip this channel rather than computing a spurious negative/huge span.
+			e.unverified("REFDATA.NEVER_REACHES_READY", core.ReasonSuperseded, core.PortRefData, 0, ch, 0,
+				fmt.Sprintf("channel %d: wire timestamps regressed, so the span is not measurable (FRAME.SEND_TS_MONOTONIC reports it)", ch))
 			continue
 		}
 		span := time.Duration(s.lastManifestSendTS-s.firstSendTS) * time.Nanosecond
 		if span < window {
+			e.unverified("REFDATA.NEVER_REACHES_READY", core.ReasonInsufficientWindow, core.PortRefData, 0, ch, 0,
+				fmt.Sprintf("channel %d: observed %v, less than the %v a publisher needs to reach ready", ch, span, window))
 			continue
 		}
 		// Gate: if the refdata port has a dirty window, downgrade.
@@ -433,7 +450,7 @@ func (e *Engine) EndRun() {
 		reason := ""
 		if dirty {
 			st = core.Unverifiable
-			reason = "loss"
+			reason = core.ReasonLoss
 		}
 		e.Emit("REFDATA.NEVER_REACHES_READY", st, core.PortRefData, 0, ch, 0,
 			fmt.Sprintf("channel %d: observed %v (≥ window %v) but never reached ready state",

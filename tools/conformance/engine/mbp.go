@@ -132,10 +132,7 @@ type mbpOpenSnap struct {
 }
 
 type mbpState struct {
-	// oracleRuns counts completed reconstruction comparisons, so a clean run can be
-	// told apart from one where every instrument was skipped as unverifiable.
-	oracleRuns int
-	instr      map[mbpInstrKey]*mbpInstr
+	instr map[mbpInstrKey]*mbpInstr
 	// open holds the group in flight, **keyed by channel**.
 	//
 	// The spec's non-interleaving rule scopes to one instrument stream, and a
@@ -423,7 +420,7 @@ func (e *Engine) mbpGroupStatus(open *mbpOpenSnap) core.Status {
 // mbpReason renders the bounded metric reason that pairs with the status above.
 func mbpReason(st core.Status) string {
 	if st == core.Unverifiable {
-		return "loss"
+		return core.ReasonLoss
 	}
 	return ""
 }
@@ -575,6 +572,13 @@ func (e *Engine) finishMBPSnapshot(m wire.Message, ch uint8, seq uint64) {
 	if !ok {
 		return
 	}
+	// The group is well-formed: reported, because a rule that only ever speaks up to
+	// complain cannot tell an operator how many groups it vetted. One finding per
+	// completed group; a group that fails contributes one per field that failed, so
+	// the `pass` series is the count of clean groups and not the complement of the
+	// violation count.
+	e.passed("MBP.SNAP.GROUP_STRUCTURE", core.PortSnapshot, seq, ch, open.key.instrID,
+		fmt.Sprintf("group (Snapshot ID %d) well-formed: %d level(s) between Begin and End", open.snapID, open.count))
 
 	in := e.mbp.get(open.key)
 	db := open.depth
@@ -596,13 +600,32 @@ func (e *Engine) finishMBPSnapshot(m wire.Message, ch uint8, seq uint64) {
 	// `Last Instrument Seq` is the discriminator, never `Anchor Seq`: the anchor is
 	// a channel-wide mktdata number that moves on every other instrument's deltas
 	// and on every Heartbeat.
+	//
+	// **Every branch reports.** A completed group is one opportunity for this rule, and
+	// five of the seven ways it can end are ones the publisher had no part in — so each
+	// is reported as unverifiable with the cause named, never as silence. The silence
+	// was the defect: 5 of 38 groups compared here and a clean run looked exactly like
+	// a run that compared nothing. See engine/denominator.go.
+	const oracle = "MBP.SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT"
 	switch {
-	case in.gapped || in.overflow:
-		// Loss, or a journal we bounded. Never reported as non-conformance.
+	case in.gapped:
+		// Loss. Never reported as non-conformance.
+		e.unverified(oracle, core.ReasonLoss, core.PortSnapshot, seq, ch, open.key.instrID,
+			"instrument's delta history has a gap since its last completed group")
+	case in.overflow:
+		// A journal we bounded, not a stream we mistrust — a distinct cause, because
+		// stretching the snapshot cycle is what produces it and that is an operator
+		// dial, not publisher behaviour.
+		e.unverified(oracle, core.ReasonOverflow, core.PortSnapshot, seq, ch, open.key.instrID,
+			fmt.Sprintf("delta journal exceeded its %d-entry bound before this group", maxMBPJournal))
 	case !in.baseSet:
 		// No adopted ladder to replay from yet; this group becomes it.
+		e.unverified(oracle, core.ReasonColdStart, core.PortSnapshot, seq, ch, open.key.instrID,
+			"first completed group for this instrument: adopted as the baseline, nothing to compare against")
 	case open.lastK < in.baseK:
 		// Captured before our own baseline: nothing to replay it against.
+		e.unverified(oracle, core.ReasonReorder, core.PortSnapshot, seq, ch, open.key.instrID,
+			fmt.Sprintf("group's Last Instrument Seq %d precedes the adopted baseline's %d", open.lastK, in.baseK))
 	case !in.lastSeqSet || open.lastK > in.lastSeq:
 		// **We have not applied through K yet.** Replaying "as of K" with a journal
 		// that stops short of it silently yields the state as of wherever the
@@ -610,13 +633,18 @@ func (e *Engine) finishMBPSnapshot(m wire.Message, ch uint8, seq uint64) {
 		// have not classified — the group and the deltas travel on separate ports.
 		// Caught exactly this way: a group at K=579 diffed against a ladder missing
 		// the delete that delta 579 carried.
+		e.unverified(oracle, core.ReasonPending, core.PortSnapshot, seq, ch, open.key.instrID,
+			fmt.Sprintf("group's Last Instrument Seq %d not yet applied from the delta port (at %d)",
+				open.lastK, in.lastSeq))
 	default:
-		e.mbp.oracleRuns++
 		if d := diffMBPLevels(in.stateAsOf(open.lastK), open.levels); len(d) > 0 {
-			e.Emit("MBP.SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT", core.Violation, core.PortSnapshot, seq, ch,
-				open.key.instrID,
+			e.Emit(oracle, core.Violation, core.PortSnapshot, seq, ch, open.key.instrID,
 				fmt.Sprintf("at Last Instrument Seq %d the delta-reconstructed ladder differs from the snapshot in %d level(s): %s",
 					open.lastK, len(d), describeMBPDiff(d)))
+		} else {
+			e.passed(oracle, core.PortSnapshot, seq, ch, open.key.instrID,
+				fmt.Sprintf("delta-reconstructed ladder matches the snapshot at Last Instrument Seq %d (%d level(s))",
+					open.lastK, len(open.levels)))
 		}
 	}
 
@@ -661,7 +689,7 @@ func (e *Engine) flushOpenMBPSnaps() {
 		}
 		e.Emit("MBP.SNAP.GROUP_STRUCTURE", core.Unverifiable, core.PortSnapshot, 0, ch, open.key.instrID,
 			fmt.Sprintf("SnapshotBegin (Snapshot ID %d) never followed by a SnapshotEnd: %d of %d level(s) seen at end of stream",
-				open.snapID, open.count, open.total), "truncated")
+				open.snapID, open.count, open.total), core.ReasonTruncated)
 	}
 	clear(e.mbp.open)
 }

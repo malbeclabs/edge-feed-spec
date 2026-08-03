@@ -81,30 +81,41 @@ func (e *Engine) checkMidpointRefdata(port core.Port, seq uint64, ch uint8, inst
 		return
 	}
 
+	// Both rules below account for the message either way — pass, violation, or NA
+	// when this message is not in the rule's scope at all (engine/denominator.go).
+
 	// MID.METHOD0_REQUIRES_DEFAULT: method==0 means "use the instrument's default".
 	// If the instrument's Default Method is also 0 (no real default), that is a Violation.
-	if method == 0 && di.defaultMethod == 0 {
+	switch {
+	case method != 0:
+		// The message names its own method, so there is no default to require.
+		e.inapplicable("MID.METHOD0_REQUIRES_DEFAULT", port, seq, ch, instrID,
+			fmt.Sprintf("instrument %d: Midpoint Method=%d does not defer to the instrument default", instrID, method))
+	case di.defaultMethod == 0:
 		e.Emit("MID.METHOD0_REQUIRES_DEFAULT", core.Violation, port, seq, ch, instrID,
 			fmt.Sprintf("instrument %d: Midpoint Method=0 but InstrumentDefinition Default Method=0 (no default defined)", instrID))
+	default:
+		e.passed("MID.METHOD0_REQUIRES_DEFAULT", port, seq, ch, instrID,
+			fmt.Sprintf("instrument %d: Midpoint Method=0 deferring to Default Method=%d", instrID, di.defaultMethod))
 	}
 
 	// MID.PRICE_BOUND: check price against the instrument's Price Bound.
 	switch di.priceBound {
-	case 0:
-		// no constraint
-	case 1:
-		// Bounded [0,1]: raw price must be >= 0.
+	case 1, 2:
+		// 1 = Bounded [0,1], 2 = Non-negative: raw price must be >= 0 either way.
 		// Upper-bound check omitted (requires price exponent; see package comment).
 		if midPrice < 0 {
 			e.Emit("MID.PRICE_BOUND", core.Violation, port, seq, ch, instrID,
-				fmt.Sprintf("instrument %d: Mid Price %d < 0 violates Price Bound=1 ([0,1])", instrID, midPrice))
+				fmt.Sprintf("instrument %d: Mid Price %d < 0 violates Price Bound=%d", instrID, midPrice, di.priceBound))
+			return
 		}
-	case 2:
-		// Non-negative: raw price must be >= 0.
-		if midPrice < 0 {
-			e.Emit("MID.PRICE_BOUND", core.Violation, port, seq, ch, instrID,
-				fmt.Sprintf("instrument %d: Mid Price %d < 0 violates Price Bound=2 (non-negative)", instrID, midPrice))
-		}
+		e.passed("MID.PRICE_BOUND", port, seq, ch, instrID,
+			fmt.Sprintf("instrument %d: Mid Price %d within Price Bound=%d", instrID, midPrice, di.priceBound))
+	default:
+		// 0 is "no constraint"; anything above 2 is reserved and deliberately not
+		// enforced. Neither is a check that further traffic would enable.
+		e.inapplicable("MID.PRICE_BOUND", port, seq, ch, instrID,
+			fmt.Sprintf("instrument %d declares Price Bound=%d, which constrains nothing", instrID, di.priceBound))
 	}
 }
 

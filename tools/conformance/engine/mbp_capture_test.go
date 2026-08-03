@@ -37,20 +37,28 @@ func TestMBPCaptureOracleActuallyRuns(t *testing.T) {
 		e.Process(f, dg.Port, sf)
 	}
 	e.Flush()
+	e.EndRun()
 
-	runs := 0
-	if e.mbp != nil {
-		runs = e.mbp.oracleRuns
-	}
-	viol := map[string]int{}
+	// Counted off the finding stream rather than out of engine internals: the oracle
+	// now reports every group it is handed, so the same numbers an operator sees in
+	// `checks_total` answer this, and a capture-shaped question needs no private
+	// counter to answer it (engine/denominator.go).
+	runs, viol, skipped := 0, map[string]int{}, map[string]int{}
 	for _, fn := range ac.findings {
-		if fn.Status == core.Violation {
+		switch {
+		case fn.Status == core.Violation:
 			viol[fn.RuleID]++
+		case fn.RuleID != recon:
+		case fn.Status == core.Pass:
+			runs++
+		case fn.Status == core.Unverifiable:
+			skipped[fn.Reason]++
 		}
 	}
-	t.Logf("reconstruction comparisons: %d", runs)
+	t.Logf("reconstruction comparisons that matched: %d", runs)
+	t.Logf("groups the oracle could not compare, by cause: %v", skipped)
 	t.Logf("violations: %v", viol)
-	if runs == 0 {
+	if runs == 0 && viol[recon] == 0 {
 		t.Fatal("the oracle never compared: a clean result here would be vacuous")
 	}
 }

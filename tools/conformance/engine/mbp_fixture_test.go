@@ -47,13 +47,20 @@ func TestNonconformantMBPCapture(t *testing.T) {
 	e.Flush()
 	e.EndRun()
 
-	viol, unver := map[string]int{}, map[string]int{}
+	viol, unver, pass := map[string]int{}, map[string]int{}, map[string]int{}
+	// Keyed by (rule, reason) so the shortfall can be pinned by cause, which is the
+	// only form in which "the oracle skipped 33 groups" is a reviewable number rather
+	// than a lump.
+	unverBy := map[[2]string]int{}
 	for _, fn := range ac.findings {
 		switch fn.Status {
 		case core.Violation:
 			viol[fn.RuleID]++
 		case core.Unverifiable:
 			unver[fn.RuleID]++
+			unverBy[[2]string{fn.RuleID, fn.Reason}]++
+		case core.Pass:
+			pass[fn.RuleID]++
 		}
 	}
 
@@ -98,23 +105,49 @@ func TestNonconformantMBPCapture(t *testing.T) {
 		t.Errorf("truncated final group: %d unverifiable, want exactly 1", got)
 	}
 
-	// And the oracle must have actually compared something: zero reconstruction
-	// findings is also what a run where every instrument sat unverifiable produces,
-	// so without a floor the assertion above is satisfied by doing nothing.
+	// **The denominators, pinned by cause.** Zero reconstruction findings is also what
+	// a run where every instrument sat unverifiable produces, so the clean result
+	// above is vacuous without these — and for one revision it *was* vacuous in
+	// exactly that way, with the oracle comparing 5 of 38 groups and reporting the
+	// silence of a tool that had checked everything. What made that invisible is that
+	// the only witness was an unexported counter, which no metric, log line or report
+	// could reach; these numbers now come off the finding stream, the same place an
+	// operator reads. See engine/denominator.go.
 	//
-	// Five of the 38 completed groups. The other 33 are not skipped for lack of
-	// trust: 29 are an instrument's first group, adopted as its baseline because
-	// there is nothing yet to replay against, and 4 are groups whose `Last
-	// Instrument Seq` the consumer had not yet applied through when they were
-	// classified — the ports drain independently. The capture spans about one
-	// snapshot cycle, so one comparison per instrument that got a second group is
-	// the ceiling the bytes allow.
-	if e.mbp == nil {
-		t.Fatal("no market-by-price state: the consumer never ran")
+	// Every completed group appears in exactly one row of the oracle's three, so the
+	// three sum to the group count and the sum is the assertion that matters: a
+	// regression that drops opportunities on the floor cannot restore it.
+	for _, c := range []struct {
+		what string
+		got  int
+		want int
+	}{
+		// 39 SnapshotBegin, 38 of which the End completed and every one well-formed;
+		// the 39th is the group the capture ends mid-way through.
+		{"MBP.SNAP.GROUP_STRUCTURE groups vetted clean", pass["MBP.SNAP.GROUP_STRUCTURE"], 38},
+
+		// The oracle's five comparisons: one per instrument that got a second group
+		// within the capture. The capture spans about one snapshot cycle, so that is
+		// the ceiling the bytes allow, not a shortcoming of the consumer.
+		{"oracle comparisons that ran and matched", pass[recon], 5},
+		// 29 are an instrument's first group, adopted as its baseline because there is
+		// nothing yet to replay against.
+		{"oracle groups adopted as a baseline", unverBy[[2]string{recon, core.ReasonColdStart}], 29},
+		// 4 are groups whose `Last Instrument Seq` the consumer had not applied through
+		// when they were classified — the ports drain independently.
+		{"oracle groups ahead of the delta port", unverBy[[2]string{recon, core.ReasonPending}], 4},
+		// Which is every completed group and nothing else: no group is counted twice,
+		// none is silently dropped, and none is attributed to loss on a clean capture.
+		{"oracle opportunities accounted for", pass[recon] + unver[recon], 38},
+	} {
+		if c.got != c.want {
+			t.Errorf("%s: %d, want exactly %d", c.what, c.got, c.want)
+		}
 	}
-	if e.mbp.oracleRuns < 5 {
-		t.Errorf("the oracle compared %d group(s), want at least 5; the clean result above is vacuous below that",
-			e.mbp.oracleRuns)
-	}
-	t.Logf("reconstruction comparisons: %d, violations: %v, unverifiable: %v", e.mbp.oracleRuns, viol, unver)
+
+	t.Logf("violations: %v\nunverifiable: %v\npass: %v", viol, unver, pass)
 }
+
+// recon is spelled out once; the rule ID is long enough that inlining it four
+// times obscures what the four assertions are actually comparing.
+const recon = "MBP.SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT"

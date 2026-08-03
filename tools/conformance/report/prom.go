@@ -52,13 +52,13 @@ func NewProm(reg *prometheus.Registry, version, commit string, feed core.Feed) *
 	p.unverifiable = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: promNamespace,
 		Name:      "unverifiable_total",
-		Help:      "Total checks that could not be verified, by feed, rule, and reason.",
+		Help:      "Total checks that could not be verified, by feed, rule, and cause. `reason` is a closed enum; it breaks a rule's shortfall against checks_total down by what stopped it.",
 	}, []string{"feed", "rule_id", "reason"})
 
 	p.checks = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: promNamespace,
 		Name:      "checks_total",
-		Help:      "Total checks by feed, rule, and result.",
+		Help:      "Total checks by feed, rule, and result (pass|violation|suspected|unverifiable|na). Summed over `result` this is a rule's denominator: for a rule whose execution is conditional, compare result=\"pass\" against it to read the coverage actually achieved rather than assuming silence means clean.",
 	}, []string{"feed", "rule_id", "result"})
 
 	p.transportLoss = prometheus.NewCounterVec(prometheus.CounterOpts{

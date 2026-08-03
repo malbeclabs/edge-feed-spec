@@ -1,0 +1,96 @@
+# Unit tests for prometheus/alerts/conformance.yml, run by `promtool test rules`.
+#
+# **Deliberately not under alerts/.** prometheus.yml globs `alerts/*.yml` as
+# rule_files, so a test file there would be loaded as a rule file and fail the
+# demo container at startup.
+#
+# These cover the two properties of the coverage alerts that are easy to get
+# wrong and impossible to notice in production, because both failure modes are
+# silent: an alert that never fires, and an alert that fires so routinely it gets
+# muted. See "Coverage vs. silence" in ../../README.md.
+#
+#   docker run --rm --entrypoint promtool \
+#     -v "$PWD/prometheus:/p" prom/prometheus:latest \
+#     test rules /p/rule_tests/conformance_test.yml
+
+rule_files:
+  - ../alerts/conformance.yml
+
+evaluation_interval: 1m
+
+tests:
+  # A rule getting work and passing some of it is healthy — no alert.
+  - interval: 1m
+    input_series:
+      - series: 'dz_conformance_checks_total{feed="mbp",rule_id="HEALTHY",result="pass"}'
+        values: "0+2x30"
+      - series: 'dz_conformance_checks_total{feed="mbp",rule_id="HEALTHY",result="unverifiable"}'
+        values: "0+3x30"
+    promql_expr_test:
+      - expr: ALERTS{alertname="ConformanceRuleNoLongerVerifying"}
+        eval_time: 25m
+        exp_samples: []
+
+  # The regression case: a rule handed plenty of work whose `pass` series never
+  # exists at all. An `and increase(...{result="pass"}) == 0` formulation is
+  # silent here — no pass series means no samples to compare — which would leave
+  # the rule in the worst possible state as the one state the alert cannot see.
+  - interval: 1m
+    input_series:
+      - series: 'dz_conformance_checks_total{feed="mbp",rule_id="GONE_QUIET",result="unverifiable"}'
+        values: "0+3x30"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: ConformanceRuleNoLongerVerifying
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              feed: mbp
+              rule_id: GONE_QUIET
+            exp_annotations:
+              summary: "Rule GONE_QUIET is no longer verifying anything"
+              description: "Rule GONE_QUIET on feed mbp was handed work but produced no passing check in the last 15 minutes, so its clean result proves nothing. Check dz_conformance_unverifiable_total{rule_id=\"GONE_QUIET\"} for which cause is blocking it.\n"
+
+  # A rule reporting only `na` is not owed coverage, so it must not alert: an
+  # instrument set that declares no price bounds has nothing to bound-check.
+  - interval: 1m
+    input_series:
+      - series: 'dz_conformance_checks_total{feed="mbo",rule_id="NOT_APPLICABLE",result="na"}'
+        values: "0+5x30"
+    promql_expr_test:
+      - expr: ALERTS{alertname="ConformanceRuleNoLongerVerifying"}
+        eval_time: 25m
+        exp_samples: []
+
+  # Routine cold_start/pending churn must not trip the coverage-loss alert. This
+  # is the volume a healthy market-by-price feed produces on every snapshot
+  # cycle; alerting on it is how an operator learns to ignore the alert.
+  - interval: 1m
+    input_series:
+      - series: 'dz_conformance_unverifiable_total{feed="mbp",rule_id="ORACLE",reason="cold_start"}'
+        values: "0+10x30"
+      - series: 'dz_conformance_unverifiable_total{feed="mbp",rule_id="ORACLE",reason="pending"}'
+        values: "0+10x30"
+    promql_expr_test:
+      - expr: ALERTS{alertname="ConformanceCoverageLoss"}
+        eval_time: 25m
+        exp_samples: []
+
+  # The same volume attributed to loss does trip it — the reason label is the
+  # whole difference between the two cases above and below.
+  - interval: 1m
+    input_series:
+      - series: 'dz_conformance_unverifiable_total{feed="mbp",rule_id="ORACLE",reason="loss"}'
+        values: "0+10x30"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: ConformanceCoverageLoss
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              feed: mbp
+              rule_id: ORACLE
+              reason: loss
+            exp_annotations:
+              summary: "Conformance coverage loss on mbp feed"
+              description: "Rule ORACLE became unverifiable (reason=loss) on feed mbp. Check feed health and instrument definitions.\n"
