@@ -72,7 +72,9 @@ echo "exit: $?"   # 1
 # Exits 1: the capture's known defects are reported.
 ./dz-conformance --feed mbp --pcap testdata/nonconformant_mbp.pcap \
   --mktdata-port 31000 --refdata-port 41000 --snapshot-port 51000
-``` Add `--json-report /tmp/report.json` for a per-rule status dump, or `-v` to surface `Unverifiable`/info findings.
+```
+
+Add `--json-report /tmp/report.json` for a per-rule status dump, or `-v` to surface `Unverifiable`/info findings.
 
 ### Live capture
 
