@@ -45,36 +45,76 @@ func TestNonconformantMBPCapture(t *testing.T) {
 		e.Process(f, dg.Port, sf)
 	}
 	e.Flush()
+	e.EndRun()
 
-	viol := map[string]int{}
+	viol, unver := map[string]int{}, map[string]int{}
 	for _, fn := range ac.findings {
-		if fn.Status == core.Violation {
+		switch fn.Status {
+		case core.Violation:
 			viol[fn.RuleID]++
+		case core.Unverifiable:
+			unver[fn.RuleID]++
 		}
 	}
 
-	// The two defects the capture was taken before the fix for. Frames of 1,464
-	// bytes against the family's 1,232 cap, and `ManifestSummary` on the refdata
-	// port with the snapshot flag set.
-	for _, rule := range []string{"FRAME.LENGTH_CONSISTENCY", "MSG.SNAPSHOT_FLAG_MATCHES_PORT"} {
-		if viol[rule] == 0 {
-			t.Errorf("%s: expected the capture's known defect to be reported", rule)
+	// **Pinned exactly, not asserted non-zero.** A floor of "> 0" passes while a
+	// regression quietly guts coverage, which is the failure this fixture exists to
+	// prevent — the consumer once compared 102 of 344 groups and every test still
+	// passed. Every number below is what a correct run produces on these bytes; a
+	// change to any of them is either a real regression or a deliberate improvement
+	// that belongs in the same commit as the new number.
+	//
+	// The first two are the capture's known publisher defects: frames of 1,464 bytes
+	// against the family's 1,232 cap, and `ManifestSummary` on the refdata port with
+	// the snapshot flag set.
+	for _, c := range []struct {
+		rule string
+		want int
+	}{
+		{"FRAME.LENGTH_CONSISTENCY", 619},
+		{"MSG.SNAPSHOT_FLAG_MATCHES_PORT", 6},
+		// **Zero, and that is the point of the loss gates.** The snapshot port in this
+		// capture is clean, its 38 completed groups are all well-formed, and one lost
+		// datagram used to turn any of them into ~746 MUST findings.
+		{"MBP.SNAP.GROUP_STRUCTURE", 0},
+		// **The reconstruction agrees.** The positive claim the whole consumer exists to
+		// make: the ladder rebuilt independently from the delta stream matches the
+		// publisher's own snapshots. A regression that breaks replay shows up here and
+		// nowhere else.
+		{"MBP.SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT", 0},
+		{"MBP.DELTA.PERINSTR_DENSITY", 0},
+		{"MBP.DELTA.PERINSTR_NO_SNAPSHOT_RESET", 0},
+		{"MBP.DELTA.ABSOLUTE_APPLY", 0},
+	} {
+		if got := viol[c.rule]; got != c.want {
+			t.Errorf("%s: %d violations, want exactly %d", c.rule, got, c.want)
 		}
 	}
 
-	// **The reconstruction must agree.** This is the positive claim, and the one
-	// the whole consumer exists to make: the ladder rebuilt independently from the
-	// delta stream matches the publisher's own snapshots. A regression that breaks
-	// replay shows up here and nowhere else.
-	if n := viol["MBP.SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT"]; n != 0 {
-		t.Errorf("reconstruction diverged from the snapshots %d time(s); the publisher's book was sound in this capture", n)
+	// The capture ends mid-group, as every finite capture does: 39 `SnapshotBegin`
+	// against 38 `SnapshotEnd`. That is reported, and reported as unverifiable —
+	// the observation window closing is not something the publisher did.
+	if got := unver["MBP.SNAP.GROUP_STRUCTURE"]; got != 1 {
+		t.Errorf("truncated final group: %d unverifiable, want exactly 1", got)
 	}
 
-	// And it must have actually compared something. Zero findings is also what a
-	// run where every instrument sat unverifiable would produce, so without this
-	// the assertion above is satisfied by doing nothing.
-	if e.mbp == nil || e.mbp.oracleRuns == 0 {
-		t.Fatal("the oracle never compared: the clean result above would be vacuous")
+	// And the oracle must have actually compared something: zero reconstruction
+	// findings is also what a run where every instrument sat unverifiable produces,
+	// so without a floor the assertion above is satisfied by doing nothing.
+	//
+	// Five of the 38 completed groups. The other 33 are not skipped for lack of
+	// trust: 29 are an instrument's first group, adopted as its baseline because
+	// there is nothing yet to replay against, and 4 are groups whose `Last
+	// Instrument Seq` the consumer had not yet applied through when they were
+	// classified — the ports drain independently. The capture spans about one
+	// snapshot cycle, so one comparison per instrument that got a second group is
+	// the ceiling the bytes allow.
+	if e.mbp == nil {
+		t.Fatal("no market-by-price state: the consumer never ran")
 	}
-	t.Logf("reconstruction comparisons: %d, violations: %v", e.mbp.oracleRuns, viol)
+	if e.mbp.oracleRuns < 5 {
+		t.Errorf("the oracle compared %d group(s), want at least 5; the clean result above is vacuous below that",
+			e.mbp.oracleRuns)
+	}
+	t.Logf("reconstruction comparisons: %d, violations: %v, unverifiable: %v", e.mbp.oracleRuns, viol, unver)
 }
