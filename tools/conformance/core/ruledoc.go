@@ -24,31 +24,45 @@ func Doc(id string) (RuleDoc, bool) {
 
 const specBaseURL = "https://github.com/malbeclabs/edge-feed-spec/blob/main/"
 
-// SpecURL returns a link to the authoritative edge-feed-spec document for a
-// rule, derived from its category prefix. Surfaced as a Grafana data link so a
-// non-conforming rule points at the requirement it violates.
-func SpecURL(id string) string {
+// feedSpec returns the document for one feed. Every feed spec restates the frame
+// header, the application message header and its own recovery model in full, so
+// this is the authoritative document for any rule that fired against that feed.
+func feedSpec(feed Feed) string {
+	switch feed {
+	case FeedTOB:
+		return specBaseURL + "top-of-book/spec.md"
+	case FeedMidpoint:
+		return specBaseURL + "midpoint/spec.md"
+	case FeedMBO:
+		return specBaseURL + "market-by-order/spec.md"
+	case FeedMBP:
+		return specBaseURL + "market-by-price/spec.md"
+	default:
+		return specBaseURL
+	}
+}
+
+// SpecURL returns a link to the authoritative edge-feed-spec document for a rule
+// as it applies to one feed. Surfaced as a Grafana data link so a non-conforming
+// rule points at the requirement it violates.
+//
+// **Resolved by feed, not by the rule's category prefix.** A prefix names which
+// sibling documented a requirement first, which is not the same as which document
+// states it for the feed being checked: `MSG.SNAPSHOT_FLAG_MATCHES_PORT` is
+// market-by-price's own MUST, and market-by-price is the only spec in the family
+// that gives `Flags` bit 0 a normative setting — a prefix map sent it to the
+// top-of-book spec, which merely describes the field. Rules shared between feeds
+// (`RESET.ANCHOR_SEQ_IS_CURRENT_FRAME`) have the same problem in reverse. Every
+// feed spec is self-contained, so keying on the feed is right for all of them.
+func SpecURL(id string, feed Feed) string {
 	prefix, _, _ := strings.Cut(id, ".")
 	switch prefix {
 	case "REFDATA", "MANIFEST":
+		// The one genuine exception: the reference-data supplement is a single
+		// document that every feed spec incorporates by reference rather than restating.
 		return specBaseURL + "reference-data/spec.md"
-	case "TOB":
-		return specBaseURL + "top-of-book/spec.md"
-	case "MID":
-		return specBaseURL + "midpoint/spec.md"
-	case "FRAME", "MSG", "HEARTBEAT":
-		// Shared frame header / message framing — documented canonically in the
-		// top-of-book spec's transport-framing section.
-		return specBaseURL + "top-of-book/spec.md"
-	case "MBP":
-		// Market-by-price rules carry the feed as their prefix, because the
-		// categories below (SNAP, DELTA) already resolve to market-by-order and a
-		// rule must link to the spec that states it.
-		return specBaseURL + "market-by-price/spec.md"
-	case "RESERVED", "FIELD", "RESET", "SNAP", "DELTA", "BATCH", "REF", "TRADE":
-		return specBaseURL + "market-by-order/spec.md"
 	default:
-		return specBaseURL
+		return feedSpec(feed)
 	}
 }
 

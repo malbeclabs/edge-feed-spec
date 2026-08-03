@@ -129,7 +129,7 @@ func NewProm(reg *prometheus.Registry, version, commit string, feed core.Feed) *
 			continue
 		}
 		doc, _ := core.Doc(r.ID)
-		p.ruleInfo.WithLabelValues(r.ID, r.Severity.String(), doc.Summary, core.SpecURL(r.ID)).Set(1)
+		p.ruleInfo.WithLabelValues(r.ID, r.Severity.String(), doc.Summary, core.SpecURL(r.ID, feed)).Set(1)
 	}
 
 	return p

@@ -15,6 +15,10 @@ var (
 	tobOnly  = []Feed{FeedTOB}
 	midOnly  = []Feed{FeedMidpoint}
 	mbpOnly  = []Feed{FeedMBP}
+	// mboMBP is for rules the two snapshot/delta feeds state identically. A rule
+	// listed mboOnly while its emit path fires for another feed produces findings
+	// with no matching rule_info row, and the Grafana join drops them silently.
+	mboMBP = []Feed{FeedMBO, FeedMBP}
 )
 
 // Rules is the source of truth for the rule registry, transcribed from the
@@ -34,7 +38,11 @@ var Rules = []RuleMeta{
 	{"HEARTBEAT.CHANNEL_ID_MATCH", Should, 1, StateNone, allFeeds, false},
 	{"FIELD.SIDE_ENUM", Should, 1, StateNone, mboOnly, false},
 	{"FIELD.AGGRESSOR_SIDE_ENUM", Info, 1, StateNone, mboOnly, false},
-	{"RESET.ANCHOR_SEQ_IS_CURRENT_FRAME", Must, 1, StateNone, mboOnly, false},
+	// InstrumentReset is byte-identical across the two feeds and both specs state
+	// this requirement in the same words (market-by-order §recovery step 1,
+	// market-by-price the same), and tier1's InstrumentReset case is not feed-gated —
+	// so the registry has to say mbp too.
+	{"RESET.ANCHOR_SEQ_IS_CURRENT_FRAME", Must, 1, StateNone, mboMBP, false},
 	{"FIELD.QTY_POSITIVE", Should, 1, StateNone, mboOnly, false},
 	{"SNAP.ORDER_STRUCT_VALID", Should, 1, StateNone, mboOnly, false},
 	// --- MBO delta sequencing (detector, counters) ---
