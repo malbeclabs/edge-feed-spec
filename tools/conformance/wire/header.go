@@ -6,6 +6,7 @@ const (
 	MagicTOB uint16 = 0x445A
 	MagicMid uint16 = 0x4D44
 	MagicMBO uint16 = 0x4444
+	MagicMBP uint16 = 0x4442
 
 	FrameHeaderLen = 24
 	MsgHeaderLen   = 4
@@ -30,6 +31,14 @@ const (
 	TypeSnapshotBegin = 0x20
 	TypeSnapshotOrder = 0x21
 	TypeSnapshotEnd   = 0x22
+	// Market-by-price payloads. These take fresh IDs in 0x40-0x4F rather than
+	// reusing a sibling's, because the cross-spec policy forbids reassigning an
+	// ID to a different payload — SnapshotLevel is not SnapshotOrder.
+	TypeLevelUpdate   = 0x40
+	TypeBookClear     = 0x41
+	TypeSnapshotLevel = 0x42
+	// Shared with TOB and MBO, byte-identical, and carried by MBP.
+	TypeLiquidation = 0x08
 )
 
 type FrameHeader struct {

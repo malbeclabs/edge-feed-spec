@@ -36,6 +36,54 @@ Rules are partitioned into two tiers based on when they can fire:
 
 This split is what makes lossless pcap replay yield near-100% verifiable coverage — the tool is strong in CI without producing false alarms on live feeds with normal multicast loss.
 
+## Coverage vs. silence
+
+A Tier-2 rule whose **execution** is conditional runs only when its preconditions line up, and that creates a failure mode worse than a false positive: a rule that quietly stops running reports the same thing as a rule that checked everything and found nothing — nothing. A clean report then means "no violations found", not "no violations exist", and there is no way to tell which from the output.
+
+So every such rule accounts for each opportunity it gets, with exactly one finding:
+
+| Result | Meaning |
+|--------|---------|
+| `pass` | the check ran and the property held |
+| `violation` | the check ran and the publisher broke it |
+| `unverifiable` | the check could not run; `reason` names what stopped it |
+| `na` | the check does not apply to this opportunity at all |
+
+`checks_total{rule_id}` is therefore the rule's **denominator** and its `result="pass"` series the coverage actually achieved. `unverifiable_total{rule_id,reason}` breaks the shortfall down by cause, which is what separates a healthy run from a broken feed: 33 `cold_start` skips mean instruments still adopting their first baseline, while 33 `loss` skips mean a feed dropping frames.
+
+Read them together. On the bundled market-by-price capture the reconstruction oracle reports:
+
+```json
+{
+  "rule_id": "MBP.SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT",
+  "counts": { "pass": 5, "unverifiable": 33 },
+  "unverifiable_by_reason": { "cold_start": 29, "pending": 4 }
+}
+```
+
+Five of the capture's 38 completed snapshot groups were compared and matched; 29 were each an instrument's first group, adopted as its baseline with nothing yet to compare against, and 4 carried a `Last Instrument Seq` the delta port had not yet reached. The capture spans about one snapshot cycle, so one comparison per instrument that got a second group is the ceiling those bytes allow — a fact the previous output could not express, because it reported the same silence a run comparing zero groups would have.
+
+`core.ConditionalExec` marks the rules that owe a denominator, `engine/denominator.go` states the invariant, and `TestConditionalRulesReportADenominator` fails a run where one of them goes quiet. Rules gated on an `--expect-*` flag are a separate axis: they report nothing when the flag is unset, and `rule_info` says so statically before a frame arrives.
+
+### Rules an unbound port starves
+
+The invariant above cannot close one hole from inside the engine. A refdata-gated rule with no `--refdata-port` still reports — it is driven by mktdata messages and merely *gated* on reference data, so each message it cannot judge becomes an `unverifiable`/`cold_start`. But a **snapshot-driven** rule with no `--snapshot-port` has no driver at all: the code that would emit is never entered, so there are zero opportunities, zero findings, and zero findings is what a clean feed looks like.
+
+That produced a two-step trap in which neither step looks wrong:
+
+1. Operator runs an MBP feed without `--snapshot-port`, gets exit 1 and a real violation.
+2. They fix the publisher, re-run the same command, get **exit 0 and an empty report** — and read it as a pass, while every `MBP.SNAP.*` rule was starved.
+
+So the CLI now reports it from the only place that knows, the flags: a warning on stderr at bind time (regardless of `-v`) and an `na` finding per unreachable rule, which lands in the JSON report and in `checks_total{result="na"}`.
+
+```
+dz-conformance: WARNING --snapshot-port is not set, so 2 mbp rule(s) have no frames to
+evaluate and are reported as na, NOT as passes. The exit code does not cover them:
+[MBP.SNAP.GROUP_STRUCTURE MBP.SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT]
+```
+
+**The exit code is deliberately unchanged.** A two-port run is legitimate and failing it would break anyone doing one on purpose; what matters is that exit 0 is not read as "those rules passed". `core.SnapshotDrivenRules` is the set, and `TestStarvedRulesAreExactlyTheSnapshotDrivenOnes` proves each member disappears when the port is dropped and reappears when it is restored — so the `na` is never a false claim.
+
 ## MBO snapshot oracle (headline capability)
 
 For the MBO feed the engine reconstructs the order book independently from both the delta stream and the periodic snapshot stream, then diffs them at every snapshot (`SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT`). This catches a publisher whose internal book has silently diverged from the deltas it emitted — exactly the class of bug invisible to structural or sequence checks alone. Loss is never treated as publisher non-conformance: a per-instrument gap forces the affected instrument to `Unverifiable`, not `Violation`.
@@ -64,7 +112,17 @@ echo "exit: $?"   # 0
 echo "exit: $?"   # 1
 ```
 
-`conformant_tob.pcap` and `conformant_midpoint.pcap` are also provided (mktdata + refdata only). Add `--json-report /tmp/report.json` for a per-rule status dump, or `-v` to surface `Unverifiable`/info findings.
+`conformant_tob.pcap` and `conformant_midpoint.pcap` are also provided (mktdata + refdata only).
+
+`nonconformant_mbp.pcap` is different in kind: a real capture from a live publisher on venue data, on ports `31000`/`41000`/`51000`, taken **before** its defects were fixed. It carries oversized frames and the snapshot flag set on refdata, so it exits 1 by design — it is a regression fixture for the market-by-price rules, not a conformant sample. It is also two orders of magnitude larger than the hand-built captures, which is the cost of covering a feed whose snapshot stream is most of its bytes. That cost bought something: three defects in the consumer survived the synthetic tests and were found only by running against this data.
+
+```bash
+# Exits 1: the capture's known defects are reported.
+./dz-conformance --feed mbp --pcap testdata/nonconformant_mbp.pcap \
+  --mktdata-port 31000 --refdata-port 41000 --snapshot-port 51000
+```
+
+Add `--json-report /tmp/report.json` for a per-rule status dump, or `-v` to surface `Unverifiable`/info findings.
 
 ### Live capture
 
@@ -96,6 +154,15 @@ go build -o dz-conformance .
   --group 239.10.10.10 \
   --mktdata-port 7011 \
   --refdata-port 7012 \
+  --interface doublezero1
+
+# Market-by-price feed (three ports, like MBO)
+./dz-conformance \
+  --feed mbp \
+  --group 239.10.10.20 \
+  --mktdata-port 7021 \
+  --refdata-port 7022 \
+  --snapshot-port 7023 \
   --interface doublezero1
 ```
 
@@ -141,7 +208,7 @@ With `--pcap`, the tool replays the capture in order and exits when the file is 
 | `--log-throttle` | `1s` | Minimum wall-clock interval between identical `(rule, status)` log lines. `0` disables throttling. Affects log lines only — metrics and the exit code always count every finding. |
 | `--version` | | Print version and exit |
 
-**Port note.** At least one port flag must be non-zero or the tool exits with code 2. Rule behavior when a port is omitted is rule-specific — some rules are effectively unreachable with no traffic on that port, while others may still fire from related activity on a bound port.
+**Port note.** At least one port flag must be non-zero or the tool exits with code 2. Rule behavior when a port is omitted is rule-specific — some rules are effectively unreachable with no traffic on that port, while others may still fire from related activity on a bound port. Omitting `--snapshot-port` on an MBO or MBP feed is called out explicitly at startup, because those rules would otherwise vanish from the output entirely: see [Rules an unbound port starves](#rules-an-unbound-port-starves).
 
 **Interface note.** On a multi-NIC host, the default IGMP join may use the wrong interface. Pass `--interface doublezero1` (or whatever the GRE tunnel interface is named) to join on the correct one.
 
@@ -184,7 +251,7 @@ time=... level=ERROR msg=finding
 
 ### JSON report
 
-Pass `--json-report path` to write a machine-readable summary at the end of the run. The report is a JSON object with a `rules` array; each entry has a `rule_id` and a `counts` map of status name → count (e.g. `{"rule_id": "FRAME.MAGIC_MISMATCH", "counts": {"violation": 1}}`).
+Pass `--json-report path` to write a machine-readable summary at the end of the run. The report is a JSON object with a `rules` array; each entry has a `rule_id` and a `counts` map of status name → count (e.g. `{"rule_id": "FRAME.MAGIC_MISMATCH", "counts": {"violation": 1}}`). A rule with `unverifiable` findings also carries `unverifiable_by_reason`, breaking that count down by cause — this is the only place a `--pcap` CI run reports it, since a one-shot replay has no Prometheus to scrape. See [Coverage vs. silence](#coverage-vs-silence) for how to read the two together.
 
 ### Prometheus metrics
 
@@ -197,8 +264,8 @@ All metrics are prefixed `dz_conformance_`.
 | Name | Type | Labels | Meaning |
 |------|------|--------|---------|
 | `violations_total` | counter | `feed`, `rule_id`, `severity` | Confirmed conformance violations |
-| `unverifiable_total` | counter | `feed`, `rule_id`, `reason` | Checks that could not be verified (`reason` is `unspecified` in current engine code; the field is reserved for future per-cause breakdown) |
-| `checks_total` | counter | `feed`, `rule_id`, `result` | All checks by result |
+| `unverifiable_total` | counter | `feed`, `rule_id`, `reason` | Checks that could not be verified, by cause. `reason` is a closed enum (`core.Reason*`): `loss`, `cold_start`, `reorder`, `pending`, `overflow`, `truncated`, `insufficient_window`, `superseded`, `untrusted`, `bound_subset`, `transition`, `unspecified` |
+| `checks_total` | counter | `feed`, `rule_id`, `result` | All checks by result — the **denominator** for every rule, see [Coverage vs. silence](#coverage-vs-silence) |
 | `transport_loss_total` | counter | `port` | Transport packet-loss events by port (`mktdata`, `refdata`, `snapshot`) |
 | `transport_corruption_total` | counter | `port`, `reason` | Transport corruption events |
 | `snapshot_audits_total` | counter | `result` | Snapshot oracle outcomes (`match`, `mismatch_suspected`, `mismatch_confirmed`, `unverifiable`) |
@@ -278,7 +345,8 @@ open http://127.0.0.1:3000  # admin / GF_ADMIN_PASSWORD
 |------|------|
 | [docker-compose.yml](docker-compose.yml) | `dz-conformance` + `prometheus` + `grafana` (build context is this self-contained module) |
 | [prometheus/prometheus.yml](prometheus/prometheus.yml) | scrapes `dz-conformance` at `127.0.0.1:9094` |
-| [prometheus/alerts/conformance.yml](prometheus/alerts/conformance.yml) | must-violation page + coverage-loss / transport-loss / target-down warnings |
+| [prometheus/alerts/conformance.yml](prometheus/alerts/conformance.yml) | must-violation page + coverage-loss / rule-stopped-verifying / transport-loss / target-down warnings |
+| [prometheus/rule_tests/](prometheus/rule_tests/) | `promtool test rules` unit tests for those alerts (run in CI; kept out of `alerts/` because `prometheus.yml` globs that directory as `rule_files`) |
 | [grafana/dashboards/conformance.json](grafana/dashboards/conformance.json) | the `dz_conformance_*` dashboard, including the per-rule conformance table |
 | [grafana/provisioning/](grafana/provisioning/) | auto-registers the Prometheus datasource and the dashboard |
 
@@ -289,7 +357,7 @@ The tool is correct (no false `Violation`s) and complete for its primary use cas
 - **Single channel per port.** Per-port sequencing/dedup/reorder state is keyed by port, not by `(port, channel_id)`. The edge-feed-spec allows sharding the instrument set across multiple channels; running a *multi-channel* capture where two channel IDs share one UDP port could mis-attribute sequence numbers across channels. Multi-channel support is future work; for a single channel the tool is exact.
 - **Mid-stream join doesn't reconstruct a trusted book.** The referential-integrity and snapshot↔delta oracle checks only run once an instrument's delta book is *trusted*, which today requires observing its delta stream from `Per-Instrument Seq = 1` (i.e. from session start / `Reset Count` boundary). A cold-start or post-`InstrumentReset` recovery snapshot is currently used only to detect divergence, not to *bootstrap* the live book — so an instrument joined mid-stream stays `Unverifiable` for those checks until a fresh era. Capture the publisher from startup to exercise the full oracle. Bootstrapping a trusted book from a clean snapshot is a planned enhancement.
 
-Minor: the `dz_conformance_instruments_state` gauge is registered but not yet populated, and most `Unverifiable` findings currently carry `reason="unspecified"` (the bounded-reason taxonomy is wired only at the cross-port downgrade sites). Neither affects violation detection or the CI exit code.
+Minor: the `dz_conformance_instruments_state` gauge is registered but not yet populated. This does not affect violation detection or the CI exit code.
 
 ## Releasing
 

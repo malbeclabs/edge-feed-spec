@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 
@@ -25,6 +26,8 @@ func magicFor(feed core.Feed) uint16 {
 		return wire.MagicTOB
 	case core.FeedMidpoint:
 		return wire.MagicMid
+	case core.FeedMBP:
+		return wire.MagicMBP
 	default: // FeedMBO
 		return wire.MagicMBO
 	}
@@ -71,6 +74,65 @@ func buildSource(opts RunOpts) (input.Source, error) {
 		Interface: opts.Interface,
 	}
 	return input.NewMulticastSource(cfg)
+}
+
+// reportStarvedRules accounts for the rules this invocation's port flags make
+// unreachable, at startup, before any traffic.
+//
+// **Why the CLI and not the engine.** Every other rule reports its own denominator
+// from the stream (see engine/denominator.go), but a snapshot-driven rule with no
+// `--snapshot-port` has no stream to report from: the code that would emit is never
+// entered. Zero opportunities produce zero findings, and zero findings are exactly
+// what a clean feed produces. The failure that motivated this is a two-step, and
+// neither step looks wrong on its own:
+//
+//  1. Operator runs without `--snapshot-port`, gets exit 1 and a real violation.
+//  2. They fix the publisher, re-run the same command, get exit 0 and an empty
+//     report — and read it as a pass, while every snapshot rule was starved.
+//
+// So the fact is reported from the only place that knows it, which is the flags.
+// NA is the status the catalog already defines for "rule not applicable (e.g.
+// required port unbound)", and routing it through the reporter rather than a bespoke
+// field means it lands in all three sinks at once: stderr, the JSON report's per-rule
+// counts, and checks_total{result="na"}.
+func reportStarvedRules(rep report.Reporter, opts RunOpts) {
+	if opts.SnapshotPort != 0 {
+		return
+	}
+	starved := core.SnapshotDrivenRules(opts.Cfg.Feed)
+	if len(starved) == 0 {
+		return // this feed has no snapshot-port rules; nothing is lost
+	}
+
+	// Loud, and on stderr regardless of --verbose: the whole point is that it must
+	// reach an operator who is reading an otherwise-empty report as a pass.
+	//
+	// The wording names the trap rather than overstating it. The exit code is
+	// deliberately unchanged — a two-port run is legitimate, and failing it would break
+	// anyone deliberately doing one — so what matters is that exit 0 must not be read as
+	// "these rules passed". They did not run.
+	fmt.Fprintf(os.Stderr,
+		"dz-conformance: WARNING --snapshot-port is not set, so %d %s rule(s) have no frames "+
+			"to evaluate and are reported as na, NOT as passes. The exit code does not cover "+
+			"them: %v\n",
+		len(starved), opts.Cfg.Feed, starved)
+
+	now := time.Now()
+	for _, id := range starved {
+		meta, ok := core.Lookup(id)
+		if !ok {
+			continue
+		}
+		rep.Record(core.Finding{
+			RuleID:   id,
+			Severity: meta.Severity,
+			Status:   core.NA,
+			Feed:     opts.Cfg.Feed,
+			Port:     core.PortSnapshot,
+			Detail:   "--snapshot-port is not set, so this rule has no frames to evaluate",
+			At:       now,
+		})
+	}
 }
 
 // Run wires the full pipeline and returns an OS exit code (0 = pass, 1 = violation).
@@ -137,6 +199,9 @@ func Run(opts RunOpts) int {
 
 	// --- engine ---
 	eng := engine.New(opts.Cfg, rep)
+
+	// Report, before a single frame is read, the rules this invocation cannot reach.
+	reportStarvedRules(rep, opts)
 
 	// --- signal handling for live captures ---
 	done := make(chan struct{})

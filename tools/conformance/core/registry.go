@@ -1,5 +1,10 @@
 package core
 
+import (
+	"slices"
+	"sort"
+)
+
 type RuleMeta struct {
 	ID          string
 	Severity    Severity
@@ -10,10 +15,15 @@ type RuleMeta struct {
 }
 
 var (
-	allFeeds = []Feed{FeedTOB, FeedMidpoint, FeedMBO}
+	allFeeds = []Feed{FeedTOB, FeedMidpoint, FeedMBO, FeedMBP}
 	mboOnly  = []Feed{FeedMBO}
 	tobOnly  = []Feed{FeedTOB}
 	midOnly  = []Feed{FeedMidpoint}
+	mbpOnly  = []Feed{FeedMBP}
+	// mboMBP is for rules the two snapshot/delta feeds state identically. A rule
+	// listed mboOnly while its emit path fires for another feed produces findings
+	// with no matching rule_info row, and the Grafana join drops them silently.
+	mboMBP = []Feed{FeedMBO, FeedMBP}
 )
 
 // Rules is the source of truth for the rule registry, transcribed from the
@@ -27,12 +37,17 @@ var Rules = []RuleMeta{
 	{"MSG.LENGTH_PER_TYPE", Must, 1, StateNone, allFeeds, false},
 	{"MSG.WRONG_PORT_PLACEMENT", Must, 1, StateNone, allFeeds, false},
 	{"MSG.UNKNOWN_TYPE_SKIPPED", Info, 1, StateNone, allFeeds, false},
+	{"MSG.SNAPSHOT_FLAG_MATCHES_PORT", Must, 1, StateNone, mbpOnly, false},
 	{"MSG.RESERVED_TYPE_0X03_0X05", Should, 1, StateNone, mboOnly, false},
 	{"RESERVED.FIELD_BITS_ZERO", Should, 1, StateNone, mboOnly, false},
 	{"HEARTBEAT.CHANNEL_ID_MATCH", Should, 1, StateNone, allFeeds, false},
 	{"FIELD.SIDE_ENUM", Should, 1, StateNone, mboOnly, false},
 	{"FIELD.AGGRESSOR_SIDE_ENUM", Info, 1, StateNone, mboOnly, false},
-	{"RESET.ANCHOR_SEQ_IS_CURRENT_FRAME", Must, 1, StateNone, mboOnly, false},
+	// InstrumentReset is byte-identical across the two feeds and both specs state
+	// this requirement in the same words (market-by-order §recovery step 1,
+	// market-by-price the same), and tier1's InstrumentReset case is not feed-gated —
+	// so the registry has to say mbp too.
+	{"RESET.ANCHOR_SEQ_IS_CURRENT_FRAME", Must, 1, StateNone, mboMBP, false},
 	{"FIELD.QTY_POSITIVE", Should, 1, StateNone, mboOnly, false},
 	{"SNAP.ORDER_STRUCT_VALID", Should, 1, StateNone, mboOnly, false},
 	// --- MBO delta sequencing (detector, counters) ---
@@ -47,6 +62,12 @@ var Rules = []RuleMeta{
 	{"HEARTBEAT.CADENCE", Info, 2, StateCounters, allFeeds, true},
 	{"BATCH.ID_MONOTONIC", Should, 2, StateCounters, mboOnly, false},
 	{"FRAME.SEQ_RESET_GAP", Must, 2, StateCounters, allFeeds, false},
+	// --- Market-by-price: per-instrument sequencing and the reconstruction oracle ---
+	{"MBP.DELTA.PERINSTR_DENSITY", Must, 2, StateCounters, mbpOnly, false},
+	{"MBP.DELTA.PERINSTR_NO_SNAPSHOT_RESET", Must, 2, StateCounters, mbpOnly, false},
+	{"MBP.DELTA.ABSOLUTE_APPLY", Must, 2, StateCounters, mbpOnly, false},
+	{"MBP.SNAP.GROUP_STRUCTURE", Must, 2, StateSnapshotGroup, mbpOnly, false},
+	{"MBP.SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT", Must, 2, StateFullBook, mbpOnly, false},
 	// --- MBO referential integrity (consumer, order_id_set) ---
 	{"REF.EXEC_DANGLING_ORDER", Must, 2, StateOrderIDSet, mboOnly, false},
 	{"REF.CANCEL_DANGLING_ORDER", Must, 2, StateOrderIDSet, mboOnly, false},
@@ -110,6 +131,130 @@ var Rules = []RuleMeta{
 	{"MID.TIMESTAMP_ORDERING", Should, 1, StateNone, midOnly, false},
 	{"MID.METHOD0_REQUIRES_DEFAULT", Must, 2, StateRefdata, midOnly, false},
 	{"MID.PRICE_BOUND", Must, 2, StateRefdata, midOnly, false},
+}
+
+// conditionalExec lists the rules whose *execution* is conditional: they run only
+// when their preconditions line up, so silence from one of them is ambiguous —
+// full coverage and never having run once produce the same empty output.
+//
+// Each of these MUST account for every opportunity it gets, with a `pass` when the
+// property held and an `unverifiable`/`na` naming what stopped it otherwise. That
+// makes `checks_total{rule_id}` the rule's denominator. See
+// engine/denominator.go for the invariant and `TestConditionalRulesReportADenominator`
+// for its enforcement.
+//
+// **Not the same as `RuleMeta.Conditional`**, which means the rule is off until its
+// `--expect-*` flag is set. That is a static fact, visible in `rule_info` before a
+// frame arrives; this is about stream state.
+var conditionalExec = map[string]struct{}{
+	// The two reconstruction oracles: comparable only once a baseline ladder/book
+	// exists and the delta side has been applied through the snapshot's K.
+	"MBP.SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT": {},
+	"SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT":     {},
+	// Snapshot-group structure: decided only when a group completes.
+	"MBP.SNAP.GROUP_STRUCTURE": {},
+	// Refdata-gated: need the instrument's definition before they can judge.
+	"FIELD.ORDERADD_PRICE_BOUND":   {},
+	"REF.EXEC_PRICE_BOUND":         {},
+	"SNAP.ORDER_PRICE_BOUND":       {},
+	"TOB.QUOTE.REFDATA_KNOWN":      {},
+	"MID.METHOD0_REQUIRES_DEFAULT": {},
+	"MID.PRICE_BOUND":              {},
+	// Reset recovery: nothing to judge until an InstrumentReset has happened, so on a
+	// stream with no reset these are silent — and used to be silent in the same way
+	// when every recovery was correct.
+	"RESET.SNAPSHOT_FOLLOWS":                       {},
+	"RESET.RECOVERY_SNAPSHOT_ANCHOR_MATCHES_RESET": {},
+	"RESET.NO_DANGLING_DELTAS_AT_OR_BELOW_ANCHOR":  {},
+	// Monotonicity across successive snapshots: needs a predecessor, so a capture
+	// with one snapshot per instrument never runs them.
+	"SNAP.ANCHOR_MONOTONIC_PER_INSTRUMENT": {},
+	"SNAP.SNAPSHOT_ID_MONOTONIC":           {},
+	// End-of-window rules: need enough observed cycles to conclude anything.
+	"SNAP.ROUND_ROBIN_COVERS_MANIFEST":  {},
+	"REFDATA.DEFINITION_CYCLE_COVERAGE": {},
+	"REFDATA.NO_BURST_DEFINITIONS":      {},
+	"REFDATA.NEVER_REACHES_READY":       {},
+}
+
+// ConditionalExec reports whether the rule's execution is conditional, and so
+// whether it owes a per-opportunity denominator.
+func ConditionalExec(id string) bool { _, ok := conditionalExec[id]; return ok }
+
+// snapshotDriven lists the rules whose every emit path runs off a snapshot-port
+// frame, so with `--snapshot-port` unset they cannot report *anything* — not even
+// the unverifiable that the denominator invariant would otherwise require.
+//
+// **That is a hole the invariant cannot close by itself**, and it is worth being
+// precise about why. A refdata-gated rule with no `--refdata-port` still reports:
+// it is driven by mktdata messages and merely *gated* on reference data, so every
+// message it cannot judge becomes an `unverifiable`/`cold_start`. These rules have
+// no such driver. No snapshot frames means no code path executes, so zero
+// opportunities, so silence — and silence reads as a clean pass. Concretely: run a
+// market-by-price feed without `--snapshot-port`, fix whatever unrelated violation
+// the run reported, re-run the same command, and the tool exits 0 with an empty
+// report while every MBP.SNAP.* rule was starved.
+//
+// So the CLI reports them as NA at startup instead, from configuration rather than
+// from traffic. See reportStarvedRules in run.go, and
+// TestStarvedRulesAreExactlyTheSnapshotDrivenOnes, which proves each entry
+// disappears without the port and appears with it.
+//
+// `RESET.SNAPSHOT_FOLLOWS` is deliberately absent: it also emits from the mktdata
+// path and from EndRun, where it already downgrades to NA on an unbound snapshot
+// port, so listing it would double-report.
+var snapshotDriven = map[string]struct{}{
+	"MBP.SNAP.GROUP_STRUCTURE":                        {},
+	"MBP.SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT":    {},
+	"RESET.RECOVERY_SNAPSHOT_ANCHOR_MATCHES_RESET":    {},
+	"SNAP.ANCHOR_IS_MKTDATA_SEQ":                      {},
+	"SNAP.ANCHOR_LE_OR_GT_LAST_APPLIED_HANDLING":      {},
+	"SNAP.ANCHOR_MONOTONIC_PER_INSTRUMENT":            {},
+	"SNAP.BEGIN_ORDER_END_GROUPING":                   {},
+	"SNAP.EMPTY_BOOK_WELL_FORMED":                     {},
+	"SNAP.END_FIELDS_MATCH_BEGIN":                     {},
+	"SNAP.LAST_INSTRUMENT_SEQ_CONSISTENT_WITH_DELTAS": {},
+	"SNAP.ORDER_PRICE_BOUND":                          {},
+	"SNAP.ORDER_SNAPSHOT_ID_MATCH":                    {},
+	"SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT":        {},
+	"SNAP.SNAPSHOT_ID_MONOTONIC":                      {},
+	"SNAP.SNAPSHOT_ORDER_NO_DUP_ORDER_ID":             {},
+	"SNAP.TOTAL_ORDERS_COUNT_MATCH":                   {},
+}
+
+// SnapshotDrivenRules returns the rule IDs applicable to feed that can only ever
+// fire from a snapshot-port frame — the rules an operator silently loses by leaving
+// --snapshot-port unset. Sorted, so callers report them deterministically.
+func SnapshotDrivenRules(feed Feed) []string {
+	var out []string
+	for _, r := range Rules {
+		if _, ok := snapshotDriven[r.ID]; !ok {
+			continue
+		}
+		if slices.Contains(r.Feeds, feed) {
+			out = append(out, r.ID)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// ConditionalExecRules returns the conditional-execution rule IDs applicable to
+// feed, so a test can assert each one reported a denominator.
+func ConditionalExecRules(feed Feed) []string {
+	var out []string
+	for _, r := range Rules {
+		if !ConditionalExec(r.ID) {
+			continue
+		}
+		for _, f := range r.Feeds {
+			if f == feed {
+				out = append(out, r.ID)
+				break
+			}
+		}
+	}
+	return out
 }
 
 var byID = func() map[string]RuleMeta {

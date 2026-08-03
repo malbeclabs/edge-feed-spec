@@ -17,6 +17,12 @@ package engine
 //   - Emits snapshot_audits_total{unverifiable}   when the oracle cannot prove
 //     the diff is not explained by loss/cold-start.
 //
+// Each of those four outcomes ALSO emits a finding against the rule — Pass,
+// Suspected, Violation, Unverifiable respectively — so that every well-formed
+// group this oracle is handed appears in checks_total{rule_id=...}. That counter is
+// the oracle's denominator; snapshot_audits_total carries no rule_id and cannot
+// serve as one. See engine/denominator.go.
+//
 // As-of-K correctness:
 //
 //	The oracle compares the snapshot (taken at per-instrument seq K) against the
@@ -62,14 +68,24 @@ type oracleDiff struct {
 }
 
 // unverifiable is a helper that clears suspect state (Finding 2: unverifiable
-// cycles must not contribute to or continue a "consecutive clean cycles" run)
-// and emits the unverifiable audit metric.
-func (e *Engine) unverifiable(key instrTrackerKey) {
+// cycles must not contribute to or continue a "consecutive clean cycles" run),
+// emits the unverifiable audit metric, and reports the opportunity against the
+// rule itself.
+//
+// **That last part is why reason and snapPortSeq are arguments.**
+// `snapshot_audits_total` is a rule-less metric: it counts oracle outcomes but
+// carries no `rule_id`, so joining it to the rule catalog is not possible and
+// `checks_total{rule_id="SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT"}` used to stay
+// empty however many groups this oracle skipped. A denominator an operator cannot
+// join to the rule it belongs to is not a denominator (see engine/denominator.go).
+func (e *Engine) unverifiable(key instrTrackerKey, snapPortSeq uint64, reason, detail string) {
 	// Reset suspect state so that unverifiable cycles break consecutive runs.
 	// Without this, a run of: mismatch(count=1) → unverifiable → mismatch with
 	// same sig would increment count to 2 and fire confirmation despite the gap.
 	delete(e.mbo.oracleSuspects, key)
 	e.rep.SnapshotAudit("unverifiable")
+	e.unverified("SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT", reason, core.PortSnapshot, snapPortSeq,
+		key.channelID, key.instrumentID, detail)
 }
 
 // runOracleForGroup is called from handleSnapEnd after onSnapGroupComplete for
@@ -87,7 +103,8 @@ func (e *Engine) runOracleForGroup(ch uint8, snap *openSnapshot, snapPortSeq uin
 	// TOTAL_ORDERS_COUNT_MATCH), the snapshot book may be malformed. Diffing it
 	// against the delta book could produce false-positive mismatches.
 	if snap.structuralViolation {
-		e.unverifiable(key)
+		e.unverifiable(key, snapPortSeq, core.ReasonSuperseded,
+			"snapshot group is structurally invalid; the group's own finding names the defect")
 		return
 	}
 
@@ -97,16 +114,21 @@ func (e *Engine) runOracleForGroup(ch uint8, snap *openSnapshot, snapPortSeq uin
 	// replicate its logic without the perSeq == lastInstrSeq+1 check (handled by
 	// gate 2 below).
 	if e.refdata == nil {
-		e.unverifiable(key)
+		e.unverifiable(key, snapPortSeq, core.ReasonColdStart, "no reference data received yet")
 		return
 	}
 	if _, ok := e.refdata.defInfoFor(ch, instrID); !ok {
-		e.unverifiable(key)
+		e.unverifiable(key, snapPortSeq, core.ReasonColdStart,
+			fmt.Sprintf("instrument %d not yet known to channel %d's reference data", instrID, ch))
 		return
 	}
 	dt := e.mbo.tracker(ch, instrID)
 	if !dt.bookTrusted {
-		e.unverifiable(key)
+		// Cold start and a prior gap both land here and the tracker does not record
+		// which, so the reason says what is actually known — the history is not
+		// established — rather than guessing at a cause.
+		e.unverifiable(key, snapPortSeq, core.ReasonUntrusted,
+			fmt.Sprintf("instrument %d's order history is not established (mid-stream start or a prior per-instrument gap)", instrID))
 		return
 	}
 	if dt.bookCorruptedByDup {
@@ -115,19 +137,27 @@ func (e *Engine) runOracleForGroup(ch uint8, snap *openSnapshot, snapPortSeq uin
 		// to the as-of-K state (replayed deltas mutated it without advancing
 		// lastInstrSeq). Diffing such a book against the snapshot could produce
 		// false-positive mismatches. Emit "unverifiable" instead.
-		e.unverifiable(key)
+		e.unverifiable(key, snapPortSeq, core.ReasonReorder,
+			fmt.Sprintf("instrument %d: a late or duplicate delta mutated the book without advancing its seq", instrID))
 		return
 	}
 	if !e.gateDetector() {
-		e.unverifiable(key)
+		e.unverifiable(key, snapPortSeq, core.ReasonLoss, "the mktdata port has a sequence gap this era")
 		return
 	}
 
 	// --- Gate 2: delta book must be exactly at seq K.
 	// If lastInstrSeq is nil (no deltas ever seen) or != K, we cannot compare.
 	K := snap.lastInstrSeqK
-	if dt.lastInstrSeq == nil || *dt.lastInstrSeq != K {
-		e.unverifiable(key)
+	if dt.lastInstrSeq == nil {
+		e.unverifiable(key, snapPortSeq, core.ReasonColdStart,
+			fmt.Sprintf("instrument %d: no delta seen yet, so there is no book to compare", instrID))
+		return
+	}
+	if *dt.lastInstrSeq != K {
+		e.unverifiable(key, snapPortSeq, core.ReasonPending,
+			fmt.Sprintf("instrument %d: book is at per-instrument seq %d, the snapshot was taken at %d",
+				instrID, *dt.lastInstrSeq, K))
 		return
 	}
 
@@ -135,7 +165,8 @@ func (e *Engine) runOracleForGroup(ch uint8, snap *openSnapshot, snapPortSeq uin
 	// A dirty snapshot means we may have lost SnapshotOrder messages, so the
 	// snapshot book is incomplete. Never diff on a dirty group.
 	if snap.dirty {
-		e.unverifiable(key)
+		e.unverifiable(key, snapPortSeq, core.ReasonLoss,
+			"the snapshot port lost a frame during this group, so the snapshot book may be incomplete")
 		return
 	}
 
@@ -147,6 +178,12 @@ func (e *Engine) runOracleForGroup(ch uint8, snap *openSnapshot, snapPortSeq uin
 		// Books agree: clear any suspect state for this instrument.
 		delete(e.mbo.oracleSuspects, key)
 		e.rep.SnapshotAudit("match")
+		// Reported against the rule too, not only into snapshot_audits_total: this is
+		// the positive claim the oracle exists to make, and the rule's `pass` series is
+		// the only place an operator can read it per rule.
+		e.passed("SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT", core.PortSnapshot, snapPortSeq, ch, instrID,
+			fmt.Sprintf("instrument %d: delta book matches the snapshot at per-instrument seq %d (%d order(s))",
+				instrID, K, len(deltaBook)))
 		return
 	}
 
@@ -186,7 +223,15 @@ func (e *Engine) runOracleForGroup(ch uint8, snap *openSnapshot, snapPortSeq uin
 	} else {
 		// First (or early) occurrence: suspected, not confirmed.
 		e.rep.SnapshotAudit("mismatch_suspected")
-		// Do NOT emit a Finding — Suspected does not fail CI.
+		// Emitted as Suspected, which is what that status is for: it does not count
+		// as a violation (core.Status.CountsAsViolation) so CI is unaffected, and the
+		// opportunity is not lost from the rule's denominator. Before this, the status
+		// existed in core and no engine path ever produced it — a divergence awaiting
+		// confirmation was visible only in the rule-less audit counter.
+		e.Emit("SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT", core.Suspected, core.PortSnapshot, snapPortSeq, ch, instrID,
+			fmt.Sprintf("instrument %d: snapshot book diverges from delta book at per-instrument seq %d "+
+				"(%d of %d cycle(s) needed to confirm): %s",
+				instrID, K, suspect.count, confirmCycles, sig))
 	}
 }
 

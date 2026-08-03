@@ -24,26 +24,45 @@ func Doc(id string) (RuleDoc, bool) {
 
 const specBaseURL = "https://github.com/malbeclabs/edge-feed-spec/blob/main/"
 
-// SpecURL returns a link to the authoritative edge-feed-spec document for a
-// rule, derived from its category prefix. Surfaced as a Grafana data link so a
-// non-conforming rule points at the requirement it violates.
-func SpecURL(id string) string {
+// feedSpec returns the document for one feed. Every feed spec restates the frame
+// header, the application message header and its own recovery model in full, so
+// this is the authoritative document for any rule that fired against that feed.
+func feedSpec(feed Feed) string {
+	switch feed {
+	case FeedTOB:
+		return specBaseURL + "top-of-book/spec.md"
+	case FeedMidpoint:
+		return specBaseURL + "midpoint/spec.md"
+	case FeedMBO:
+		return specBaseURL + "market-by-order/spec.md"
+	case FeedMBP:
+		return specBaseURL + "market-by-price/spec.md"
+	default:
+		return specBaseURL
+	}
+}
+
+// SpecURL returns a link to the authoritative edge-feed-spec document for a rule
+// as it applies to one feed. Surfaced as a Grafana data link so a non-conforming
+// rule points at the requirement it violates.
+//
+// **Resolved by feed, not by the rule's category prefix.** A prefix names which
+// sibling documented a requirement first, which is not the same as which document
+// states it for the feed being checked: `MSG.SNAPSHOT_FLAG_MATCHES_PORT` is
+// market-by-price's own MUST, and market-by-price is the only spec in the family
+// that gives `Flags` bit 0 a normative setting — a prefix map sent it to the
+// top-of-book spec, which merely describes the field. Rules shared between feeds
+// (`RESET.ANCHOR_SEQ_IS_CURRENT_FRAME`) have the same problem in reverse. Every
+// feed spec is self-contained, so keying on the feed is right for all of them.
+func SpecURL(id string, feed Feed) string {
 	prefix, _, _ := strings.Cut(id, ".")
 	switch prefix {
 	case "REFDATA", "MANIFEST":
+		// The one genuine exception: the reference-data supplement is a single
+		// document that every feed spec incorporates by reference rather than restating.
 		return specBaseURL + "reference-data/spec.md"
-	case "TOB":
-		return specBaseURL + "top-of-book/spec.md"
-	case "MID":
-		return specBaseURL + "midpoint/spec.md"
-	case "FRAME", "MSG", "HEARTBEAT":
-		// Shared frame header / message framing — documented canonically in the
-		// top-of-book spec's transport-framing section.
-		return specBaseURL + "top-of-book/spec.md"
-	case "RESERVED", "FIELD", "RESET", "SNAP", "DELTA", "BATCH", "REF", "TRADE":
-		return specBaseURL + "market-by-order/spec.md"
 	default:
-		return specBaseURL
+		return feedSpec(feed)
 	}
 }
 
@@ -52,25 +71,31 @@ func SpecURL(id string) string {
 // scannable sentence describing the conformant behaviour.
 var ruleDocs = map[string]RuleDoc{
 	// --- Frame & message structure ---
-	"FRAME.MAGIC_MISMATCH":              {"Frame magic matches the feed (MBO 0x4444, TOB 0x445A, Midpoint 0x4D44)."},
-	"FRAME.SCHEMA_VERSION":              {"Schema Version is 1; 0 or an unknown-higher value is flagged."},
-	"FRAME.MSG_COUNT_RANGE":             {"Message Count is 1–255 and equals the messages actually present in the frame."},
-	"FRAME.LENGTH_CONSISTENCY":          {"Declared Frame Length is 24–1232 bytes and equals 24 + the sum of contained message lengths."},
-	"FRAME.SEQ_DUP_DIVERGENT":           {"A frame re-using a port sequence number carries identical payload; a divergent duplicate is non-conformant."},
-	"FRAME.MKTDATA_SEQ_START":           {"On a Reset Count change, the mktdata sequence number restarts at 0."},
-	"FRAME.SEND_TS_MONOTONIC":           {"Send Timestamp is non-decreasing as the per-port sequence increases."},
-	"FRAME.SEQ_RESET_GAP":               {"Per-channel sequence is monotonic and resets to 0 only when Reset Count changes."},
-	"MSG.LENGTH_PER_TYPE":               {"Each message type carries its mandated byte length (OrderAdd 52, Cancel 32, Execute 56, …)."},
-	"MSG.WRONG_PORT_PLACEMENT":          {"A known message type only appears on the port it belongs to."},
-	"MSG.UNKNOWN_TYPE_SKIPPED":          {"Unknown/reserved message types are skipped via Message Length and reported, never silently dropped."},
-	"MSG.RESERVED_TYPE_0X03_0X05":       {"Reserved MBO type IDs 0x03 and 0x05 are never emitted."},
-	"RESERVED.FIELD_BITS_ZERO":          {"Reserved flag bits and padding are zero (OrderAdd flags 5–7, Execute flags 2–7, named padding)."},
-	"HEARTBEAT.CHANNEL_ID_MATCH":        {"A Heartbeat's embedded Channel ID matches the frame header's Channel ID."},
-	"FIELD.SIDE_ENUM":                   {"OrderAdd.Side is 0 or 1."},
-	"FIELD.AGGRESSOR_SIDE_ENUM":         {"OrderExecute/Trade Aggressor Side is 0, 1, or 2."},
-	"RESET.ANCHOR_SEQ_IS_CURRENT_FRAME": {"InstrumentReset.NewAnchorSeq equals the carrying mktdata frame's own sequence number."},
-	"FIELD.QTY_POSITIVE":                {"OrderAdd.Quantity is greater than zero."},
-	"SNAP.ORDER_STRUCT_VALID":           {"SnapshotOrder fields are valid: Side 0/1, reserved Order Flags bits 5–7 zero, Quantity > 0."},
+	"FRAME.MAGIC_MISMATCH":                         {"Frame magic matches the feed (MBO 0x4444, TOB 0x445A, Midpoint 0x4D44, MBP 0x4442)."},
+	"FRAME.SCHEMA_VERSION":                         {"Schema Version is 1; 0 or an unknown-higher value is flagged."},
+	"FRAME.MSG_COUNT_RANGE":                        {"Message Count is 1–255 and equals the messages actually present in the frame."},
+	"FRAME.LENGTH_CONSISTENCY":                     {"Declared Frame Length is 24–1232 bytes and equals 24 + the sum of contained message lengths."},
+	"FRAME.SEQ_DUP_DIVERGENT":                      {"A frame re-using a port sequence number carries identical payload; a divergent duplicate is non-conformant."},
+	"FRAME.MKTDATA_SEQ_START":                      {"On a Reset Count change, the mktdata sequence number restarts at 0."},
+	"FRAME.SEND_TS_MONOTONIC":                      {"Send Timestamp is non-decreasing as the per-port sequence increases."},
+	"FRAME.SEQ_RESET_GAP":                          {"Per-channel sequence is monotonic and resets to 0 only when Reset Count changes."},
+	"MSG.LENGTH_PER_TYPE":                          {"Each message type carries its mandated byte length (OrderAdd 52, Cancel 32, Execute 56, …)."},
+	"MSG.WRONG_PORT_PLACEMENT":                     {"A known message type only appears on the port it belongs to."},
+	"MSG.UNKNOWN_TYPE_SKIPPED":                     {"Unknown/reserved message types are skipped via Message Length and reported, never silently dropped."},
+	"MSG.SNAPSHOT_FLAG_MATCHES_PORT":               {"Market-by-price: application-header Flags bit 0 is set on every snapshot-port message and cleared on every mktdata and refdata message."},
+	"MBP.DELTA.PERINSTR_DENSITY":                   {"Market-by-price: Per-Instrument Seq increments by exactly 1 per instrument, across LevelUpdate and BookClear alike."},
+	"MBP.DELTA.PERINSTR_NO_SNAPSHOT_RESET":         {"Market-by-price: Per-Instrument Seq is not reset at snapshot boundaries, only on a Reset Count change."},
+	"MBP.DELTA.ABSOLUTE_APPLY":                     {"Market-by-price: Quantity = 0 pairs with Action = Delete and no other, and a range BookClear names one side."},
+	"MBP.SNAP.GROUP_STRUCTURE":                     {"Market-by-price: a snapshot group is Begin then exactly Total Levels non-zero levels then a matching End, never interleaved."},
+	"MBP.SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT": {"Market-by-price: the ladder reconstructed from deltas matches the snapshot captured at the same Last Instrument Seq."},
+	"MSG.RESERVED_TYPE_0X03_0X05":                  {"Reserved MBO type IDs 0x03 and 0x05 are never emitted."},
+	"RESERVED.FIELD_BITS_ZERO":                     {"Reserved flag bits and padding are zero (OrderAdd flags 5–7, Execute flags 2–7, named padding)."},
+	"HEARTBEAT.CHANNEL_ID_MATCH":                   {"A Heartbeat's embedded Channel ID matches the frame header's Channel ID."},
+	"FIELD.SIDE_ENUM":                              {"OrderAdd.Side is 0 or 1."},
+	"FIELD.AGGRESSOR_SIDE_ENUM":                    {"OrderExecute/Trade Aggressor Side is 0, 1, or 2."},
+	"RESET.ANCHOR_SEQ_IS_CURRENT_FRAME":            {"InstrumentReset.NewAnchorSeq equals the carrying mktdata frame's own sequence number."},
+	"FIELD.QTY_POSITIVE":                           {"OrderAdd.Quantity is greater than zero."},
+	"SNAP.ORDER_STRUCT_VALID":                      {"SnapshotOrder fields are valid: Side 0/1, reserved Order Flags bits 5–7 zero, Quantity > 0."},
 
 	// --- MBO delta sequencing (counters) ---
 	"DELTA.PERINSTR_DENSITY":           {"Per-Instrument Seq increments by exactly 1 per delta within an era; no skips."},

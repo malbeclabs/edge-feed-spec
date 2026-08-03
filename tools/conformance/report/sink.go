@@ -57,6 +57,13 @@ type Aggregator struct {
 	mustViol    int
 	shouldViol  int
 	counts      map[string]map[core.Status]int // ruleID → status → n
+	// reasons breaks the Unverifiable count down by cause: ruleID → reason → n.
+	//
+	// **Kept here as well as in Prometheus because --pcap mode has no Prometheus.**
+	// A CI run's JSON report is its only durable output, and a conditional rule
+	// reporting "33 unverifiable" without saying why is a number nobody can act on —
+	// 33 cold-start baselines is a healthy run and 33 losses is a broken feed.
+	reasons map[string]map[string]int
 }
 
 // Record tallies a finding. NOT safe for concurrent use: like the other
@@ -71,6 +78,19 @@ func (a *Aggregator) Record(f core.Finding) {
 		a.counts[f.RuleID] = map[core.Status]int{}
 	}
 	a.counts[f.RuleID][f.Status]++
+	if f.Status == core.Unverifiable {
+		if a.reasons == nil {
+			a.reasons = map[string]map[string]int{}
+		}
+		if a.reasons[f.RuleID] == nil {
+			a.reasons[f.RuleID] = map[string]int{}
+		}
+		reason := f.Reason
+		if reason == "" {
+			reason = core.ReasonUnspecified
+		}
+		a.reasons[f.RuleID][reason]++
+	}
 	if f.Status.CountsAsViolation() {
 		switch f.Severity {
 		case core.Must:
@@ -91,4 +111,10 @@ func (a *Aggregator) ExitCode(strict bool) int {
 // Counts returns per-rule status counts for the JSON report.
 func (a *Aggregator) Counts() map[string]map[core.Status]int {
 	return a.counts
+}
+
+// UnverifiableReasons returns per-rule Unverifiable counts broken down by cause,
+// for the JSON report.
+func (a *Aggregator) UnverifiableReasons() map[string]map[string]int {
+	return a.reasons
 }

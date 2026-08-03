@@ -631,13 +631,20 @@ func (e *Engine) applyDeltaSeq(ch uint8, instrID uint32, perSeq uint32, frameSeq
 		// snapshot defines the expected continuation point, not seq=1.
 		if t.recoveryKSet {
 			if perSeq != t.recoveryK+1 {
-				st := core.Violation
+				st, reason := core.Violation, ""
 				if !gapless {
-					st = core.Unverifiable
+					st, reason = core.Unverifiable, core.ReasonLoss
 				}
 				e.Emit("RESET.NO_DANGLING_DELTAS_AT_OR_BELOW_ANCHOR", st, core.PortMktData, frameSeq, ch, instrID,
 					fmt.Sprintf("instrument %d: first post-reset delta seq is %d (expected recoveryK+1=%d)",
-						instrID, perSeq, t.recoveryK+1))
+						instrID, perSeq, t.recoveryK+1), reason)
+			} else {
+				// The one opportunity this rule gets per recovery, and it took it. Silence
+				// here made a stream with no reset at all and a stream whose every recovery
+				// resumed correctly report the same nothing (engine/denominator.go).
+				e.passed("RESET.NO_DANGLING_DELTAS_AT_OR_BELOW_ANCHOR", core.PortMktData, frameSeq, ch, instrID,
+					fmt.Sprintf("instrument %d: first post-reset delta resumes at recoveryK+1=%d as required",
+						instrID, perSeq))
 			}
 			// When perSeq == recoveryK+1 the recovery sequence is correct and seq
 			// continuity is established. We intentionally do NOT set bookTrusted here:
@@ -659,7 +666,7 @@ func (e *Engine) applyDeltaSeq(ch uint8, instrID uint32, perSeq uint32, frameSeq
 					// bookTrusted remains false: we don't know the complete history.
 					e.Emit("DELTA.PERINSTR_FIRST_VALUE", core.Unverifiable, core.PortMktData, frameSeq, ch, instrID,
 						fmt.Sprintf("instrument %d: first observed per-instrument seq is %d (cold start, expected 1)",
-							instrID, perSeq), "cold_start")
+							instrID, perSeq), core.ReasonColdStart)
 				} else {
 					// We observed the reset in-stream (InstrumentReset message seen);
 					// the next delta after a reset must be seq==1. Publisher fault.
@@ -855,7 +862,7 @@ func (e *Engine) handleSnapBegin(m wire.Message, ch uint8, snapPortSeq uint64) {
 		// when the mktdata stream is gapless AND fully classified past the anchor.
 		if !gaplessMkt || e.mktdataPending() {
 			st = core.Unverifiable
-			reason = "reorder"
+			reason = core.ReasonReorder
 		}
 		e.Emit("SNAP.ANCHOR_IS_MKTDATA_SEQ", st, core.PortSnapshot, snapPortSeq, ch, instrID,
 			fmt.Sprintf("instrument %d: SnapshotBegin anchor seq %d > highest mktdata seq %d",
@@ -974,16 +981,38 @@ func (e *Engine) handleSnapOrder(m wire.Message, ch uint8, snapPortSeq uint64) {
 	open.received++
 
 	// SNAP.ORDER_PRICE_BOUND: gated on refdata ready(); price must not be negative
-	// when priceBound is 1 (Bounded[0,1]) or 2 (Non-negative).
-	if e.refdata != nil {
-		if di, ok := e.refdata.defInfoFor(ch, open.instrID); ok {
-			if (di.priceBound == 1 || di.priceBound == 2) && price < 0 {
-				e.Emit("SNAP.ORDER_PRICE_BOUND", core.Violation, core.PortSnapshot, snapPortSeq, ch, open.instrID,
-					fmt.Sprintf("instrument %d: SnapshotOrder price %d < 0 violates Price Bound=%d",
-						open.instrID, price, di.priceBound))
-			}
-		}
+	// when priceBound is 1 (Bounded[0,1]) or 2 (Non-negative). Every SnapshotOrder is
+	// one opportunity and is accounted for either way (engine/denominator.go).
+	e.checkSnapOrderPriceBound(ch, open.instrID, snapPortSeq, price)
+}
+
+// checkSnapOrderPriceBound is SNAP.ORDER_PRICE_BOUND for one SnapshotOrder.
+func (e *Engine) checkSnapOrderPriceBound(ch uint8, instrID uint32, snapPortSeq uint64, price int64) {
+	const rule = "SNAP.ORDER_PRICE_BOUND"
+	if e.refdata == nil {
+		e.unverified(rule, core.ReasonColdStart, core.PortSnapshot, snapPortSeq, ch, instrID,
+			"no reference data received yet, so no Price Bound to check against")
+		return
 	}
+	di, ok := e.refdata.defInfoFor(ch, instrID)
+	if !ok {
+		e.unverified(rule, core.ReasonColdStart, core.PortSnapshot, snapPortSeq, ch, instrID,
+			fmt.Sprintf("instrument %d: reference data not ready or instrument unknown for channel %d", instrID, ch))
+		return
+	}
+	if di.priceBound != 1 && di.priceBound != 2 {
+		e.inapplicable(rule, core.PortSnapshot, snapPortSeq, ch, instrID,
+			fmt.Sprintf("instrument %d declares Price Bound=%d, which constrains nothing", instrID, di.priceBound))
+		return
+	}
+	if price < 0 {
+		e.Emit(rule, core.Violation, core.PortSnapshot, snapPortSeq, ch, instrID,
+			fmt.Sprintf("instrument %d: SnapshotOrder price %d < 0 violates Price Bound=%d",
+				instrID, price, di.priceBound))
+		return
+	}
+	e.passed(rule, core.PortSnapshot, snapPortSeq, ch, instrID,
+		fmt.Sprintf("instrument %d: SnapshotOrder price %d within Price Bound=%d", instrID, price, di.priceBound))
 }
 
 // handleSnapEnd processes a SnapshotEnd (0x22) message, closing the open group
@@ -1043,7 +1072,7 @@ func (e *Engine) handleSnapEnd(m wire.Message, ch uint8, snapPortSeq uint64) {
 			reason := ""
 			if open.dirty || e.snapPortDirty() {
 				st = core.Unverifiable
-				reason = "loss"
+				reason = core.ReasonLoss
 			}
 			open.structuralViolation = true
 			e.Emit("SNAP.TOTAL_ORDERS_COUNT_MATCH", st, core.PortSnapshot, snapPortSeq, ch, open.instrID,
@@ -1086,9 +1115,21 @@ func (e *Engine) onSnapGroupComplete(ch uint8, instrID uint32, anchorSeq uint64,
 	// mktdata port to be gapless (gateDetector). If either has a gap → Unverifiable.
 	if dt.awaitingRecovery {
 		gapless := !dirty && e.gateDetector()
+		// RESET.SNAPSHOT_FOLLOWS passes here, and here is the only place it can: a
+		// recovery snapshot arrived after the reset, which is the whole requirement —
+		// whether its anchor is right is the *other* rule's business, so this passes
+		// even on a wrong anchor (the inverse of that is asserted in
+		// TestResetRecoveryWrongAnchor). Both of that rule's other arms are violations
+		// at other sites, so without this it had a numerator and no denominator at all.
+		e.passed("RESET.SNAPSHOT_FOLLOWS", core.PortSnapshot, snapPortSeq, ch, instrID,
+			fmt.Sprintf("instrument %d: recovery snapshot completed after its InstrumentReset (anchor seq %d)",
+				instrID, dt.awaitingRecoveryAnchor))
 		if anchorSeq == dt.awaitingRecoveryAnchor {
 			// Correct recovery anchor — recovery satisfied. Clear the flag.
 			dt.awaitingRecovery = false
+			e.passed("RESET.RECOVERY_SNAPSHOT_ANCHOR_MATCHES_RESET", core.PortSnapshot, snapPortSeq, ch, instrID,
+				fmt.Sprintf("instrument %d: recovery snapshot anchor seq %d matches the InstrumentReset",
+					instrID, anchorSeq))
 		} else {
 			st := core.Violation
 			if !gapless {
@@ -1228,35 +1269,58 @@ func (e *Engine) checkResetSnapshotFollows() {
 // Gate: if the snapshot port has a dirty window, downgrade to Unverifiable.
 // Conservative: only fires when refdata is ready and the instrument is in the
 // manifest (channelKnown).
+//
+// Every manifest instrument is accounted for — covered, missing, or with the reason
+// this run could not say — because the two ways this rule stays quiet (a capture
+// shorter than two cycles, a channel whose refdata never converged) are far more
+// common than full coverage and used to be indistinguishable from it. See
+// engine/denominator.go.
 func (e *Engine) checkRoundRobinCoversManifest() {
 	if e.mbo == nil || e.refdata == nil {
-		return
-	}
-	if e.mbo.maxSnapCycle < 2 {
-		// Fewer than 2 clean cycles observed — conservative; don't fire.
+		// No manifest and no snapshot state: there is no instrument set to iterate, so
+		// there are no opportunities to account for — not one skipped opportunity.
 		return
 	}
 	gaplessSnap := e.gateDetectorSnap()
+	// Fewer than 2 clean cycles observed — conservative, this rule does not judge. The
+	// instruments are still enumerated below and reported, because a capture too short
+	// to hold two cycles must not read as one where every instrument was covered.
+	enoughCycles := e.mbo.maxSnapCycle >= 2
 	// Iterate over all ready channels and check each instrument in the manifest.
 	for ch, cs := range e.refdata.channels {
 		if !channelReady(cs) {
+			// The manifest for this channel never completed, so its instrument set is
+			// not knowable. Reported once for the channel rather than silently: a
+			// channel whose refdata never converged is exactly the case where this
+			// rule's silence would read as coverage.
+			e.unverified("SNAP.ROUND_ROBIN_COVERS_MANIFEST", core.ReasonColdStart, core.PortSnapshot, 0, ch, 0,
+				fmt.Sprintf("channel %d: reference data never reached ready, so the manifest set is unknown", ch))
 			continue
 		}
 		for instrID := range cs.defs {
-			key := instrTrackerKey{ch, instrID}
-			st := e.mbo.snapTrackers[key]
+			if !enoughCycles {
+				e.unverified("SNAP.ROUND_ROBIN_COVERS_MANIFEST", core.ReasonInsufficientWindow,
+					core.PortSnapshot, 0, ch, instrID,
+					fmt.Sprintf("only %d snapshot cycle(s) observed; 2 are needed before a missing instrument is attributable",
+						e.mbo.maxSnapCycle))
+				continue
+			}
+			st := e.mbo.snapTrackers[instrTrackerKey{ch, instrID}]
 			if st != nil && st.snapCount > 0 {
 				// This instrument was snapshotted at least once — OK.
+				e.passed("SNAP.ROUND_ROBIN_COVERS_MANIFEST", core.PortSnapshot, 0, ch, instrID,
+					fmt.Sprintf("instrument %d snapshotted %d time(s) across %d cycle(s)",
+						instrID, st.snapCount, e.mbo.maxSnapCycle))
 				continue
 			}
 			// Instrument is in the manifest but has never been snapshotted.
-			status := core.Violation
+			status, reason := core.Violation, ""
 			if !gaplessSnap {
-				status = core.Unverifiable
+				status, reason = core.Unverifiable, core.ReasonLoss
 			}
 			e.Emit("SNAP.ROUND_ROBIN_COVERS_MANIFEST", status, core.PortSnapshot, 0, ch, instrID,
 				fmt.Sprintf("instrument %d: in manifest but never snapshotted after %d cycle(s)",
-					instrID, e.mbo.maxSnapCycle))
+					instrID, e.mbo.maxSnapCycle), reason)
 		}
 	}
 }
@@ -1269,29 +1333,53 @@ func (e *Engine) snapTrack(ch uint8, instrID uint32, anchorSeq uint64, snapID ui
 
 	// SNAP.ANCHOR_MONOTONIC_PER_INSTRUMENT: successive snapshots for the same
 	// instrument must have non-decreasing Anchor Seq.
-	if st.lastAnchorSeq != nil && anchorSeq < *st.lastAnchorSeq {
-		status := core.Violation
+	//
+	// **Both monotonic rules below compare against a predecessor, so both report the
+	// first snapshot as a cold start rather than saying nothing.** A capture holding
+	// one snapshot per instrument gives them nothing to compare and used to look
+	// exactly like a capture where every anchor was monotonic — the same shape as the
+	// reconstruction oracle's missing baseline (engine/denominator.go).
+	switch {
+	case st.lastAnchorSeq == nil:
+		e.unverified("SNAP.ANCHOR_MONOTONIC_PER_INSTRUMENT", core.ReasonColdStart, core.PortSnapshot, snapPortSeq, ch, instrID,
+			fmt.Sprintf("instrument %d: first snapshot observed, no prior anchor seq to compare against", instrID))
+	case anchorSeq < *st.lastAnchorSeq:
+		status, reason := core.Violation, ""
 		if !gapless {
-			status = core.Unverifiable
+			status, reason = core.Unverifiable, core.ReasonLoss
 		}
 		e.Emit("SNAP.ANCHOR_MONOTONIC_PER_INSTRUMENT", status, core.PortSnapshot, snapPortSeq, ch, instrID,
 			fmt.Sprintf("instrument %d: anchor seq decreased %d→%d",
-				instrID, *st.lastAnchorSeq, anchorSeq))
+				instrID, *st.lastAnchorSeq, anchorSeq), reason)
+	default:
+		e.passed("SNAP.ANCHOR_MONOTONIC_PER_INSTRUMENT", core.PortSnapshot, snapPortSeq, ch, instrID,
+			fmt.Sprintf("instrument %d: anchor seq %d→%d is non-decreasing", instrID, *st.lastAnchorSeq, anchorSeq))
 	}
 
 	// SNAP.SNAPSHOT_ID_MONOTONIC: Snapshot ID must be strictly non-decreasing
 	// (forward skips OK; strictly-decreasing/equal at higher snap-port seq is
 	// the violation).
-	if st.lastSnapshotID != nil && st.lastSnapPortSeq != nil {
-		if snapPortSeq > *st.lastSnapPortSeq && snapID <= *st.lastSnapshotID {
-			status := core.Violation
-			if !gapless {
-				status = core.Unverifiable
-			}
-			e.Emit("SNAP.SNAPSHOT_ID_MONOTONIC", status, core.PortSnapshot, snapPortSeq, ch, instrID,
-				fmt.Sprintf("instrument %d: snapshot id %d not greater than last %d (snap port seq %d>%d)",
-					instrID, snapID, *st.lastSnapshotID, snapPortSeq, *st.lastSnapPortSeq))
+	switch {
+	case st.lastSnapshotID == nil || st.lastSnapPortSeq == nil:
+		e.unverified("SNAP.SNAPSHOT_ID_MONOTONIC", core.ReasonColdStart, core.PortSnapshot, snapPortSeq, ch, instrID,
+			fmt.Sprintf("instrument %d: first snapshot observed, no prior Snapshot ID to compare against", instrID))
+	case snapPortSeq <= *st.lastSnapPortSeq:
+		// This group is not later on the wire than the one held, so the two cannot be
+		// ordered and "not greater than last" proves nothing about the publisher.
+		e.unverified("SNAP.SNAPSHOT_ID_MONOTONIC", core.ReasonReorder, core.PortSnapshot, snapPortSeq, ch, instrID,
+			fmt.Sprintf("instrument %d: snapshot-port seq %d is not later than the compared group's %d",
+				instrID, snapPortSeq, *st.lastSnapPortSeq))
+	case snapID <= *st.lastSnapshotID:
+		status, reason := core.Violation, ""
+		if !gapless {
+			status, reason = core.Unverifiable, core.ReasonLoss
 		}
+		e.Emit("SNAP.SNAPSHOT_ID_MONOTONIC", status, core.PortSnapshot, snapPortSeq, ch, instrID,
+			fmt.Sprintf("instrument %d: snapshot id %d not greater than last %d (snap port seq %d>%d)",
+				instrID, snapID, *st.lastSnapshotID, snapPortSeq, *st.lastSnapPortSeq), reason)
+	default:
+		e.passed("SNAP.SNAPSHOT_ID_MONOTONIC", core.PortSnapshot, snapPortSeq, ch, instrID,
+			fmt.Sprintf("instrument %d: snapshot id %d→%d is increasing", instrID, *st.lastSnapshotID, snapID))
 	}
 
 	// SNAP.LAST_INSTRUMENT_SEQ_CONSISTENT_WITH_DELTAS: SnapshotBegin's Last
@@ -1317,7 +1405,7 @@ func (e *Engine) snapTrack(ch uint8, instrID uint32, anchorSeq uint64, snapID ui
 		// buffered, not missing — cross-port reorder), downgrade to Unverifiable (F3).
 		if !gaplessMkt || !gapless || e.mktdataPending() {
 			status = core.Unverifiable
-			reason = "reorder"
+			reason = core.ReasonReorder
 		}
 		e.Emit("SNAP.LAST_INSTRUMENT_SEQ_CONSISTENT_WITH_DELTAS", status, core.PortSnapshot, snapPortSeq, ch, instrID,
 			fmt.Sprintf("instrument %d: SnapshotBegin LastInstrumentSeq=%d but delta tracker lastSeq=%d",
@@ -1545,37 +1633,56 @@ func (e *Engine) checkTradeExecGrouping(ch uint8, instrID uint32, gated bool, fr
 
 // checkPriceBound implements FIELD.ORDERADD_PRICE_BOUND and REF.EXEC_PRICE_BOUND.
 // Gated on refdata ready() (instrument's priceBound available).
-// Silent (NA) when refdata not ready; no false positives.
+//
+// **The rule is resolved from the message type first**, before any gate runs, so
+// that a message this rule *could* have judged is accounted for whichever gate
+// stops it: one priced message is one opportunity, and the outcome is a pass, a
+// violation, or a named reason it could not be decided (engine/denominator.go).
+// Messages of any other type are not opportunities for either rule and report
+// nothing.
 func (e *Engine) checkPriceBound(ch uint8, instrID uint32, frameSeq uint64, m wire.Message) {
+	// field names which price this is, so a finding still says whether the number came
+	// from an OrderAdd or an execution — the two are different defects.
+	var rule, field string
+	var price int64
+	switch m.Type {
+	case wire.TypeOrderAdd:
+		rule, field, price = "FIELD.ORDERADD_PRICE_BOUND", "OrderAdd price", orderAddPrice(m)
+	case wire.TypeOrderExecute:
+		rule, field, price = "REF.EXEC_PRICE_BOUND", "OrderExecute exec price", orderExecuteExecPrice(m)
+	default:
+		return
+	}
+
 	if e.refdata == nil {
+		e.unverified(rule, core.ReasonColdStart, core.PortMktData, frameSeq, ch, instrID,
+			"no reference data received yet, so no Price Bound to check against")
 		return
 	}
 	di, ok := e.refdata.defInfoFor(ch, instrID)
 	if !ok {
-		return // refdata not ready or instrument unknown → silent
+		e.unverified(rule, core.ReasonColdStart, core.PortMktData, frameSeq, ch, instrID,
+			fmt.Sprintf("instrument %d: reference data not ready or instrument unknown for channel %d", instrID, ch))
+		return
 	}
 	// Only enforce known priceBound values (1=Bounded[0,1], 2=Non-negative).
-	// Reserved or future values are silently ignored to avoid false positives.
+	// Reserved or future values are ignored to avoid false positives — NA rather
+	// than unverifiable: no further traffic makes an unconstrained instrument
+	// bound-checkable, so this is inapplicability, not a missing precondition.
 	if di.priceBound != 1 && di.priceBound != 2 {
+		e.inapplicable(rule, core.PortMktData, frameSeq, ch, instrID,
+			fmt.Sprintf("instrument %d declares Price Bound=%d, which constrains nothing", instrID, di.priceBound))
 		return
 	}
 
-	switch m.Type {
-	case wire.TypeOrderAdd:
-		price := orderAddPrice(m)
-		// priceBound 1 (Bounded[0,1]) or 2 (Non-negative): flag price < 0.
-		// Upper-bound check for priceBound==1 omitted (requires price exponent) to avoid false positives.
-		if price < 0 {
-			e.Emit("FIELD.ORDERADD_PRICE_BOUND", core.Violation, core.PortMktData, frameSeq, ch, instrID,
-				fmt.Sprintf("instrument %d: OrderAdd price %d < 0 violates Price Bound=%d",
-					instrID, price, di.priceBound))
-		}
-	case wire.TypeOrderExecute:
-		price := orderExecuteExecPrice(m)
-		if price < 0 {
-			e.Emit("REF.EXEC_PRICE_BOUND", core.Violation, core.PortMktData, frameSeq, ch, instrID,
-				fmt.Sprintf("instrument %d: OrderExecute exec price %d < 0 violates Price Bound=%d",
-					instrID, price, di.priceBound))
-		}
+	// priceBound 1 (Bounded[0,1]) or 2 (Non-negative): flag price < 0.
+	// Upper-bound check for priceBound==1 omitted (requires price exponent) to avoid
+	// false positives.
+	if price < 0 {
+		e.Emit(rule, core.Violation, core.PortMktData, frameSeq, ch, instrID,
+			fmt.Sprintf("instrument %d: %s %d < 0 violates Price Bound=%d", instrID, field, price, di.priceBound))
+		return
 	}
+	e.passed(rule, core.PortMktData, frameSeq, ch, instrID,
+		fmt.Sprintf("instrument %d: %s %d within Price Bound=%d", instrID, field, price, di.priceBound))
 }

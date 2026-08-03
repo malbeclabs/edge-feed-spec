@@ -53,3 +53,22 @@ jobs:
         env:
           TMPDIR: /tmp
         run: go test ./...
+
+  # The shipped alert rules had no coverage, and the coverage alerts are exactly
+  # the kind that fail silently — one that never fires and one that fires so
+  # routinely it gets muted look identical until an incident. promtool checks the
+  # rules parse and unit-tests both properties.
+  alerts:
+    name: alert rules
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout
+        uses: actions/checkout@v6
+
+      - name: check and unit-test alert rules
+        working-directory: tools/conformance
+        run: |
+          docker run --rm --entrypoint promtool -v "$PWD/prometheus:/p" \
+            prom/prometheus:v3.6.0 check rules /p/alerts/conformance.yml
+          docker run --rm --entrypoint promtool -v "$PWD/prometheus:/p" \
+            prom/prometheus:v3.6.0 test rules /p/rule_tests/conformance_test.yml

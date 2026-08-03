@@ -52,6 +52,34 @@ func hasViolation(ac *allCapture, ruleID string) bool {
 // clearFindings resets the capture slice so tests can check after each step.
 func clearFindings(ac *allCapture) { ac.findings = nil }
 
+// hasUnverifiable returns true if ac has an Unverifiable for ruleID carrying reason.
+// The reason is part of the assertion because it is what an operator reads off
+// unverifiable_total to tell a gapped feed from a cold-started one; a rule that
+// reports the right status with the wrong cause is still misleading.
+func hasUnverifiable(ac *allCapture, ruleID, reason string) bool {
+	for _, f := range findingsFor(ac, ruleID) {
+		if f.Status == core.Unverifiable && f.Reason == reason {
+			return true
+		}
+	}
+	return false
+}
+
+// hasPass returns true if ac has a Pass for ruleID.
+//
+// **Pair this with every "must not fire" assertion on a conditional-execution
+// rule.** `!hasViolation` alone is satisfied by a check that never ran, which is the
+// failure engine/denominator.go exists to close: the rule most in need of the
+// assertion is exactly the one whose gate silently stopped holding.
+func hasPass(ac *allCapture, ruleID string) bool {
+	for _, f := range findingsFor(ac, ruleID) {
+		if f.Status == core.Pass {
+			return true
+		}
+	}
+	return false
+}
+
 // --- ManifestSummary body builder ---
 // ManifestSummary layout (24 bytes total = 4-byte header + 20-byte body):
 //

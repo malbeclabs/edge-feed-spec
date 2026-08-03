@@ -476,10 +476,14 @@ func TestSnapGroupOrderPriceBound(t *testing.T) {
 		if hasViolation(ac, "SNAP.ORDER_PRICE_BOUND") {
 			t.Error("positive price must not emit SNAP.ORDER_PRICE_BOUND")
 		}
+		if !hasPass(ac, "SNAP.ORDER_PRICE_BOUND") {
+			t.Error("positive price must report a pass; without one this case is indistinguishable from the gate never opening")
+		}
 	})
 
 	t.Run("no_violation_without_refdata", func(t *testing.T) {
-		// Without refdata, priceBound is unknown — silent.
+		// Without refdata, priceBound is unknown — reported as unverifiable, not
+		// silently skipped (engine/denominator.go).
 		e, ac := newMBOEngineW1()
 
 		runStream(e, []streamEntry{
@@ -490,6 +494,9 @@ func TestSnapGroupOrderPriceBound(t *testing.T) {
 
 		if hasViolation(ac, "SNAP.ORDER_PRICE_BOUND") {
 			t.Error("negative price without refdata must not emit SNAP.ORDER_PRICE_BOUND")
+		}
+		if !hasUnverifiable(ac, "SNAP.ORDER_PRICE_BOUND", core.ReasonColdStart) {
+			t.Error("SNAP.ORDER_PRICE_BOUND: the order went unjudged, which must be reported as unverifiable/cold_start")
 		}
 	})
 }

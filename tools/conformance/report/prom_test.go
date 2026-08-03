@@ -50,7 +50,17 @@ func TestRuleInfo(t *testing.T) {
 	// A known MBO rule is published with its summary + spec link.
 	doc, _ := core.Doc("BATCH.ID_MONOTONIC")
 	if got := testutil.ToFloat64(p.ruleInfo.WithLabelValues(
-		"BATCH.ID_MONOTONIC", "should", doc.Summary, core.SpecURL("BATCH.ID_MONOTONIC"))); got != 1 {
+		"BATCH.ID_MONOTONIC", "should", doc.Summary, core.SpecURL("BATCH.ID_MONOTONIC", core.FeedMBO))); got != 1 {
 		t.Fatalf("rule_info{BATCH.ID_MONOTONIC}: want 1, got %v", got)
+	}
+
+	// The spec link is the active feed's own document: a rule that fired against
+	// market-by-price must not link an operator to a sibling's spec.
+	pm := NewProm(prometheus.NewRegistry(), "v", "c", core.FeedMBP)
+	fdoc, _ := core.Doc("MSG.SNAPSHOT_FLAG_MATCHES_PORT")
+	if got := testutil.ToFloat64(pm.ruleInfo.WithLabelValues(
+		"MSG.SNAPSHOT_FLAG_MATCHES_PORT", "must", fdoc.Summary,
+		core.SpecURL("MSG.SNAPSHOT_FLAG_MATCHES_PORT", core.FeedMBP))); got != 1 {
+		t.Fatalf("rule_info{MSG.SNAPSHOT_FLAG_MATCHES_PORT} for mbp: want 1, got %v", got)
 	}
 }

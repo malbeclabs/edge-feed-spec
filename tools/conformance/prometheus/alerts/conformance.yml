@@ -14,11 +14,23 @@ groups:
             Rule {{ $labels.rule_id }} (severity=must) fired on feed {{ $labels.feed }}.
             A MUST violation means the feed is non-conformant with the spec.
 
-      # Warn: unverifiable total rising — coverage is degrading.
-      # Fire if we see more than 5 unverifiable events in 5 minutes on any
-      # single rule/reason combination.  Tune the threshold to taste.
+      # Warn: coverage is degrading for a reason the feed is responsible for.
+      #
+      # **Scoped by `reason`, and it has to be.** Not every unverifiable is a problem:
+      # `cold_start` is an instrument adopting its first snapshot baseline and
+      # `pending` is the mktdata and snapshot ports draining at their own rates —
+      # both are routine on a healthy feed and both increment this counter on every
+      # snapshot cycle. Alerting on the unlabelled total pages during normal
+      # operation, which trains an operator to silence it. The causes below are the
+      # ones that mean something is wrong upstream:
+      #
+      #   loss      a datagram went missing
+      #   overflow  a bounded buffer was outrun (snapshot cycle too long for it)
+      #   untrusted an instrument's history never became established
+      #
+      # See "Coverage vs. silence" in tools/conformance/README.md.
       - alert: ConformanceCoverageLoss
-        expr: increase(dz_conformance_unverifiable_total[5m]) > 5
+        expr: increase(dz_conformance_unverifiable_total{reason=~"loss|overflow|untrusted"}[5m]) > 5
         for: 2m
         labels:
           severity: warning
@@ -27,6 +39,47 @@ groups:
           description: >
             Rule {{ $labels.rule_id }} became unverifiable (reason={{ $labels.reason }})
             on feed {{ $labels.feed }}. Check feed health and instrument definitions.
+
+      # Warn: a conditional rule has stopped passing while still getting work.
+      #
+      # This is the failure the reason-scoped alert above cannot see, and the one a
+      # violation-only view is blind to by construction: a rule that never fires
+      # because it never *runs*. The tool then reports a clean feed it is not
+      # actually checking. Fires when a rule is being handed opportunities but none
+      # of them resulted in a pass over the window.
+      #
+      # 15m rather than 5m because the snapshot cycle is the natural unit here —
+      # a rule may legitimately go a cycle without a comparable opportunity.
+      #
+      # **`unless`, not `and ... == 0`.** A rule that has never once passed has no
+      # `result="pass"` series at all, so `increase(...) == 0` matches no samples and
+      # the alert would stay silent for exactly the rule in the worst state. `unless`
+      # is a set difference: it keeps a rule whose pass series is missing *or* flat,
+      # which is the condition being alerted on.
+      #
+      # `na` is excluded from the opportunity count deliberately — a rule reporting
+      # not-applicable is not owed coverage (an instrument that declares no price
+      # bound has nothing to bound-check), so counting those would page on a
+      # perfectly healthy instrument set.
+      - alert: ConformanceRuleNoLongerVerifying
+        expr: >
+          sum by (feed, rule_id) (
+            increase(dz_conformance_checks_total{result=~"pass|violation|unverifiable"}[15m])
+          ) > 10
+          unless
+          sum by (feed, rule_id) (
+            increase(dz_conformance_checks_total{result="pass"}[15m])
+          ) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Rule {{ $labels.rule_id }} is no longer verifying anything"
+          description: >
+            Rule {{ $labels.rule_id }} on feed {{ $labels.feed }} was handed work but
+            produced no passing check in the last 15 minutes, so its clean result
+            proves nothing. Check dz_conformance_unverifiable_total{rule_id="{{ $labels.rule_id }}"}
+            for which cause is blocking it.
 
       # Warn: transport packet loss detected.
       - alert: ConformanceTransportLoss

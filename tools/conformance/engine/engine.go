@@ -37,6 +37,8 @@ type Engine struct {
 	// mbo holds per-instrument MBO sequencing state (Task 18+).
 	// Lazily initialized on the first MBO mktdata frame.
 	mbo *mboState
+	// Market-by-price consumer state; lazily initialised by ensureMBP.
+	mbp *mbpState
 }
 
 // New constructs an Engine with the given config and reporter.
@@ -60,8 +62,9 @@ func (e *Engine) beginFrame(schemaVersion uint8) { e.curUnknownSchema = schemaVe
 //
 // port and seq are the logical port and frame sequence number of the frame being
 // classified; they are recorded on the Finding for logging and debugging.
-// reason is an optional bounded enum string (e.g. "loss", "cold_start", "reorder")
-// used for the unverifiable_total Prometheus label; at most one value is used.
+// reason is an optional core.Reason* value used for the unverifiable_total
+// Prometheus label; at most one is used. Prefer the passed/unverified/inapplicable
+// helpers in denominator.go, which pick the status and reason together.
 func (e *Engine) Emit(ruleID string, st core.Status, port core.Port, seq uint64, ch uint8, inst uint32, detail string, reason ...string) {
 	meta, ok := core.Lookup(ruleID)
 	if !ok {
@@ -150,6 +153,8 @@ func (e *Engine) Process(f *wire.Frame, port core.Port, sf []wire.StructFinding)
 		// on ANY port are never checked against stale old-era trackers. Handling only
 		// the mktdata-leads case (the prior approach) left a false-positive window
 		// when the snapshot port observed the reset first (F4).
+		// MBP handles the reset from classify instead (see mbpObserveEra): it must
+		// also see the era a port *seeds* without advancing, which never reaches here.
 		if e.cfg.Feed == core.FeedMBO {
 			e.ensureMBO()
 			wiped := e.mbo.onResetCountForEra(res.newEra)
@@ -228,6 +233,10 @@ func (e *Engine) classify(item *bufferItem, pt *portTracker) {
 	// and new-era items are classified after. So seq tracking is always active.
 	e.beginFrame(f.Header.SchemaVersion)
 
+	// Channel-wide reset bookkeeping for MBP, driven by every accepted frame on any
+	// port rather than by the per-port era advance in Process.
+	e.mbpObserveEra(port, item.era)
+
 	// FRAME.SEQ_RESET_GAP: backward seq motion without a reset-count change is
 	// a publisher violation. A plain forward gap is transport loss (not a violation).
 	// res.gapBefore is true for forward gaps; backward motion (seq < lastSeq)
@@ -305,12 +314,17 @@ func (e *Engine) classify(item *bufferItem, pt *portTracker) {
 			e.checkMidpoint(f, port, f.Header.ChannelID)
 		case core.FeedMBO:
 			e.checkMBO(f, f.Header.ChannelID)
+		case core.FeedMBP:
+			e.checkMBP(f, f.Header.ChannelID)
 		}
 	}
 
 	// Snapshot-port routing: MBO snapshot counters rules.
 	if port == core.PortSnapshot && e.cfg.Feed == core.FeedMBO {
 		e.checkMBOSnapshot(f, f.Header.ChannelID, f.Header.Sequence)
+	}
+	if port == core.PortSnapshot && e.cfg.Feed == core.FeedMBP {
+		e.checkMBPSnapshot(f, f.Header.ChannelID, f.Header.Sequence)
 	}
 }
 
@@ -333,7 +347,7 @@ func (e *Engine) checkHeartbeatCadence(f *wire.Frame, port core.Port, pt *portTr
 				reason := ""
 				if pt.dirtyWindow {
 					st = core.Unverifiable
-					reason = "loss"
+					reason = core.ReasonLoss
 				}
 				e.Emit("HEARTBEAT.CADENCE", st, port, f.Header.Sequence, ch, 0,
 					fmt.Sprintf("heartbeat gap %v exceeds --expect-heartbeat %v",
@@ -372,6 +386,9 @@ func (e *Engine) Flush() {
 // SNAP.BEGIN_ORDER_END_GROUPING (Task 21): any snapshot group still open at
 // end-of-stream (SnapshotBegin without SnapshotEnd) is a grouping violation.
 //
+// MBP.SNAP.GROUP_STRUCTURE: the market-by-price equivalent, reported as
+// Unverifiable — see flushOpenMBPSnaps for why the two differ.
+//
 // RESET.SNAPSHOT_FOLLOWS (Task 22): any instrument still awaiting a recovery
 // snapshot at end-of-stream fires this rule.
 //
@@ -384,6 +401,7 @@ func (e *Engine) Flush() {
 func (e *Engine) EndRun() {
 	// Flush any snapshot groups that were opened but never closed.
 	e.flushOpenSnaps()
+	e.flushOpenMBPSnaps()
 
 	// Task 22: reset-recovery and round-robin end-of-run checks.
 	e.checkResetSnapshotFollows()
@@ -397,17 +415,33 @@ func (e *Engine) EndRun() {
 	}
 	window := e.cfg.ExpectManifestCadence + e.cfg.ExpectDefinitionCycle
 	refPT, hasPT := e.ports[core.PortRefData]
+	// Each observed channel is one opportunity, and each of the four ways out below
+	// reports it. A channel that reached ready is the rule *passing* — the reason it
+	// was silent is that the check is written as a search for failures, which is
+	// exactly the shape that makes coverage and no-op indistinguishable
+	// (engine/denominator.go).
 	for ch, s := range e.refdata.channels {
-		if s.everReady || !s.firstSendTSSet || !s.lastManifestSendTSSet {
+		if s.everReady {
+			e.passed("REFDATA.NEVER_REACHES_READY", core.PortRefData, 0, ch, 0,
+				fmt.Sprintf("channel %d reached ready state", ch))
+			continue
+		}
+		if !s.firstSendTSSet || !s.lastManifestSendTSSet {
+			e.unverified("REFDATA.NEVER_REACHES_READY", core.ReasonColdStart, core.PortRefData, 0, ch, 0,
+				fmt.Sprintf("channel %d: no ManifestSummary observed, so the observation span is unknown", ch))
 			continue
 		}
 		if s.lastManifestSendTS < s.firstSendTS {
 			// Wire timestamps regressed (FRAME.SEND_TS_MONOTONIC fires separately);
 			// skip this channel rather than computing a spurious negative/huge span.
+			e.unverified("REFDATA.NEVER_REACHES_READY", core.ReasonSuperseded, core.PortRefData, 0, ch, 0,
+				fmt.Sprintf("channel %d: wire timestamps regressed, so the span is not measurable (FRAME.SEND_TS_MONOTONIC reports it)", ch))
 			continue
 		}
 		span := time.Duration(s.lastManifestSendTS-s.firstSendTS) * time.Nanosecond
 		if span < window {
+			e.unverified("REFDATA.NEVER_REACHES_READY", core.ReasonInsufficientWindow, core.PortRefData, 0, ch, 0,
+				fmt.Sprintf("channel %d: observed %v, less than the %v a publisher needs to reach ready", ch, span, window))
 			continue
 		}
 		// Gate: if the refdata port has a dirty window, downgrade.
@@ -416,7 +450,7 @@ func (e *Engine) EndRun() {
 		reason := ""
 		if dirty {
 			st = core.Unverifiable
-			reason = "loss"
+			reason = core.ReasonLoss
 		}
 		e.Emit("REFDATA.NEVER_REACHES_READY", st, core.PortRefData, 0, ch, 0,
 			fmt.Sprintf("channel %d: observed %v (≥ window %v) but never reached ready state",

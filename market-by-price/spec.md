@@ -517,7 +517,9 @@ Opens a per-instrument snapshot group on the `snapshot` port.
 
 `Timestamp` sits at offset 28 and is therefore not 8-byte aligned within the message. **This is deliberate and inherited, not a cost of the prefix-superset**: the sibling's layout already places it there, and `InstrumentReset` — byte-identical across both feeds — likewise carries `New Anchor Seq` at 12 and `Timestamp` at 20. Every message this feed defines from scratch is 8-aligned throughout. Realigning would fork the layout from the sibling for no practical gain, because message-relative alignment does not produce buffer-relative alignment anyway: messages pack at arbitrary offsets behind the 24-byte frame header and at sizes that are not all multiples of 8, so a field's address depends on what preceded it in the frame. Both target architectures handle unaligned 8-byte loads in hardware at negligible cost.
 
-Publishers MUST NOT interleave two snapshot groups for different instruments on the `snapshot` port. A `SnapshotBegin` for instrument A is always followed by exactly `Total Levels` `SnapshotLevel` messages for A and then a `SnapshotEnd` for A, before any `SnapshotBegin` for a different instrument.
+Publishers MUST NOT interleave two snapshot groups for different instruments **within a channel**. A `SnapshotBegin` for instrument A is always followed by exactly `Total Levels` `SnapshotLevel` messages for A and then a `SnapshotEnd` for A, before any `SnapshotBegin` for a different instrument on that channel.
+
+**Scoped to the channel, not to the port.** A channel is an independent state machine with its own snapshot cycle, and the frame header carries `Channel ID` precisely so a deployment may carry more than one on a `snapshot` port. Two channels whose groups alternate there are each conformant, and a subscriber tracks the open group per `Channel ID` — reading this as a port-wide constraint makes a conformant sharded publisher look like an interleaving one.
 
 An instrument with an empty book at capture time is represented by `SnapshotBegin(total_levels=0)` immediately followed by `SnapshotEnd` with no intervening `SnapshotLevel` messages.
 
@@ -775,7 +777,7 @@ A publisher operating the `snapshot` port MUST:
    - Emit `SnapshotBegin(I, anchor_seq=S, snapshot_id=N, total_levels=T, last_instrument_seq=K, depth_bound=D, timestamp=now)` on the `snapshot` port, where `K` is the most recent `Per-Instrument Seq` emitted for `I` at or before `anchor_seq`.
    - Emit `T` `SnapshotLevel` messages, packed into frames.
    - Emit `SnapshotEnd(I, S, N)`.
-3. NOT interleave two snapshot groups for different instruments. All frames on the `snapshot` port carrying levels for one instrument MUST precede the first frame carrying levels for another instrument.
+3. NOT interleave two snapshot groups for different instruments within a channel. All frames on the `snapshot` port carrying levels for one instrument on a given `Channel ID` MUST precede the first frame carrying levels for another instrument on that channel.
 4. Complete one full round-robin cycle (one snapshot per active instrument) within the configured **snapshot cycle period**.
 5. Include an instrument with an empty book at capture time as `SnapshotBegin(total_levels=0) → SnapshotEnd`, with no intervening `SnapshotLevel` messages. An empty book is a valid snapshot.
 6. Set application-header `Flags` bit 0 on every message emitted on this port, and clear it on every `mktdata` and `refdata` message.

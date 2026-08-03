@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"net"
 	"os"
 	"path/filepath"
@@ -156,5 +157,69 @@ func TestRunWellFormedMBOPcapWithJSONReport(t *testing.T) {
 	}
 	if !bytes.Contains(data, []byte("rules")) {
 		t.Errorf("JSON report missing 'rules' key; got: %s", data)
+	}
+}
+
+// TestRunWithoutSnapshotPortReportsStarvedRules pins the two-step trap that
+// motivated reportStarvedRules: an MBO/MBP run with --snapshot-port unset used to
+// produce an empty report and exit 0, which reads as a clean pass while every
+// snapshot-driven rule was starved of input.
+//
+// The assertion is on the JSON report rather than stderr, because the report is what
+// a CI job keeps.
+func TestRunWithoutSnapshotPortReportsStarvedRules(t *testing.T) {
+	dir := t.TempDir()
+	pcapPath := writeMBOPcap(t, dir)
+	reportPath := filepath.Join(dir, "report.json")
+
+	opts := RunOpts{
+		Cfg:         engine.Config{Feed: core.FeedMBO, ReorderWindow: 8},
+		MktDataPort: testMktDataUDPPort,
+		PcapPath:    pcapPath,
+		JSONReport:  reportPath,
+		// SnapshotPort deliberately unset.
+	}
+	if code := Run(opts); code != 0 {
+		t.Fatalf("Run() returned exit code %d; expected 0 (a two-port run is legitimate)", code)
+	}
+
+	data, err := os.ReadFile(reportPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%q): %v", reportPath, err)
+	}
+	var got struct {
+		Rules []struct {
+			RuleID string         `json:"rule_id"`
+			Counts map[string]int `json:"counts"`
+		} `json:"rules"`
+	}
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal report: %v", err)
+	}
+	na := map[string]int{}
+	for _, r := range got.Rules {
+		if n := r.Counts["na"]; n > 0 {
+			na[r.RuleID] = n
+		}
+	}
+
+	// Every snapshot-driven rule for this feed must be accounted for, so the report
+	// can never be empty while they are unreachable.
+	want := core.SnapshotDrivenRules(core.FeedMBO)
+	if len(want) == 0 {
+		t.Fatal("no snapshot-driven rules registered for mbo: this test would be vacuous")
+	}
+	for _, id := range want {
+		if na[id] == 0 {
+			t.Errorf("%s is unreachable without --snapshot-port but the report does not mark it na; "+
+				"an empty report reads as a pass", id)
+		}
+	}
+
+	// And the run must not have claimed any of them passed.
+	for _, r := range got.Rules {
+		if r.Counts["pass"] > 0 && na[r.RuleID] > 0 {
+			t.Errorf("%s is both na and passing, which cannot be true in the same run", r.RuleID)
+		}
 	}
 }

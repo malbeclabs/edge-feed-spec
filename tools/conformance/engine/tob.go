@@ -43,7 +43,12 @@ func (e *Engine) checkTOB(f *wire.Frame, port core.Port, ch uint8) {
 // Semantics:
 //   - refdata nil or channel not ready → NA (cold start / not yet collected).
 //   - channel ready AND instrID NOT in defs → Violation.
-//   - channel ready AND instrID in defs → silent.
+//   - channel ready AND instrID in defs → Pass.
+//
+// The NA arms were always reported; the passing arm was silent, which left the
+// rule's denominator short by exactly the messages it judged clean — a channel
+// whose refdata never arrives and one whose instruments all check out both showed
+// zero. See engine/denominator.go.
 func (e *Engine) checkTOBRefdata(port core.Port, seq uint64, ch uint8, instrID uint32) {
 	if e.refdata == nil {
 		// No refdata frames received at all: cold start, rule is NA.
@@ -63,6 +68,8 @@ func (e *Engine) checkTOBRefdata(port core.Port, seq uint64, ch uint8, instrID u
 	if !known {
 		e.Emit("TOB.QUOTE.REFDATA_KNOWN", core.Violation, port, seq, ch, instrID,
 			fmt.Sprintf("instrument %d not in refdata def set for channel %d", instrID, ch))
+		return
 	}
-	// known == true: pass, no emission.
+	e.passed("TOB.QUOTE.REFDATA_KNOWN", port, seq, ch, instrID,
+		fmt.Sprintf("instrument %d is in channel %d's refdata def set", instrID, ch))
 }

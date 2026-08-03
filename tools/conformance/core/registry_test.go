@@ -3,8 +3,8 @@ package core
 import "testing"
 
 func TestRegistryComplete(t *testing.T) {
-	if len(Rules) != 82 {
-		t.Fatalf("registry has %d rules, want 82", len(Rules))
+	if len(Rules) != 88 {
+		t.Fatalf("registry has %d rules, want 88", len(Rules))
 	}
 	seen := map[string]bool{}
 	for _, r := range Rules {
@@ -24,11 +24,65 @@ func TestRegistryComplete(t *testing.T) {
 	}
 }
 
+// conditionalExec is a second list beside Rules, so it can drift out of it. A
+// rule renamed or dropped from the catalog would leave a dead entry here, and
+// ConditionalExecRules would then quietly stop returning it — the denominator
+// enforcement would pass by checking nothing.
+func TestConditionalExecRulesExist(t *testing.T) {
+	for id := range conditionalExec {
+		if _, ok := Lookup(id); !ok {
+			t.Errorf("conditionalExec lists %q, which is not in the rule catalog", id)
+		}
+	}
+	// And the accessor must actually resolve them per feed: an entry no feed claims
+	// is unreachable from the enforcement test.
+	claimed := map[string]bool{}
+	for _, feed := range allFeeds {
+		for _, id := range ConditionalExecRules(feed) {
+			claimed[id] = true
+		}
+	}
+	for id := range conditionalExec {
+		if !claimed[id] {
+			t.Errorf("conditionalExec lists %q but no feed claims it", id)
+		}
+	}
+}
+
 func TestRuleLookup(t *testing.T) {
 	if _, ok := Lookup("FRAME.MAGIC_MISMATCH"); !ok {
 		t.Fatal("FRAME.MAGIC_MISMATCH not found")
 	}
 	if _, ok := Lookup("NOPE.NOPE"); ok {
 		t.Fatal("unknown id resolved")
+	}
+}
+
+// snapshotDriven is a third list beside Rules and can drift out of it the same way,
+// with a worse consequence: a stale ID makes SnapshotDrivenRules silently drop it, so
+// the CLI stops reporting a rule that an unbound snapshot port genuinely starves.
+func TestSnapshotDrivenRulesExist(t *testing.T) {
+	for id := range snapshotDriven {
+		if _, ok := Lookup(id); !ok {
+			t.Errorf("snapshotDriven lists %q, which is not in the rule catalog", id)
+		}
+	}
+	claimed := map[string]bool{}
+	for _, feed := range allFeeds {
+		for _, id := range SnapshotDrivenRules(feed) {
+			claimed[id] = true
+		}
+	}
+	for id := range snapshotDriven {
+		if !claimed[id] {
+			t.Errorf("snapshotDriven lists %q but no feed claims it", id)
+		}
+	}
+	// Only the two snapshot-bearing feeds have such rules; a TOB or Midpoint run has
+	// no snapshot port and must not be warned about one.
+	for _, feed := range []Feed{FeedTOB, FeedMidpoint} {
+		if got := SnapshotDrivenRules(feed); len(got) != 0 {
+			t.Errorf("feed %s has no snapshot port but claims snapshot-driven rules: %v", feed, got)
+		}
 	}
 }

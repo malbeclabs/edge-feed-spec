@@ -57,6 +57,15 @@ func TestResetRecoveryHappyPath(t *testing.T) {
 	if hasViolation(ac, "RESET.RECOVERY_SNAPSHOT_ANCHOR_MATCHES_RESET") {
 		t.Error("happy path: RESET.RECOVERY_SNAPSHOT_ANCHOR_MATCHES_RESET must not fire when anchor matches")
 	}
+	// Both must say they *ran*. Each has only violation arms elsewhere, so "no
+	// violation" is also what a stream with no reset at all produces, and these two
+	// assertions were satisfied by the engine doing nothing (engine/denominator.go).
+	if !hasPass(ac, "RESET.SNAPSHOT_FOLLOWS") {
+		t.Error("happy path: RESET.SNAPSHOT_FOLLOWS must report a pass — a recovery snapshot did follow the reset")
+	}
+	if !hasPass(ac, "RESET.RECOVERY_SNAPSHOT_ANCHOR_MATCHES_RESET") {
+		t.Error("happy path: RESET.RECOVERY_SNAPSHOT_ANCHOR_MATCHES_RESET must report a pass — the anchor matched")
+	}
 }
 
 // --- TestResetNoRecoverySnapshot: InstrumentReset with no recovery snapshot → RESET.SNAPSHOT_FOLLOWS ---
