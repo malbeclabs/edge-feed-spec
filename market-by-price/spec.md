@@ -15,7 +15,7 @@ This document specifies the frame header, application message header, the messag
 3. **Schema-versioned.** The frame header carries a version byte. New fields append to messages; old decoders ignore trailing bytes. Unknown message types are skipped using the Message Length field.
 4. **Multicast-native.** UDP multicast delivery. One frame per UDP datagram. The protocol defines application messages only; transport, addressing, and group membership are out of scope.
 5. **Instrument-ID based.** Numeric `u32` IDs on the market data path. Human-readable strings only in reference data.
-6. **Source-attributed.** Every price-carrying message on the market data path carries a `u16` source ID. With a single publisher this is redundant; with many it is essential. Snapshot-path messages omit it: a snapshot group is scoped to one `(channel_id, instrument_id)`, which identifies one book from one source.
+6. **Source-attributed.** Every price-carrying message on the market data path carries a `u16` source ID. With a single publisher this is redundant; with many it is essential. Snapshot-path messages omit it: within a publisher host, a snapshot group is scoped to one `(channel_id, instrument_id)`, which identifies one book from one source. `Source ID` distinguishes *sources*, not publisher *hosts*; where redundant hosts serve one channel they share it, and are told apart by other means ([Redundant Publisher Hosts](#redundant-publisher-hosts)).
 7. **Domain-agnostic.** Anything with a two-sided book of resting limit orders — crypto spot, equities, futures, FX, prediction markets — is a valid instrument.
 8. **In-band recovery only.** Subscribers bootstrap and recover from packet loss via a continuous publisher-driven snapshot stream. No TCP replay, no out-of-band snapshot service, no subscriber-initiated requests.
 9. **Recovery blast radius minimised.** A single lost multicast packet invalidates only the specific instruments whose deltas were in the lost frame, not the whole channel. A per-instrument sequence number carried on every delta message lets subscribers localise the loss.
@@ -84,10 +84,10 @@ The snapshot stream has a fundamentally different traffic shape from the delta s
 | 0 | Magic | `u16` | `0x4442`. Frame delimiter. Distinct from the top-of-book feed's `0x445A`, the market-by-order feed's `0x4444`, the midpoint feed's `0x4D44`, the order-intent feed's `0x494F`, and the perp-stats feed's `0x4450` to prevent cross-protocol misrouting. A consumer MUST validate that a received frame's `Magic` equals the value for the feed it subscribed to and discard any frame that does not match. |
 | 2 | Schema Version | `u8` | Protocol version. Starts at `1`. A subscriber MUST discard frames whose version it does not implement. |
 | 3 | Channel ID | `u8` | Logical channel for instrument sharding. |
-| 4 | Sequence Number | `u64` | Monotonically increasing **per channel per port**, starting from 0. Resets to 0 when `Reset Count` changes. Used for per-port gap detection. The `mktdata`, `refdata`, and `snapshot` ports each have an independent `Sequence Number` series; see [Sequence Numbers and Recovery](#sequence-numbers-and-recovery) for how the series relate. |
+| 4 | Sequence Number | `u64` | Monotonically increasing **per publisher host per channel per port**, starting from 0. Resets to 0 when `Reset Count` changes. Used for per-port gap detection. The `mktdata`, `refdata`, and `snapshot` ports each have an independent `Sequence Number` series; see [Sequence Numbers and Recovery](#sequence-numbers-and-recovery) for how the series relate, and [Redundant Publisher Hosts](#redundant-publisher-hosts) where more than one host serves a channel. |
 | 12 | Send Timestamp | `ts_ns` | When the publisher sent this frame. |
 | 20 | Message Count | `u8` | Number of application messages in this frame (1–255). |
-| 21 | Reset Count | `u8` | Incremented each time the publisher resets the channel. Subscribers detect a reset by comparing against their last-seen value. The `Reset Count` is shared across all three ports of the channel. |
+| 21 | Reset Count | `u8` | Incremented each time the publisher host resets the channel. Subscribers detect a reset by comparing against their last-seen value **for that host**. The `Reset Count` is shared across all three ports of the channel, and is scoped to the emitting host — see [Redundant Publisher Hosts](#redundant-publisher-hosts). |
 | 22 | Frame Length | `u16` | Total frame length in bytes, including this header. |
 
 ---
@@ -116,17 +116,37 @@ A subscriber MUST bounds-check `Message Length` before using it to advance the f
 
 The unique key for an instrument in this feed is the tuple **`(channel_id, instrument_id)`**. `instrument_id` is a `u32` scoped to its channel; it need not be globally unique across channels. Subscribers consuming multiple channels MUST key their internal instrument map by the tuple.
 
-Operators running multiple publisher instances that share a single `source_id` (as defined in the [Source ID Registry](../sources/spec.md)) MAY assign globally unique `instrument_id`s as an operational convenience, in which case the `channel_id` component of the key becomes informational only. The spec does not require this.
+Operators running multiple publisher hosts that share a single `source_id` (as defined in the [Source ID Registry](../sources/spec.md)) MAY assign globally unique `instrument_id`s as an operational convenience, in which case the `channel_id` component of the key becomes informational only. The spec does not require this.
 
 ### Price Levels
 
 Within an instrument, a price level is identified by the tuple **`(Side, Price)`**. There is no positional level index in the addressing model: a level is never identified by its rank, and a subscriber MUST NOT key book state on rank. `Price` is interpreted using the instrument's `Price Exponent` from reference data.
 
-A `(channel_id, instrument_id)` identifies **one book from one source**. A publisher MUST NOT emit level updates for a single `(channel, instrument)` under more than one `Source ID`; an instrument observed at two venues is two instruments with two `InstrumentDefinition` entries and two `instrument_id` values, not one `instrument_id` with two sources.
+Within one publisher host, a `(channel_id, instrument_id)` identifies **one book from one source**. A publisher host MUST NOT emit level updates for a single `(channel, instrument)` under more than one `Source ID`; an instrument observed at two venues is two instruments with two `InstrumentDefinition` entries and two `instrument_id` values, not one `instrument_id` with two sources. Where several hosts serve one channel redundantly, the full key is `(host, channel_id, instrument_id)` — see [Redundant Publisher Hosts](#redundant-publisher-hosts).
+
+### Redundant Publisher Hosts
+
+An operator MAY run more than one publisher host emitting the **same** channel — same `channel_id`, same instrument set, same `Source ID` — for redundancy, or to observe one venue over two transports. The protocol permits this and does not require it. This is distinct from [Channel Sharding](#channel-sharding) below, where each host owns a *different* channel.
+
+Every sequencing and snapshot identifier this specification calls "per channel" is process-local, so where hosts are redundant each is minted **per host**:
+
+| Identifier | Minted per |
+|---|---|
+| `Sequence Number` (frame header) | host, channel, port |
+| `Reset Count` (frame header) | host, channel |
+| `Per-Instrument Seq` | host, channel, instrument |
+| `Snapshot ID` | host, channel, instrument |
+| `Anchor Seq` | host, channel (it is a `mktdata` `Sequence Number`) |
+
+**A subscriber consuming more than one host of a channel MUST key all channel and instrument state by `(host, channel_id, …)`, not by `channel_id` alone.** Otherwise two independent sequence spaces interleave into one state machine, two hosts mint the same `(channel_id, instrument_id, snapshot_id)` for unrelated snapshots, and — the case that bites first — one host restarting bumps only *its* `Reset Count`, which a `channel_id`-keyed subscriber reads as a channel reset and answers by discarding every host's state, healthy ones included.
+
+**Identifying hosts is a deployment concern, out of scope here**, exactly as concrete port assignments are ([Three-Port Channel Model](#three-port-channel-model)); a deployment running redundant hosts MUST publish out of band how a subscriber tells them apart. The datagram source address is the conventional discriminator, needing no wire change. Assigning each host its own `Source ID` also works, except on the snapshot path, which carries none (Design Principle 6). The [Order Intent feed](../order-intent/spec.md) already works this way, and is the precedent for both halves of this rule: its `Sequence Number` is defined *"per publisher host, per channel, per port"* with subscribers required to *"track them keyed by transport origin"*, and its `Reset Count` change re-latches only *"that `(host, channel)`'s"* state.
+
+**Merging hosts is consumer policy this specification does not constrain.** A subscriber MAY hold each host's book independently, or select one host as authoritative and suppress the others, or race them. What it MUST NOT do is apply two hosts' deltas to one book: their `Per-Instrument Seq` series are unrelated, so interleaving them corrupts the book while every per-host sequence check still passes.
 
 ### Channel Sharding
 
-Sharding the active instrument set across multiple publisher instances — each on its own channel — is supported natively via `Channel ID` in the frame header. Each channel is an independent state machine with its own `Reset Count`, `Sequence Number` series per port, `Manifest Seq`, and snapshot cycle. Grouping criteria (by asset class, by liquidity tier, by source venue) and discovery mechanisms are deployment-level concerns and out of scope for this spec.
+Sharding the active instrument set across multiple publisher hosts — each on its own channel — is supported natively via `Channel ID` in the frame header. Each channel is an independent state machine with its own `Reset Count`, `Sequence Number` series per port, `Manifest Seq`, and snapshot cycle. Grouping criteria (by asset class, by liquidity tier, by source venue) and discovery mechanisms are deployment-level concerns and out of scope for this spec.
 
 ---
 
@@ -508,7 +528,7 @@ Opens a per-instrument snapshot group on the `snapshot` port.
 | 4  | Instrument ID | `u32` | |
 | 8  | Anchor Seq | `u64` | The `mktdata`-port `Sequence Number` at the moment the publisher captured the book state for this snapshot. See [Snapshot Anchor Seq](#snapshot-anchor-seq) for the precise semantics. |
 | 16 | Total Levels | `u32` | Number of `SnapshotLevel` messages that will follow before the matching `SnapshotEnd`, across both sides. MAY be `0` for an instrument with an empty book at capture time. |
-| 20 | Snapshot ID | `u32` | Monotonically increasing per `(channel_id, instrument_id)` within the current `Reset Count` era. Identifies this snapshot instance, so that subscribers can associate `SnapshotLevel` messages with the correct `SnapshotBegin` and detect stale or out-of-order snapshot fragments. |
+| 20 | Snapshot ID | `u32` | Monotonically increasing per `(channel_id, instrument_id)` within the current `Reset Count` era, **and per publisher host** ([Redundant Publisher Hosts](#redundant-publisher-hosts)). Identifies this snapshot instance, so that subscribers can associate `SnapshotLevel` messages with the correct `SnapshotBegin` and detect stale or out-of-order snapshot fragments. |
 | 24 | Last Instrument Seq | `u32` | The `Per-Instrument Seq` of the last delta applied to this instrument at or before `Anchor Seq`. Subscribers MUST initialise their `last_applied_instrument_seq` tracker to this value after applying the snapshot. `0` if no deltas have been applied for this instrument in the current `Reset Count` era. |
 | 28 | Timestamp | `ts_ns` | Publisher wall-clock at capture. |
 | 36 | Depth Bound | `u32` | `0` when this snapshot carries the complete book. Otherwise the number of levels per side the publisher carries, beyond which level state is **unknown rather than empty**. See below. |
@@ -575,7 +595,7 @@ Each of the three ports — `mktdata`, `refdata`, `snapshot` — carries its own
 
 ### Per-Instrument Delta Sequence
 
-`LevelUpdate` and `BookClear` each carry a `u32` `Per-Instrument Seq`, monotonically increasing per `(channel_id, instrument_id)` within the current `Reset Count` era. The first delta for an instrument after a channel reset carries `Per-Instrument Seq = 1`; each subsequent delta for that instrument increments by exactly 1. Both message types share one series, because both mutate the book and their relative order is significant.
+`LevelUpdate` and `BookClear` each carry a `u32` `Per-Instrument Seq`, monotonically increasing per `(channel_id, instrument_id)` within the current `Reset Count` era, and per publisher host where more than one serves the channel ([Redundant Publisher Hosts](#redundant-publisher-hosts)). The first delta for an instrument after a channel reset carries `Per-Instrument Seq = 1`; each subsequent delta for that instrument increments by exactly 1. Both message types share one series, because both mutate the book and their relative order is significant.
 
 **The `Per-Instrument Seq` MUST NOT be reset at snapshot boundaries.** It restarts at 1 only on `Reset Count` change. Publishers MUST emit per-instrument sequence numbers densely — no skips — so that subscribers can detect gaps unambiguously.
 
@@ -608,9 +628,11 @@ A subscriber adopting this feed maintains the following state per channel:
 
 ### Channel State
 
+A subscriber holds one `channel_state` per channel it consumes — or, where a deployment runs redundant publishers, **one per `(host, channel_id)`** ([Redundant Publisher Hosts](#redundant-publisher-hosts)). Every field below is process-local to the emitting host, so a single `channel_state` shared across hosts is incorrect rather than merely coarse.
+
 ```
-channel_state = {
-  reset_count:        u8    = 0,
+channel_state = {                     // keyed by channel_id, or by (host, channel_id)
+  reset_count:        u8    = 0,      //   where redundant hosts serve the channel
   mktdata_seq_last:   u64   = null,
   refdata_seq_last:   u64   = null,
   snapshot_seq_last:  u64   = null,
@@ -738,6 +760,8 @@ On receipt of `InstrumentReset(I, new_anchor_seq=S', reason=R)`:
 ### Channel Reset
 
 On `Reset Count` change observed on any port, the subscriber MUST discard all channel state — reference data, instruments, delta buffer, sequence trackers — and restart from the [Cold Start](#cold-start) procedure.
+
+**Scope this to the host that emitted the change.** Where redundant hosts serve one channel, a `Reset Count` bump is that host restarting its own session and says nothing about the others. Discarding every host's state on it is the failure mode [Redundant Publisher Hosts](#redundant-publisher-hosts) exists to prevent: routine restart of one host would tear down healthy, current books held for the rest, and the subscriber would then wait a full snapshot cycle to recover data it never lost.
 
 ### Manifest Seq Change
 
