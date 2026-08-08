@@ -2,7 +2,7 @@
 
 The DoubleZero Perp Stats Feed is a sibling cadence feed carrying per-perpetual derived state — funding, mark price, oracle price, open interest, and premium — relayed from the venue's REST surface. It is not the order-book hot path; data originates from REST polls rather than the matching engine, so it runs on a separate cadence from the top-of-book and market-by-order feeds.
 
-This document specifies version **0.1.1**: the transport, message types, `PerpStats` wire layout, emission model, and instrument scope.
+This document specifies version **1.0.0**: the transport, message types, `PerpStats` wire layout, emission model, and instrument scope.
 
 ---
 
@@ -205,17 +205,23 @@ The publisher MUST follow the cadence and atomicity rules in the [Reference Data
 
 ## Versioning and Forward Compatibility
 
-This document is version **0.1.1**, versioned independently of the sibling feed specs.
+This document is version **1.0.0**, versioned independently of the sibling feed specs. The Schema Version byte in the frame header is `1` and equals this spec's MAJOR version, so it stays `1` for every `1.x.y` release and changes only on a breaking wire change. See the [Versioning Policy](../VERSIONING.md) for the full rule, the change classification, and the tag scheme.
 
-The Schema Version byte in the frame header is `1` for this release. Future versions of this specification MAY:
+Because this feed defers the frame header to the top-of-book spec except for `Magic`, a MAJOR release of the top-of-book feed that changes the frame header would also require a MAJOR release here. The two Schema Version bytes are not otherwise coupled: an additive change to either feed leaves the other untouched.
+
+Future `1.x` versions of this specification MAY, without a Schema Version bump:
 
 - Append new fields to existing messages (old decoders ignore trailing bytes within the declared Message Length).
 - Define new message types (old decoders skip unknown types using the Message Length field).
 - Define new values for enumerated fields (decoders MUST accept any `u8` value).
 
-Existing field layouts and semantics will not change within the v0.x line without a Schema Version bump.
+Existing field layouts and semantics will not change within the `1.x` line. A change that moves or resizes a field, alters a message length, or redefines existing semantics requires a MAJOR release and a Schema Version bump, which old decoders MUST reject rather than parse.
 
-**v0.1.1** — registered the frame `Magic` value `0x4450` ("DP") for this feed and added the consumer validation requirement (see [Transport Framing](#transport-framing)). Previously the header was deferred wholesale to the top-of-book spec, leaving the value ambiguous even though the sibling-feed rule already required a distinct one. No wire-layout change; Schema Version remains `1`.
+### Changes
+
+**1.0.0** — first stable release. Promoted from the `0.1.1` draft with no wire change; Schema Version was `1` before and after.
+
+**0.1.1** (draft, never tagged) — registered the frame `Magic` value `0x4450` ("DP") for this feed and added the consumer validation requirement (see [Transport Framing](#transport-framing)). Previously the header was deferred wholesale to the top-of-book spec, leaving the value ambiguous even though the sibling-feed rule already required a distinct one. No wire-layout change; Schema Version remained `1`.
 
 ---
 
