@@ -72,7 +72,7 @@ func buildInstrDefFrameWithTS(sendTS uint64, instrID uint32, manifestSeq uint16,
 	return wb.Frame(wire.MagicTOB).
 		Channel(ch).
 		SendTS(sendTS).
-		Msg(0x02, 80, instrDefTOBBody(instrID, manifestSeq)).
+		Msg(0x02, 128, instrDefTOBBody(instrID, manifestSeq)).
 		Bytes()
 }
 

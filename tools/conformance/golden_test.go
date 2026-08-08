@@ -178,13 +178,13 @@ func buildMBOGoldenEntries() []goldenPcapEntry {
 		}).Bytes()
 	addRef(mf1, 1)
 
-	// InstrumentDefinition (80 bytes)
+	// InstrumentDefinition (128 bytes)
 	idef := wb.Frame(wire.MagicMBO).Channel(ch).
-		Msg(wire.TypeInstrumentDef, 80, func(b *wb.Body) {
+		Msg(wire.TypeInstrumentDef, 128, func(b *wb.Body) {
 			b.U32(instrID) // Instrument ID  body[0..3]
-			b.Pad(69)      // opaque fields  body[4..72]
-			b.U8(0)        // priceBound=0   body[73]
-			b.U16(1)       // Manifest Seq=1 body[74..75]
+			b.Pad(117)     // opaque fields  body[4..120]
+			b.U8(0)        // priceBound=0   body[121]
+			b.U16(1)       // Manifest Seq=1 body[122..123]
 		}).Bytes()
 	addRef(idef, 2)
 
@@ -356,12 +356,12 @@ func buildTOBGoldenEntries() []goldenPcapEntry {
 		}).Bytes()
 	addRef(mf, 1)
 
-	// InstrumentDefinition (80 bytes, TOB layout)
+	// InstrumentDefinition (128 bytes, TOB layout)
 	idef := wb.Frame(wire.MagicTOB).Channel(ch).
-		Msg(wire.TypeInstrumentDef, 80, func(b *wb.Body) {
+		Msg(wire.TypeInstrumentDef, 128, func(b *wb.Body) {
 			b.U32(instrID) // Instrument ID  body[0..3]
-			b.Pad(70)      // opaque fields  body[4..73]
-			b.U16(1)       // Manifest Seq=1 body[74..75]
+			b.Pad(118)     // opaque fields  body[4..121]
+			b.U16(1)       // Manifest Seq=1 body[122..123]
 		}).Bytes()
 	addRef(idef, 2)
 

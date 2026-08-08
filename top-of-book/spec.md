@@ -2,7 +2,7 @@
 
 The DoubleZero Top-of-Book & Trades Feed is a wire format for L1 price feeds delivered over the DoubleZero Edge service. It defines a compact, fixed-size, multicast-native binary protocol for publishing two-sided market data (best bid / best ask quotes and trades) from any venue with an order book.
 
-This document specifies version **1.0.0**: the frame header, application message header, and the set of message types sufficient to operate a working publisher and subscriber.
+This document specifies version **2.0.0**: the frame header, application message header, and the set of message types sufficient to operate a working publisher and subscriber.
 
 ---
 
@@ -71,7 +71,7 @@ The frame header and application message header are identical on both ports. A s
 | Offset | Field | Type | Description |
 |--------|-------|------|-------------|
 | 0 | Magic | `u16` | `0x445A` ("DZ"). Frame delimiter. |
-| 2 | Schema Version | `u8` | Wire format generation, equal to this spec's MAJOR version. `1` for all `1.x.y` releases. A subscriber MUST discard frames whose version it does not implement. |
+| 2 | Schema Version | `u8` | Wire format generation, equal to this spec's MAJOR version. `2` for all `2.x.y` releases. A subscriber MUST discard frames whose version it does not implement. |
 | 3 | Channel ID | `u8` | Logical channel for instrument sharding. |
 | 4 | Sequence Number | `u64` | Monotonically increasing per channel, starting from 0. Resets to 0 when `Reset Count` changes. Used for gap detection. |
 | 12 | Send Timestamp | `ts_ns` | When the publisher sent this frame. |
@@ -98,7 +98,7 @@ Every application message begins with:
 | Type ID | Name | Size | Port | Description |
 |---------|------|------|------|-------------|
 | `0x01` | Heartbeat | 16 | mktdata | Channel liveness signal |
-| `0x02` | InstrumentDefinition | 80 | refdata | Reference data for an instrument |
+| `0x02` | InstrumentDefinition | 128 | refdata | Reference data for an instrument |
 | `0x03` | Quote | 60 | mktdata | Two-sided BBO update (the core L1 message) |
 | `0x04` | Trade | 52 | mktdata | Last trade report |
 | `0x06` | EndOfSession | 12 | mktdata | No more data for this session |
@@ -122,28 +122,28 @@ Sent every N seconds when there is no other traffic. Receivers use this for stal
 | 5 | Reserved | 3B | Padding |
 | 8 | Timestamp | `ts_ns` | Current time |
 
-### 0x02 InstrumentDefinition (80 bytes)
+### 0x02 InstrumentDefinition (128 bytes)
 
 Maps a numeric Instrument ID to human-readable metadata. Carried on the reference data port and retransmitted continuously per the [Reference Data Distribution supplement](../reference-data/spec.md). Not on the market data path.
 
 | Offset | Field | Type | Description |
 |--------|-------|------|-------------|
-| 0 | Header | 4B | Type=`0x02`, Length=80 |
+| 0 | Header | 4B | Type=`0x02`, Length=128 |
 | 4 | Instrument ID | `u32` | Unique numeric ID for this instrument |
-| 8 | Symbol | `char[16]` | Human-readable label. Truncate if needed (e.g., `"BTC-USDT"`). |
-| 24 | Leg1 | `char[8]` | First leg/component. Context-dependent: base currency, underlying, outcome name. |
-| 32 | Leg2 | `char[8]` | Second leg/component. Context-dependent: quote/settlement currency. |
-| 40 | Asset Class | `u8` | See Asset Class table. |
-| 41 | Price Exponent | `i8` | Implied decimal exponent for price fields. e.g., `-2` means divide raw value by 100. |
-| 42 | Qty Exponent | `i8` | Implied decimal exponent for quantity fields. |
-| 43 | Market Model | `u8` | See Market Model table. |
-| 44 | Tick Size | `price` | Minimum price increment (interpreted via Price Exponent). |
-| 52 | Lot Size | `qty` | Minimum quantity increment (interpreted via Qty Exponent). |
-| 60 | Contract Value | `u64` | Notional per contract. 0 if not applicable (e.g., spot). |
-| 68 | Expiry | `ts_ns` | Expiration timestamp. 0 for non-expiring. |
-| 76 | Settle Type | `u8` | 0=N/A, 1=Cash, 2=Physical |
-| 77 | Price Bound | `u8` | 0=Unbounded, 1=Bounded [0,1] (binary outcomes), 2=Non-negative only |
-| 78 | Manifest Seq | `u16` | The publisher's `Manifest Seq` at the time this definition was emitted. See supplement. |
+| 8 | Symbol | `char[64]` | Human-readable label, left-justified and null-padded (e.g., `"BTC-USDT"`). Truncate only if the venue's symbol exceeds 64 bytes. |
+| 72 | Leg1 | `char[8]` | First leg/component. Context-dependent: base currency, underlying, outcome name. |
+| 80 | Leg2 | `char[8]` | Second leg/component. Context-dependent: quote/settlement currency. |
+| 88 | Asset Class | `u8` | See Asset Class table. |
+| 89 | Price Exponent | `i8` | Implied decimal exponent for price fields. e.g., `-2` means divide raw value by 100. |
+| 90 | Qty Exponent | `i8` | Implied decimal exponent for quantity fields. |
+| 91 | Market Model | `u8` | See Market Model table. |
+| 92 | Tick Size | `price` | Minimum price increment (interpreted via Price Exponent). |
+| 100 | Lot Size | `qty` | Minimum quantity increment (interpreted via Qty Exponent). |
+| 108 | Contract Value | `u64` | Notional per contract. 0 if not applicable (e.g., spot). |
+| 116 | Expiry | `ts_ns` | Expiration timestamp. 0 for non-expiring. |
+| 124 | Settle Type | `u8` | 0=N/A, 1=Cash, 2=Physical |
+| 125 | Price Bound | `u8` | 0=Unbounded, 1=Bounded [0,1] (binary outcomes), 2=Non-negative only |
+| 126 | Manifest Seq | `u16` | The publisher's `Manifest Seq` at the time this definition was emitted. See supplement. |
 
 #### Asset Class Values
 
@@ -301,16 +301,18 @@ The format is fixed-size and binary, so parsing requires no allocation, no strin
 
 ## Versioning and Forward Compatibility
 
-This document is version **1.0.0**, versioned independently of the sibling specs. The Schema Version byte in the frame header is `1` and equals this spec's MAJOR version, so it stays `1` for every `1.x.y` release and changes only on a breaking wire change. See the [Versioning Policy](../VERSIONING.md) for the full rule, the change classification, and the tag scheme.
+This document is version **2.0.0**, versioned independently of the sibling specs. The Schema Version byte in the frame header is `2` and equals this spec's MAJOR version, so it stays `2` for every `2.x.y` release and changes only on a breaking wire change. See the [Versioning Policy](../VERSIONING.md) for the full rule, the change classification, and the tag scheme.
 
-Future `1.x` versions of this specification MAY, without a Schema Version bump:
+Future `2.x` versions of this specification MAY, without a Schema Version bump:
 
 - Append new fields to existing messages (old decoders ignore trailing bytes within the declared Message Length).
 - Define new message types in currently-reserved type ID ranges (old decoders skip unknown types using the Message Length field).
 - Define new values for enumerated fields such as Asset Class and Market Model (decoders MUST accept any `u8` value).
 
-Existing field layouts and semantics will not change within the `1.x` line. A change that moves or resizes a field, alters a message length, or redefines existing semantics requires a MAJOR release and a Schema Version bump, which old decoders MUST reject rather than parse.
+Existing field layouts and semantics will not change within the `2.x` line. A change that moves or resizes a field, alters a message length, or redefines existing semantics requires a MAJOR release and a Schema Version bump, which old decoders MUST reject rather than parse.
 
 ### Changes
+
+**2.0.0** — widened the `InstrumentDefinition` `Symbol` field from `char[16]` to `char[64]`. Every field after `Symbol` moves and the message grows from 80 to 128 bytes, so this is a breaking change: the Schema Version byte is now `2`, and a decoder built for `1.x` MUST reject these frames rather than parse them at the old offsets. Nothing else on the wire changed. The midpoint feed keeps its 64-byte variant and stays at Schema Version `1`.
 
 **1.0.0** — first stable release. Promoted from the `0.1.0` draft with no wire change; Schema Version was `1` before and after. Includes two additive changes made during the draft period, both of which left Schema Version at `1`: `0x08 Liquidation` was added as a shared trade-companion type (old decoders skip it via Message Length), and Asset Class value `5` (Perpetual Future) was added (decoders already MUST accept any `u8` and treat unknown values as `0` (Unknown)).

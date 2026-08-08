@@ -2,7 +2,7 @@
 
 The DoubleZero Perp Stats Feed is a sibling cadence feed carrying per-perpetual derived state — funding, mark price, oracle price, open interest, and premium — relayed from the venue's REST surface. It is not the order-book hot path; data originates from REST polls rather than the matching engine, so it runs on a separate cadence from the top-of-book and market-by-order feeds.
 
-This document specifies version **1.0.0**: the transport, message types, `PerpStats` wire layout, emission model, and instrument scope.
+This document specifies version **2.0.0**: the transport, message types, `PerpStats` wire layout, emission model, and instrument scope.
 
 ---
 
@@ -64,7 +64,7 @@ The `price`, `qty`, and `ts_ns` types are reused from the [Top-of-Book & Trades 
 | Type ID | Name | Size | Port | Description |
 |---------|------|------|------|-------------|
 | `0x01` | Heartbeat | 16 | mktdata | Channel liveness signal |
-| `0x02` | InstrumentDefinition | 80 | refdata | Reference data for a perpetual instrument |
+| `0x02` | InstrumentDefinition | 128 | refdata | Reference data for a perpetual instrument |
 | `0x06` | EndOfSession | 12 | mktdata | No more data for this session |
 | `0x07` | ManifestSummary | 24 | refdata | Active instrument set summary (see supplement) |
 | `0x30` | PerpStats | 124 | mktdata | Per-perpetual derived state snapshot |
@@ -88,11 +88,11 @@ Sent when there is no other traffic. Receivers use this for stale-connection det
 | 5 | Reserved | 3B | Padding |
 | 8 | Timestamp | `ts_ns` | Current time |
 
-### 0x02 InstrumentDefinition (80 bytes)
+### 0x02 InstrumentDefinition (128 bytes)
 
 Maps a numeric Instrument ID to human-readable metadata. Carried on the reference data port and retransmitted continuously per the [Reference Data Distribution supplement](../reference-data/spec.md). Not on the market data path.
 
-This feed uses the same 80-byte `InstrumentDefinition` layout as the top-of-book feed; see that spec for the full field table. The `InstrumentDefinition` set on this feed covers perpetual future instruments only (see Instrument Scope), so every definition on this feed carries `Asset Class = 5` (Perpetual Future).
+This feed uses the same 128-byte `InstrumentDefinition` layout as the top-of-book feed; see that spec for the full field table. The `InstrumentDefinition` set on this feed covers perpetual future instruments only (see Instrument Scope), so every definition on this feed carries `Asset Class = 5` (Perpetual Future).
 
 ### 0x06 EndOfSession (12 bytes)
 
@@ -205,19 +205,21 @@ The publisher MUST follow the cadence and atomicity rules in the [Reference Data
 
 ## Versioning and Forward Compatibility
 
-This document is version **1.0.0**, versioned independently of the sibling feed specs. The Schema Version byte in the frame header is `1` and equals this spec's MAJOR version, so it stays `1` for every `1.x.y` release and changes only on a breaking wire change. See the [Versioning Policy](../VERSIONING.md) for the full rule, the change classification, and the tag scheme.
+This document is version **2.0.0**, versioned independently of the sibling feed specs. The Schema Version byte in the frame header is `2` and equals this spec's MAJOR version, so it stays `2` for every `2.x.y` release and changes only on a breaking wire change. See the [Versioning Policy](../VERSIONING.md) for the full rule, the change classification, and the tag scheme.
 
 Because this feed defers the frame header to the top-of-book spec except for `Magic`, a MAJOR release of the top-of-book feed that changes the frame header would also require a MAJOR release here. The two Schema Version bytes are not otherwise coupled: an additive change to either feed leaves the other untouched.
 
-Future `1.x` versions of this specification MAY, without a Schema Version bump:
+Future `2.x` versions of this specification MAY, without a Schema Version bump:
 
 - Append new fields to existing messages (old decoders ignore trailing bytes within the declared Message Length).
 - Define new message types (old decoders skip unknown types using the Message Length field).
 - Define new values for enumerated fields (decoders MUST accept any `u8` value).
 
-Existing field layouts and semantics will not change within the `1.x` line. A change that moves or resizes a field, alters a message length, or redefines existing semantics requires a MAJOR release and a Schema Version bump, which old decoders MUST reject rather than parse.
+Existing field layouts and semantics will not change within the `2.x` line. A change that moves or resizes a field, alters a message length, or redefines existing semantics requires a MAJOR release and a Schema Version bump, which old decoders MUST reject rather than parse.
 
 ### Changes
+
+**2.0.0** — widened the `InstrumentDefinition` `Symbol` field from `char[16]` to `char[64]`. Every field after `Symbol` moves and the message grows from 80 to 128 bytes, so this is a breaking change: the Schema Version byte is now `2`, and a decoder built for `1.x` MUST reject these frames rather than parse them at the old offsets. Nothing else on the wire changed. The midpoint feed keeps its 64-byte variant and stays at Schema Version `1`.
 
 **1.0.0** — first stable release. Promoted from the `0.1.1` draft with no wire change; Schema Version was `1` before and after.
 

@@ -4,7 +4,7 @@ This supplement defines a continuous in-band mechanism for DoubleZero Edge feeds
 
 The mechanism is payload-independent. Any feed in the DoubleZero Edge family that uses the shared 24-byte frame header and 4-byte application message header MAY adopt it. The Top-of-Book & Trades Feed and the Midpoint Feed both do.
 
-This document specifies version **1.0.0**: the two-port transport model, the `ManifestSummary` message, the publisher cadence requirements, and the subscriber algorithm.
+This document specifies version **1.0.1**: the two-port transport model, the `ManifestSummary` message, the publisher cadence requirements, and the subscriber algorithm.
 
 ---
 
@@ -65,7 +65,7 @@ A new application message type, advertised periodically on the reference-data po
 
 Every feed adopting this supplement MUST add a `Manifest Seq (u16)` field to its `InstrumentDefinition` message. The field carries the value of the publisher's current `Manifest Seq` at the time the definition was emitted.
 
-The field is `u16` (not `u32`) so that it fits within the Reserved space already present in the `InstrumentDefinition` layouts of the Top-of-Book & Trades Feed and the Midpoint Feed without bumping the message length. Subscribers MUST compare manifest sequence numbers using modular ordering (i.e., `(new − old) mod 65536 < 32768` means `new` is later). If wraparound becomes a practical concern, a later schema version may widen the field.
+The field is `u16` (not `u32`) so that it fit within the Reserved space already present in the `InstrumentDefinition` layouts when this supplement was introduced, without bumping the message length at the time. Subscribers MUST compare manifest sequence numbers using modular ordering (i.e., `(new − old) mod 65536 < 32768` means `new` is later). If wraparound becomes a practical concern, a later schema version may widen the field.
 
 The exact byte offset of `Manifest Seq` within `InstrumentDefinition` is feed-specific and is documented in each feed's spec.
 
@@ -161,13 +161,13 @@ For a channel with **N** active instruments, definition size **D** bytes, cycle 
 - **ManifestSummary rate:** `24 / M` bytes/second
 - **Total reference-data port rate:** `N × D / T + 24 / M`
 
-Worked example for the Top-of-Book & Trades Feed at the recommended settings (N=1000, D=80, T=30, M=1):
+Worked example for the Top-of-Book & Trades Feed at the recommended settings (N=1000, D=128, T=30, M=1):
 
 ```
-1000 × 80 / 30 + 24 / 1 = 2,667 + 24 ≈ 2,691 bytes/sec ≈ 22 kbps
+1000 × 128 / 30 + 24 / 1 = 4,267 + 24 ≈ 4,291 bytes/sec ≈ 34 kbps
 ```
 
-Definitions pack into frames at 15 per frame (1,200 + 24-byte frame header = 1,224 bytes), giving `1000 / 15 ≈ 67` frames per cycle, or roughly one frame every 448 ms — comfortably within any modern network's burst tolerance.
+Definitions pack into frames at 9 per frame (1,152 + 24-byte frame header = 1,176 bytes), giving `1000 / 9 ≈ 112` frames per cycle, or roughly one frame every 268 ms — comfortably within any modern network's burst tolerance.
 
 For the Midpoint Feed (D=64), the rate is `1000 × 64 / 30 + 24 ≈ 2,157 bytes/sec ≈ 18 kbps`.
 
@@ -192,7 +192,7 @@ The subscriber sees a `ManifestSummary` within `M` seconds (worst case), then wa
 
 ## Forward Compatibility
 
-This document is version **1.0.0**. It is a supplement, not a feed: it defines a mechanism that rides on a host feed's frame header and therefore has no `Magic` and no `Schema Version` of its own. Frames carrying it are versioned by the host feed. It is versioned independently of the feed specs that adopt it, because a subscriber and publisher operating under the same version of this supplement interoperate correctly regardless of which feed specs they implement. See the [Versioning Policy](../VERSIONING.md) for the full scheme.
+This document is version **1.0.1**. It is a supplement, not a feed: it defines a mechanism that rides on a host feed's frame header and therefore has no `Magic` and no `Schema Version` of its own. Frames carrying it are versioned by the host feed. It is versioned independently of the feed specs that adopt it, because a subscriber and publisher operating under the same version of this supplement interoperate correctly regardless of which feed specs they implement. See the [Versioning Policy](../VERSIONING.md) for the full scheme.
 
 Future `1.x` versions of this supplement MAY, without a host-feed Schema Version bump:
 
@@ -207,5 +207,7 @@ The following is a known candidate that would be **breaking**, requiring a MAJOR
 The two-port transport model and the subscriber algorithm are stable for the `1.x` line.
 
 ### Changes
+
+**1.0.1** — editorial. Refreshed the bandwidth worked example for the 128-byte `InstrumentDefinition` introduced by the feed specs at their `2.0.0` (was 80 bytes), and corrected the `Manifest Seq` width rationale, which described reserved space that the widened layout no longer has. No change to this supplement.'s own requirements or to `ManifestSummary`.
 
 **1.0.0** — first stable release. Promoted from the `0.1.0` draft with no wire change.

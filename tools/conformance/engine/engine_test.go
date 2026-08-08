@@ -36,10 +36,11 @@ func TestEmitConditionalDowngrade(t *testing.T) {
 func TestEmitUnknownSchemaDowngrade(t *testing.T) {
 	cap := &capture{}
 	e := New(Config{Feed: core.FeedMBO}, cap)
-	e.beginFrame(2)                                                           // schema version 2 > implemented
-	e.Emit("FIELD.SIDE_ENUM", core.Violation, core.PortMktData, 0, 0, 0, "x") // v1-specific → downgrade
+	// MBO implements schema 2 (spec 2.x), so 3 is the first unknown-future one.
+	e.beginFrame(3)                                                           // schema version 3 > implemented
+	e.Emit("FIELD.SIDE_ENUM", core.Violation, core.PortMktData, 0, 0, 0, "x") // version-specific → downgrade
 	if cap.last.Severity == core.Must || cap.last.Status == core.Violation {
-		t.Fatal("v1-specific check must downgrade under unknown schema")
+		t.Fatal("version-specific check must downgrade under unknown schema")
 	}
 	e.Emit("FRAME.MAGIC_MISMATCH", core.Violation, core.PortMktData, 0, 0, 0, "x") // envelope → stays
 	if cap.last.Status != core.Violation {

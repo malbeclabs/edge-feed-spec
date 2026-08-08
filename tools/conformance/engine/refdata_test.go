@@ -103,16 +103,19 @@ func manifestBody(valid uint8, seq uint16, count uint32) func(*wb.Body) {
 }
 
 // --- InstrumentDefinition body builders ---
-// TOB/MBO InstrumentDef (80 bytes total = 4-byte header + 76-byte body):
+// TOB/MBO InstrumentDef (128 bytes total = 4-byte header + 124-byte body):
 //
-//	Body[0:4]  = Instrument ID (u32 LE)
-//	Body[4:74] = other fields (opaque for our purposes)
-//	Body[74:76]= Manifest Seq (u16 LE)  ← spec offset 78, body[74]
+//	Body[0:4]    = Instrument ID (u32 LE)
+//	Body[4:122]  = other fields (opaque for our purposes)
+//	Body[122:124]= Manifest Seq (u16 LE)  ← spec offset 126, body[122]
+//
+// Widened at spec 2.0.0: Symbol went char[16] → char[64], shifting every
+// field after it by 48 bytes.
 func instrDefTOBBody(instrID uint32, manifestSeq uint16) func(*wb.Body) {
 	return func(b *wb.Body) {
 		b.U32(instrID)     // Instrument ID (body off 0)
-		b.Pad(70)          // other fields (body off 4..73)
-		b.U16(manifestSeq) // Manifest Seq (body off 74) → total body 76 → msg 80
+		b.Pad(118)         // other fields (body off 4..121)
+		b.U16(manifestSeq) // Manifest Seq (body off 122) → total body 124 → msg 128
 	}
 }
 
@@ -584,7 +587,7 @@ func buildManifestFrame(magic uint16, valid uint8, seq uint16, count uint32) []b
 
 // buildInstrDefFrameTOB builds a raw frame with a TOB InstrumentDef.
 func buildInstrDefFrameTOB(instrID uint32, manifestSeq uint16) []byte {
-	return wb.Frame(wire.MagicTOB).Msg(0x02, 80, instrDefTOBBody(instrID, manifestSeq)).Bytes()
+	return wb.Frame(wire.MagicTOB).Msg(0x02, 128, instrDefTOBBody(instrID, manifestSeq)).Bytes()
 }
 
 // buildInstrDefFrameMid builds a raw frame with a Midpoint InstrumentDef.

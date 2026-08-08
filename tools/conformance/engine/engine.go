@@ -54,7 +54,23 @@ func New(cfg Config, rep report.Reporter) *Engine {
 	}
 }
 
-func (e *Engine) beginFrame(schemaVersion uint8) { e.curUnknownSchema = schemaVersion > 1 }
+// MagicFor returns the expected frame magic for the given feed.
+func MagicFor(feed core.Feed) uint16 {
+	switch feed {
+	case core.FeedTOB:
+		return wire.MagicTOB
+	case core.FeedMidpoint:
+		return wire.MagicMid
+	case core.FeedMBP:
+		return wire.MagicMBP
+	default: // FeedMBO
+		return wire.MagicMBO
+	}
+}
+
+func (e *Engine) beginFrame(schemaVersion uint8) {
+	e.curUnknownSchema = schemaVersion > wire.ExpectedSchemaVersion(MagicFor(e.cfg.Feed))
+}
 
 // Emit resolves severity from the registry, applying two downgrades:
 //   - Conditional must* rules downgrade unless their --expect-* config is set.

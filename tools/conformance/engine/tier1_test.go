@@ -210,12 +210,25 @@ func tier1Cases() []struct {
 			good: wb.Frame(wire.MagicTOB).Msg(wire.TypeHeartbeat, 16, heartbeatBody(0)).Bytes(),
 		},
 		{
+			// TOB is at spec 2.x, so Schema Version 2 is conformant and the
+			// stale 1 an un-migrated publisher would emit is a violation.
 			rule:  "FRAME.SCHEMA_VERSION",
 			feed:  core.FeedTOB,
 			magic: wire.MagicTOB,
 			port:  core.PortMktData,
-			bad:   wb.Frame(wire.MagicTOB).Schema(2).Msg(wire.TypeHeartbeat, 16, heartbeatBody(0)).Bytes(),
-			good:  wb.Frame(wire.MagicTOB).Schema(1).Msg(wire.TypeHeartbeat, 16, heartbeatBody(0)).Bytes(),
+			bad:   wb.Frame(wire.MagicTOB).Schema(1).Msg(wire.TypeHeartbeat, 16, heartbeatBody(0)).Bytes(),
+			good:  wb.Frame(wire.MagicTOB).Schema(2).Msg(wire.TypeHeartbeat, 16, heartbeatBody(0)).Bytes(),
+		},
+		{
+			// Midpoint stayed at spec 1.x when its siblings went to 2.x, so the
+			// expectation is per-feed. This case fails if the check is ever
+			// re-hardcoded to a single global value.
+			rule:  "FRAME.SCHEMA_VERSION",
+			feed:  core.FeedMidpoint,
+			magic: wire.MagicMid,
+			port:  core.PortMktData,
+			bad:   wb.Frame(wire.MagicMid).Schema(2).Msg(wire.TypeHeartbeat, 16, heartbeatBody(0)).Bytes(),
+			good:  wb.Frame(wire.MagicMid).Schema(1).Msg(wire.TypeHeartbeat, 16, heartbeatBody(0)).Bytes(),
 		},
 		{
 			rule:  "FRAME.MSG_COUNT_RANGE",
