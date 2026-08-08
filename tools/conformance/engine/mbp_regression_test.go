@@ -26,9 +26,9 @@ func TestRefdataSnapshotFlagRegression(t *testing.T) {
 		want  bool
 	}{
 		{"manifest as-shipped", wire.TypeManifest, 24, 0x0001, true},
-		{"instrument def as-shipped", wire.TypeInstrumentDef, 80, 0x0001, true},
+		{"instrument def as-shipped", wire.TypeInstrumentDef, 128, 0x0001, true},
 		{"manifest with bit 0 cleared", wire.TypeManifest, 24, 0x0000, false},
-		{"instrument def with bit 0 cleared", wire.TypeInstrumentDef, 80, 0x0000, false},
+		{"instrument def with bit 0 cleared", wire.TypeInstrumentDef, 128, 0x0000, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			raw := wb.Frame(wire.MagicMBP).

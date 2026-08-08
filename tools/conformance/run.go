@@ -20,18 +20,7 @@ import (
 )
 
 // magicFor returns the expected frame magic for the given feed.
-func magicFor(feed core.Feed) uint16 {
-	switch feed {
-	case core.FeedTOB:
-		return wire.MagicTOB
-	case core.FeedMidpoint:
-		return wire.MagicMid
-	case core.FeedMBP:
-		return wire.MagicMBP
-	default: // FeedMBO
-		return wire.MagicMBO
-	}
-}
+func magicFor(feed core.Feed) uint16 { return engine.MagicFor(feed) }
 
 // buildPortMap constructs the UDP-port → core.Port map from the provided opts.
 // Ports that are zero are not added to the map.
