@@ -4,7 +4,7 @@ The DoubleZero Market-by-Price Feed is a wire format for price-aggregated (L2) b
 
 This is a sibling protocol to the DoubleZero Top-of-Book & Trades Feed, the DoubleZero Midpoint Feed, and the DoubleZero Market-by-Order Feed, not a layer on top. Where the top-of-book feed carries two-sided BBO data and trades, the midpoint feed carries a single derived price per instrument, and the market-by-order feed carries the full resting-order population, this feed carries the aggregate resting quantity at every price level of each instrument — the price-aggregated projection of the same book the market-by-order feed carries order-by-order — plus a continuous in-band snapshot mechanism that lets subscribers bootstrap and recover from packet loss over multicast alone.
 
-This document specifies the frame header, application message header, the message types sufficient to operate a working publisher and subscriber, and the sequence-number-anchored snapshot/delta recovery model that is the core of the design.
+This document specifies version **1.0.0**: the frame header, application message header, the message types sufficient to operate a working publisher and subscriber, and the sequence-number-anchored snapshot/delta recovery model that is the core of the design.
 
 ---
 
@@ -82,7 +82,7 @@ The snapshot stream has a fundamentally different traffic shape from the delta s
 | Offset | Field | Type | Description |
 |--------|-------|------|-------------|
 | 0 | Magic | `u16` | `0x4442`. Frame delimiter. Distinct from the top-of-book feed's `0x445A`, the market-by-order feed's `0x4444`, the midpoint feed's `0x4D44`, the order-intent feed's `0x494F`, and the perp-stats feed's `0x4450` to prevent cross-protocol misrouting. A consumer MUST validate that a received frame's `Magic` equals the value for the feed it subscribed to and discard any frame that does not match. |
-| 2 | Schema Version | `u8` | Protocol version. Starts at `1`. A subscriber MUST discard frames whose version it does not implement. |
+| 2 | Schema Version | `u8` | Wire format generation, equal to this spec's MAJOR version. `1` for all `1.x.y` releases. A subscriber MUST discard frames whose version it does not implement. |
 | 3 | Channel ID | `u8` | Logical channel for instrument sharding. |
 | 4 | Sequence Number | `u64` | Monotonically increasing **per channel per port**, starting from 0. Resets to 0 when `Reset Count` changes. Used for per-port gap detection. The `mktdata`, `refdata`, and `snapshot` ports each have an independent `Sequence Number` series; see [Sequence Numbers and Recovery](#sequence-numbers-and-recovery) for how the series relate. |
 | 12 | Send Timestamp | `ts_ns` | When the publisher sent this frame. |
@@ -887,12 +887,18 @@ The relationship to the market-by-order feed is one of projection, not layering:
 
 ## Versioning and Forward Compatibility
 
-The Schema Version byte in the frame header is `1` for this release. Future versions of this specification MAY:
+This document is version **1.0.0**, versioned independently of the sibling specs. The Schema Version byte in the frame header is `1` and equals this spec's MAJOR version, so it stays `1` for every `1.x.y` release and changes only on a breaking wire change. See the [Versioning Policy](../VERSIONING.md) for the full rule, the change classification, and the tag scheme.
+
+Future `1.x` versions of this specification MAY, without a Schema Version bump:
 
 - Append new fields to existing messages (old decoders ignore trailing bytes within the declared Message Length).
 - Define new message types in currently-reserved type ID ranges (old decoders skip unknown types using the Message Length field).
 - Define new values for enumerated fields such as Update Reason, Clear Reason, Reset Reason, and Level Flags. Decoders MUST accept any `u8` value.
 - Define a positional-index addressing mode in the reserved `0x50`–`0x5F` range, for venues whose upstream identifies levels by rank rather than price. Such a mode would add message types rather than reinterpret the ones defined here, so existing subscribers skip it by `Message Length` and no addressing-mode negotiation is introduced. It is not defined in this version and MUST NOT be added speculatively.
-- Promote `Trade` to a shared cross-spec supplement (requires coordinated version bump of this spec and the top-of-book feed).
+- Promote `Trade` to a shared cross-spec supplement. This is editorial if the layout is unchanged, but requires a coordinated release of this spec and the top-of-book feed.
 
-Existing field layouts and semantics will not change within the v0.x line without a Schema Version bump.
+Existing field layouts and semantics will not change within the `1.x` line. A change that moves or resizes a field, alters a message length, or redefines existing semantics requires a MAJOR release and a Schema Version bump, which old decoders MUST reject rather than parse.
+
+### Changes
+
+**1.0.0** — first stable release. Promoted from draft with no wire change; Schema Version was `1` before and after.

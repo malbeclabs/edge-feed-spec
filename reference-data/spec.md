@@ -4,7 +4,7 @@ This supplement defines a continuous in-band mechanism for DoubleZero Edge feeds
 
 The mechanism is payload-independent. Any feed in the DoubleZero Edge family that uses the shared 24-byte frame header and 4-byte application message header MAY adopt it. The Top-of-Book & Trades Feed and the Midpoint Feed both do.
 
-This document specifies version **0.1.0**: the two-port transport model, the `ManifestSummary` message, the publisher cadence requirements, and the subscriber algorithm.
+This document specifies version **1.0.0**: the two-port transport model, the `ManifestSummary` message, the publisher cadence requirements, and the subscriber algorithm.
 
 ---
 
@@ -192,13 +192,20 @@ The subscriber sees a `ManifestSummary` within `M` seconds (worst case), then wa
 
 ## Forward Compatibility
 
-This supplement is versioned independently of the feed specs that adopt it. A subscriber and publisher operating under the same version of this supplement interoperate correctly regardless of which feed specs they implement.
+This document is version **1.0.0**. It is a supplement, not a feed: it defines a mechanism that rides on a host feed's frame header and therefore has no `Magic` and no `Schema Version` of its own. Frames carrying it are versioned by the host feed. It is versioned independently of the feed specs that adopt it, because a subscriber and publisher operating under the same version of this supplement interoperate correctly regardless of which feed specs they implement. See the [Versioning Policy](../VERSIONING.md) for the full scheme.
 
-Future versions of this supplement MAY:
+Future `1.x` versions of this supplement MAY, without a host-feed Schema Version bump:
 
-- Widen `Manifest Seq` to `u32` (with a corresponding feed-spec schema bump).
 - Add optional fields to `ManifestSummary` (append-only; old decoders ignore trailing bytes).
 - Define new reference-data message types in currently-reserved type ID ranges.
 - Add an optional `manifest_hash` field to `ManifestSummary` for defense against publisher bugs in single- or multi-publisher channels.
 
-The two-port transport model and the subscriber algorithm are stable for the v0.1.x line.
+The following is a known candidate that would be **breaking**, requiring a MAJOR release of this supplement and a coordinated MAJOR release plus Schema Version bump of every host feed that adopts it:
+
+- Widen `Manifest Seq` to `u32`.
+
+The two-port transport model and the subscriber algorithm are stable for the `1.x` line.
+
+### Changes
+
+**1.0.0** — first stable release. Promoted from the `0.1.0` draft with no wire change.

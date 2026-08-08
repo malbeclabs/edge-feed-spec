@@ -4,7 +4,7 @@ The DoubleZero Order-Intent Feed is a wire format for normalized, pre-consensus 
 
 This is a sibling protocol to the DoubleZero [Top-of-Book & Trades Feed](../top-of-book/spec.md), the [Market-by-Order Feed](../market-by-order/spec.md), and the [Midpoint Feed](../midpoint/spec.md), not a layer on top. Where those feeds carry accepted book state — quotes, resting orders, mid prices — this feed carries *intent*: every successfully normalized supported submission, plus dead-man-switch arm/disarm, as a fixed-size binary message.
 
-This document specifies version **0.1.0**: the frame header, application message header, and the message types that define the wire format. The wire format is venue-generic; the per-venue derivations it deliberately does not fix (account-id encoding, Action Tag rule, source-message mapping) are defined out of band by each venue's publisher and are not part of this specification. The [Source ID Registry](../sources/spec.md) only assigns the Source ID → venue mapping.
+This document specifies version **1.0.0**: the frame header, application message header, and the message types that define the wire format. The wire format is venue-generic; the per-venue derivations it deliberately does not fix (account-id encoding, Action Tag rule, source-message mapping) are defined out of band by each venue's publisher and are not part of this specification. The [Source ID Registry](../sources/spec.md) only assigns the Source ID → venue mapping.
 
 **Trust semantics (normative).** Events are *observed signed submissions*, not accepted orders. An event may reference an invalid order, a replay, an action the venue later rejects, or intent that never executes. The publisher performs no venue-level validation: it *attempts* signature recovery to attribute the event, but recovery is **not a gate on publication** — when recovery fails or is skipped, the event is still published with a zeroed Signer and the `signer unverified` flag (an unauthenticated observation; see [Common Event Fields](#common-event-fields)). Subscribers MUST treat the feed as intent, never as fills or book state. The boundary is syntactic, not semantic: values that parse and convert exactly are published as-is even if venue-invalid (zero quantity, a past schedule-cancel time, an order id that never existed). "Successfully normalized" means malformed, unmappable, or precision-violating entries are dropped; the feed does not promise every observed submission.
 
@@ -78,7 +78,7 @@ v1 uses a single channel (ID 0). The frame header supports instrument sharding a
 | Offset | Field | Type | Description |
 |--------|-------|------|-------------|
 | 0 | Magic | `u16` | `0x494F` ("OI", wire bytes `[0x4F, 0x49]`). Frame delimiter. Distinct from the top-of-book feed's `0x445A`, the market-by-order feed's `0x4444`, and the midpoint feed's `0x4D44` to prevent cross-protocol misrouting. |
-| 2 | Schema Version | `u8` | Protocol version. Starts at `1`. |
+| 2 | Schema Version | `u8` | Wire format generation, equal to this spec's MAJOR version. `1` for all `1.x.y` releases. A subscriber MUST discard frames whose version it does not implement. |
 | 3 | Channel ID | `u8` | Logical channel for instrument sharding. `0` in v1. |
 | 4 | Sequence Number | `u64` | Monotonically increasing **per publisher host, per channel, per port**, starting from 0. Resets to 0 when `Reset Count` changes. Used for per-port gap detection. The `mktdata` and `refdata` ports each have an independent series. The frame header carries no Source ID, so a subscriber binding several hosts on one multicast group sees one independent sequence series **per originating host** and MUST track them keyed by transport origin (the datagram's source IP and destination port; each host of a venue publishes on a distinct destination port, and the per-host port offset is a deployment convention defined out of band, not by this spec). Hosts of one venue all carry the **same** Source ID (per-venue; see [Common Event Fields](#common-event-fields)), so the host is identified by transport, not by the in-message Source ID. Sequence gaps are a per-host, per-channel, per-port health signal and never gate delivery. |
 | 12 | Send Timestamp | `ts_ns` | When the publisher sent this frame. Subscribers can measure publisher-internal latency as the difference from a message's Source Timestamp. |
@@ -454,11 +454,19 @@ A publisher MAY operate any subset of the sibling feeds for the same instruments
 
 ## Versioning and Forward Compatibility
 
-The Schema Version byte in the frame header is `1` for this release (spec version **0.1.0**). Future versions of this specification MAY:
+This document is version **1.0.0**, versioned independently of the sibling specs. The Schema Version byte in the frame header is `1` and equals this spec's MAJOR version, so it stays `1` for every `1.x.y` release and changes only on a breaking wire change. See the [Versioning Policy](../VERSIONING.md) for the full rule, the change classification, and the tag scheme.
+
+Future `1.x` versions of this specification MAY, without a Schema Version bump:
 
 - Append new fields to existing messages (old decoders ignore trailing bytes within the declared Message Length).
 - Define new message types in currently-reserved Type ID ranges (old decoders skip unknown types using the Message Length field).
 - Define new values for enumerated fields such as Side, Order Type, TIF, and Grouping (decoders MUST accept any `u8` value and treat an unrecognized one as the field's unknown/unspecified member — `2` for Side, `0` for the others).
 - Define new Event Flag bits (decoders MUST ignore flag bits they do not recognize).
 
-Existing field layouts and semantics will not change within the v0.x line without a Schema Version bump.
+Existing field layouts and semantics will not change within the `1.x` line. A change that moves or resizes a field, alters a message length, or redefines existing semantics requires a MAJOR release and a Schema Version bump, which old decoders MUST reject rather than parse.
+
+Note that the per-venue derivations this spec deliberately leaves out of band (account-id encoding, Action Tag rule, source-message mapping) are not part of the wire format and are therefore outside this versioning scheme. A venue changing its Action Tag derivation does not bump this spec's version, and the wire carries no signal of it. That is a property of the design, not an oversight: see [Common Event Fields](#common-event-fields).
+
+### Changes
+
+**1.0.0** — first stable release. Promoted from the `0.1.0` draft with no wire change; Schema Version was `1` before and after.

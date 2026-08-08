@@ -4,7 +4,7 @@ The DoubleZero Market-by-Order Feed is a wire format for market-by-order (MBO) b
 
 This is a sibling protocol to the DoubleZero Top-of-Book & Trades Feed and the DoubleZero Midpoint Feed, not a layer on top. Where the top-of-book feed carries two-sided BBO data and trades and the midpoint feed carries a single derived price per instrument, this feed carries the full resting-order population of each instrument, plus a continuous in-band snapshot mechanism that lets subscribers bootstrap and recover from packet loss over multicast alone.
 
-This document specifies the frame header, application message header, the message types sufficient to operate a working publisher and subscriber, and the sequence-number-anchored snapshot/delta recovery model that is the core of the design.
+This document specifies version **1.0.0**: the frame header, application message header, the message types sufficient to operate a working publisher and subscriber, and the sequence-number-anchored snapshot/delta recovery model that is the core of the design.
 
 ---
 
@@ -80,7 +80,7 @@ The snapshot stream has a fundamentally different traffic shape from the delta s
 | Offset | Field | Type | Description |
 |--------|-------|------|-------------|
 | 0 | Magic | `u16` | `0x4444`. Frame delimiter. Distinct from the top-of-book feed's `0x445A` and the midpoint feed's `0x4D44` to prevent cross-protocol misrouting. |
-| 2 | Schema Version | `u8` | Protocol version. Starts at `1`. |
+| 2 | Schema Version | `u8` | Wire format generation, equal to this spec's MAJOR version. `1` for all `1.x.y` releases. A subscriber MUST discard frames whose version it does not implement. |
 | 3 | Channel ID | `u8` | Logical channel for instrument sharding. |
 | 4 | Sequence Number | `u64` | Monotonically increasing **per channel per port**, starting from 0. Resets to 0 when `Reset Count` changes. Used for per-port gap detection. The `mktdata`, `refdata`, and `snapshot` ports each have an independent `Sequence Number` series; see [Sequence Numbers and Recovery](#sequence-numbers-and-recovery) for how the series relate. |
 | 12 | Send Timestamp | `ts_ns` | When the publisher sent this frame. |
@@ -771,13 +771,22 @@ A publisher MAY operate any subset of the sibling feeds for the same instruments
 
 ## Versioning and Forward Compatibility
 
-The Schema Version byte in the frame header is `1` for this release. Future versions of this specification MAY:
+This document is version **1.0.0**, versioned independently of the sibling specs. The Schema Version byte in the frame header is `1` and equals this spec's MAJOR version, so it stays `1` for every `1.x.y` release and changes only on a breaking wire change. See the [Versioning Policy](../VERSIONING.md) for the full rule, the change classification, and the tag scheme.
+
+Future `1.x` versions of this specification MAY, without a Schema Version bump:
 
 - Append new fields to existing messages (old decoders ignore trailing bytes within the declared Message Length).
 - Define new message types in currently-reserved type ID ranges (old decoders skip unknown types using the Message Length field).
 - Define new values for enumerated fields such as Cancel Reason, Reset Reason, Order Flags, and Exec Flags. Decoders MUST accept any `u8` value.
-- Promote `Trade` to a shared cross-spec supplement (requires coordinated version bump of this spec and the top-of-book feed).
-- Widen `Per-Instrument Seq` to `u64` if `u32` wraparound becomes a practical concern within a single `Reset Count` era (requires Schema Version bump).
 - Introduce an optional `OrderModify` message type for venues with true in-place modification semantics.
+- Promote `Trade` to a shared cross-spec supplement. This is editorial if the layout is unchanged, but requires a coordinated release of this spec and the top-of-book feed.
 
-Existing field layouts and semantics will not change within the v0.x line without a Schema Version bump.
+Existing field layouts and semantics will not change within the `1.x` line. The following are known candidates that would be **breaking**, and each requires a MAJOR release and a Schema Version bump:
+
+- Widen `Per-Instrument Seq` to `u64` if `u32` wraparound becomes a practical concern within a single `Reset Count` era.
+
+A subscriber MUST reject a frame whose Schema Version it does not implement rather than attempt a best-effort parse.
+
+### Changes
+
+**1.0.0** — first stable release. Promoted from draft with no wire change; Schema Version was `1` before and after. Includes the `0x08 Liquidation` shared trade-companion type added during the draft period.
