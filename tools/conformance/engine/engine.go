@@ -68,6 +68,24 @@ func MagicFor(feed core.Feed) uint16 {
 	}
 }
 
+// beginFrame marks whether this frame's schema is one we implement, which gates
+// the downgrade of version-specific rules in Emit.
+//
+// The test is deliberately > and not !=, i.e. only a *future* schema downgrades.
+// A stale lower one (a publisher still emitting Schema Version 1 after its feed
+// moved to 2) does produce derived noise: a per-type length violation, and a
+// short body that makes Manifest Seq read as 0 and trip the refdata rules. But
+// != would suppress every non-envelope rule on such a stream, and those rules
+// are still finding real defects — on the bundled pre-2.0 nonconformant_mbp
+// capture it silently drops MSG.SNAPSHOT_FLAG_MATCHES_PORT from 6 violations to
+// 0. A rule that stops running reports the same thing as a rule that checked
+// everything and found nothing, which is the failure mode this tool is built to
+// avoid (see "Coverage vs. silence" in the README). Noise is recoverable;
+// silence is not. FRAME.SCHEMA_VERSION is an envelope rule, so the actionable
+// finding is present at full severity under either choice.
+//
+// Validating a capture from a prior MAJOR properly needs multi-version decode
+// support, which is a feature, not a gate tweak.
 func (e *Engine) beginFrame(schemaVersion uint8) {
 	e.curUnknownSchema = schemaVersion > wire.ExpectedSchemaVersion(MagicFor(e.cfg.Feed))
 }

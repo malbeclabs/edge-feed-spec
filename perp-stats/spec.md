@@ -171,7 +171,7 @@ Only the `HlPerp` entry of `predictedFundings` is relayed. CEX entries (Binance,
 
 ### Full Sweep Per Poll
 
-On each `metaAndAssetCtxs` poll, the publisher emits a **full sweep**: one `PerpStats` message per active perpetual, packed into frames up to the 1,232-byte MTU (~28 KB for ~230 perps, ~20 frames per sweep, ~0.2 Mbps at 1 s cadence). The interval between sweeps equals the poll cadence.
+On each `metaAndAssetCtxs` poll, the publisher emits a **full sweep**: one `PerpStats` message per active perpetual, packed into frames up to the 1,232-byte MTU (~28 KB for ~230 perps, ~26 frames per sweep at 9 messages per frame, ~0.2 Mbps at 1 s cadence). The interval between sweeps equals the poll cadence.
 
 This is a deliberate departure from the Reference Data Distribution supplement's *cycling* model for `InstrumentDefinition`. That model spreads definitions evenly across a 30-second cycle and MUST NOT burst, because definitions rarely change and the goal is steady-state recovery coverage. `PerpStats` is the opposite: the entire active set genuinely refreshes every poll, so emitting the full sweep promptly per poll is correct, not a retransmission violation.
 

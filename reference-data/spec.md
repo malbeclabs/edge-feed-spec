@@ -2,7 +2,7 @@
 
 This supplement defines a continuous in-band mechanism for DoubleZero Edge feeds to advertise their active instrument set. It allows new subscribers to reach a complete reference-data state without an offline file, an out-of-band catalog, or a replay service.
 
-The mechanism is payload-independent. Any feed in the DoubleZero Edge family that uses the shared 24-byte frame header and 4-byte application message header MAY adopt it. The Top-of-Book & Trades Feed and the Midpoint Feed both do.
+The mechanism is payload-independent. Any feed in the DoubleZero Edge family that uses the shared 24-byte frame header and 4-byte application message header MAY adopt it. All six currently do: the Top-of-Book & Trades, Midpoint, Market-by-Order, Market-by-Price, Order-Intent, and Perp Stats feeds each carry `ManifestSummary` on their `refdata` port and a `Manifest Seq` field in their `InstrumentDefinition`.
 
 This document specifies version **1.0.1**: the two-port transport model, the `ManifestSummary` message, the publisher cadence requirements, and the subscriber algorithm.
 
@@ -65,7 +65,7 @@ A new application message type, advertised periodically on the reference-data po
 
 Every feed adopting this supplement MUST add a `Manifest Seq (u16)` field to its `InstrumentDefinition` message. The field carries the value of the publisher's current `Manifest Seq` at the time the definition was emitted.
 
-The field is `u16` (not `u32`) so that it fit within the Reserved space already present in the `InstrumentDefinition` layouts when this supplement was introduced, without bumping the message length at the time. Subscribers MUST compare manifest sequence numbers using modular ordering (i.e., `(new − old) mod 65536 < 32768` means `new` is later). If wraparound becomes a practical concern, a later schema version may widen the field.
+The field is `u16` (not `u32`) so that it would fit within the Reserved space already present in the `InstrumentDefinition` layouts when this supplement was introduced, without bumping the message length at the time. Subscribers MUST compare manifest sequence numbers using modular ordering (i.e., `(new − old) mod 65536 < 32768` means `new` is later). If wraparound becomes a practical concern, a later schema version may widen the field.
 
 The exact byte offset of `Manifest Seq` within `InstrumentDefinition` is feed-specific and is documented in each feed's spec.
 
@@ -208,6 +208,6 @@ The two-port transport model and the subscriber algorithm are stable for the `1.
 
 ### Changes
 
-**1.0.1** — editorial. Refreshed the bandwidth worked example for the 128-byte `InstrumentDefinition` introduced by the feed specs at their `2.0.0` (was 80 bytes), and corrected the `Manifest Seq` width rationale, which described reserved space that the widened layout no longer has. No change to this supplement.'s own requirements or to `ManifestSummary`.
+**1.0.1** — editorial. Refreshed the bandwidth worked example for the 128-byte `InstrumentDefinition` introduced by the feed specs at their `2.0.0` (was 80 bytes), and corrected the `Manifest Seq` width rationale, which described reserved space that the widened layout no longer has. No change to this supplement's own requirements or to `ManifestSummary`.
 
 **1.0.0** — first stable release. Promoted from the `0.1.0` draft with no wire change.

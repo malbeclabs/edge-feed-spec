@@ -47,3 +47,28 @@ func TestEmitUnknownSchemaDowngrade(t *testing.T) {
 		t.Fatal("envelope check must still fire under unknown schema")
 	}
 }
+
+// TestEmitStaleSchemaKeepsChecking pins the deliberate asymmetry in beginFrame:
+// a *future* schema downgrades version-specific rules, a *stale* one does not.
+//
+// Suppressing on stale would read as the friendlier migration behaviour, but it
+// silences rules that are still catching real defects — on the bundled pre-2.0
+// nonconformant_mbp capture it drops MSG.SNAPSHOT_FLAG_MATCHES_PORT from 6
+// violations to 0, turning a regression fixture into a clean-looking run. If
+// this test ever fails because someone changed > to !=, read the beginFrame
+// comment before "fixing" it.
+func TestEmitStaleSchemaKeepsChecking(t *testing.T) {
+	cap := &capture{}
+	e := New(Config{Feed: core.FeedMBO}, cap) // MBO implements schema 2
+	e.beginFrame(1)                           // stale 1.x publisher
+
+	e.Emit("MSG.LENGTH_PER_TYPE", core.Violation, core.PortRefData, 0, 0, 0, "x")
+	if cap.last.Status != core.Violation {
+		t.Fatal("a stale schema must NOT silence version-specific rules; they still catch real defects")
+	}
+
+	e.Emit("FRAME.SCHEMA_VERSION", core.Violation, core.PortRefData, 0, 0, 0, "x")
+	if cap.last.Status != core.Violation {
+		t.Fatal("FRAME.SCHEMA_VERSION is an envelope rule and must report the stale version itself")
+	}
+}
