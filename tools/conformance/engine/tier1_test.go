@@ -491,6 +491,18 @@ func tier1Cases() []struct {
 	}
 }
 
+// TestInstrumentDefinitionLengthIsFeedSpecific catches a shared length table
+// that either leaves the non-midpoint v3 definition at 128 bytes or changes
+// Midpoint's independent 64-byte layout with it.
+func TestInstrumentDefinitionLengthIsFeedSpecific(t *testing.T) {
+	if got := expectedMsgLen(core.FeedTOB, wire.TypeInstrumentDef); got != 130 {
+		t.Fatalf("TOB InstrumentDefinition length = %d, want 130", got)
+	}
+	if got := expectedMsgLen(core.FeedMidpoint, wire.TypeInstrumentDef); got != 64 {
+		t.Fatalf("Midpoint InstrumentDefinition length = %d, want 64", got)
+	}
+}
+
 // TestTier1Rules is the main table-driven test: each case must fire on `bad`
 // and remain silent on `good`.
 func TestTier1Rules(t *testing.T) {

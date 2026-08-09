@@ -215,8 +215,9 @@ func feedTwoInstrRefdata(e *Engine, ch uint8, instrA, instrB uint32, startSeq ui
 	// InstrumentDefinition for instrA.
 	rawDefA := wb.Frame(wire.MagicMBO).
 		Channel(ch).
-		Msg(wire.TypeInstrumentDef, 128, func(b *wb.Body) {
+		Msg(wire.TypeInstrumentDef, 130, func(b *wb.Body) {
 			b.U32(instrA) // Instrument ID
+			b.U16(1)      // Source ID
 			b.Pad(117)
 			b.U8(0)  // priceBound
 			b.U16(1) // Manifest Seq
@@ -227,8 +228,9 @@ func feedTwoInstrRefdata(e *Engine, ch uint8, instrA, instrB uint32, startSeq ui
 	// InstrumentDefinition for instrB.
 	rawDefB := wb.Frame(wire.MagicMBO).
 		Channel(ch).
-		Msg(wire.TypeInstrumentDef, 128, func(b *wb.Body) {
+		Msg(wire.TypeInstrumentDef, 130, func(b *wb.Body) {
 			b.U32(instrB) // Instrument ID
+			b.U16(1)      // Source ID
 			b.Pad(117)
 			b.U8(0)  // priceBound
 			b.U16(1) // Manifest Seq
