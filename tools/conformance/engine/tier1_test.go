@@ -210,17 +210,17 @@ func tier1Cases() []struct {
 			good: wb.Frame(wire.MagicTOB).Msg(wire.TypeHeartbeat, 16, heartbeatBody(0)).Bytes(),
 		},
 		{
-			// TOB is at spec 2.x, so Schema Version 2 is conformant and the
-			// stale 1 an un-migrated publisher would emit is a violation.
+			// TOB is at spec 3.x, so Schema Version 3 is conformant and the
+			// stale 2 an un-migrated publisher would emit is a violation.
 			rule:  "FRAME.SCHEMA_VERSION",
 			feed:  core.FeedTOB,
 			magic: wire.MagicTOB,
 			port:  core.PortMktData,
-			bad:   wb.Frame(wire.MagicTOB).Schema(1).Msg(wire.TypeHeartbeat, 16, heartbeatBody(0)).Bytes(),
-			good:  wb.Frame(wire.MagicTOB).Schema(2).Msg(wire.TypeHeartbeat, 16, heartbeatBody(0)).Bytes(),
+			bad:   wb.Frame(wire.MagicTOB).Schema(2).Msg(wire.TypeHeartbeat, 16, heartbeatBody(0)).Bytes(),
+			good:  wb.Frame(wire.MagicTOB).Schema(3).Msg(wire.TypeHeartbeat, 16, heartbeatBody(0)).Bytes(),
 		},
 		{
-			// Midpoint stayed at spec 1.x when its siblings went to 2.x, so the
+			// Midpoint stayed at spec 1.x when its siblings went to 3.x, so the
 			// expectation is per-feed. This case fails if the check is ever
 			// re-hardcoded to a single global value.
 			rule:  "FRAME.SCHEMA_VERSION",

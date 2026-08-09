@@ -19,13 +19,13 @@ const (
 // Per VERSIONING.md the byte equals the spec's MAJOR version, so it is
 // per-feed, not global. The midpoint feed kept its slimmed 64-byte
 // InstrumentDefinition when the other five widened Symbol to char[64], so it
-// remains at spec 1.x while its siblings are at 2.x. Keying on magic rather
+// remains at spec 1.x while its siblings are at 3.x. Keying on magic rather
 // than core.Feed avoids an import cycle and is exact: magic identifies the feed.
 func ExpectedSchemaVersion(magic uint16) uint8 {
 	if magic == MagicMid {
 		return 1
 	}
-	return 2
+	return 3
 }
 
 // Message type IDs (shared + per-feed).
