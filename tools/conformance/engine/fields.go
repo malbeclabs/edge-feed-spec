@@ -210,7 +210,7 @@ func manifestFields(m wire.Message) (valid uint8, seq uint16, count uint32) {
 //
 // Manifest Seq placement is feed-specific:
 //
-//	TOB/MBO: 128-byte message; spec offset 126 → Body[122]
+//	TOB/MBO: 130-byte message; spec offset 128 → Body[124]
 //	Midpoint: 64-byte message; spec offset 60 → Body[56]
 //
 // Midpoint InstrumentDefinition additional fields (64-byte message):
@@ -218,16 +218,16 @@ func manifestFields(m wire.Message) (valid uint8, seq uint16, count uint32) {
 //	Default Method at spec offset 42 → Body[38]
 //	Price Bound    at spec offset 43 → Body[39]
 //
-// MBO/TOB InstrumentDefinition additional fields (128-byte message):
+// MBO/TOB InstrumentDefinition additional fields (130-byte message):
 //
-//	Price Bound at spec offset 125 → Body[121]
+//	Price Bound at spec offset 127 → Body[123]
 //
-// The non-midpoint offsets moved at spec 2.0.0, which widened Symbol from
-// char[16] to char[64] and shifted every field after it by 48 bytes. Midpoint
-// kept its 64-byte variant and is unchanged.
+// The non-midpoint offsets moved again at spec 3.0.0, which inserted Source ID
+// after Instrument ID and shifted every later field by two bytes. Midpoint kept
+// its 64-byte variant and is unchanged.
 func instrDefInstrumentID(m wire.Message) uint32 { return bodyU32LE(m, 0) }
 
-func instrDefManifestSeqTOBMBO(m wire.Message) uint16 { return bodyU16LE(m, 122) }
+func instrDefManifestSeqTOBMBO(m wire.Message) uint16 { return bodyU16LE(m, 124) }
 func instrDefManifestSeqMid(m wire.Message) uint16    { return bodyU16LE(m, 56) }
 
 // instrDefDefaultMethodMid returns the Default Method for a Midpoint InstrumentDefinition.
@@ -239,13 +239,13 @@ func instrDefDefaultMethodMid(m wire.Message) uint8 { return bodyU8(m, 38) }
 func instrDefPriceBoundMid(m wire.Message) uint8 { return bodyU8(m, 39) }
 
 // instrDefPriceBoundMBO returns the Price Bound for an MBO/TOB InstrumentDefinition.
-// spec offset 125 → Body[121].
-func instrDefPriceBoundMBO(m wire.Message) uint8 { return bodyU8(m, 121) }
+// spec offset 127 → Body[123].
+func instrDefPriceBoundMBO(m wire.Message) uint8 { return bodyU8(m, 123) }
 
 // instrDefAllFields extracts (instrumentID, manifestSeq, defaultMethod, priceBound)
 // from an InstrumentDefinition, choosing feed-correct offsets.
 // defaultMethod is only meaningful for FeedMidpoint.
-// priceBound is extracted for FeedMidpoint (Body[39]) and FeedMBO (Body[73]);
+// priceBound is extracted for FeedMidpoint (Body[39]) and FeedMBO (Body[123]);
 // it is zero for FeedTOB.
 func instrDefAllFields(feed core.Feed, m wire.Message) (instrID uint32, manifestSeq uint16, defaultMethod, priceBound uint8) {
 	instrID = instrDefInstrumentID(m)

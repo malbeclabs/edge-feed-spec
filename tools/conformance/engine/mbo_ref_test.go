@@ -163,15 +163,16 @@ func reachedReadyMBO(e *Engine, ch uint8, instrID uint32, priceBound uint8, star
 	e.Process(fMf, core.PortRefData, sfMf)
 	seq++
 
-	// InstrumentDefinition (128-byte MBO): priceBound at body[121].
-	// Widened at spec 2.0.0 (Symbol char[16] → char[64], +48 bytes).
+	// InstrumentDefinition (130-byte MBO): priceBound at body[123].
+	// Source ID was inserted at spec 3.0.0, shifting later fields by 2 bytes.
 	rawDef := wb.Frame(wire.MagicMBO).
 		Channel(ch).
-		Msg(wire.TypeInstrumentDef, 128, func(b *wb.Body) {
+		Msg(wire.TypeInstrumentDef, 130, func(b *wb.Body) {
 			b.U32(instrID)   // body[0]   Instrument ID
-			b.Pad(117)       // body[4..120] opaque
-			b.U8(priceBound) // body[121] Price Bound
-			b.U16(1)         // body[122] Manifest Seq = 1
+			b.U16(1)         // body[4]   Source ID
+			b.Pad(117)       // body[6..122] opaque
+			b.U8(priceBound) // body[123] Price Bound
+			b.U16(1)         // body[124] Manifest Seq = 1
 		}).
 		Bytes()
 	fDef, sfDef := wire.Decode(rawDef, wire.MagicMBO)

@@ -72,7 +72,7 @@ func SpecURL(id string, feed Feed) string {
 var ruleDocs = map[string]RuleDoc{
 	// --- Frame & message structure ---
 	"FRAME.MAGIC_MISMATCH":                         {"Frame magic matches the feed (MBO 0x4444, TOB 0x445A, Midpoint 0x4D44, MBP 0x4442)."},
-	"FRAME.SCHEMA_VERSION":                         {"Schema Version equals the feed spec's MAJOR version (2 for all feeds except midpoint, which is 1); any other value is flagged."},
+	"FRAME.SCHEMA_VERSION":                         {"Schema Version equals the feed spec's MAJOR version (3 for all feeds except midpoint, which is 1); any other value is flagged."},
 	"FRAME.MSG_COUNT_RANGE":                        {"Message Count is 1–255 and equals the messages actually present in the frame."},
 	"FRAME.LENGTH_CONSISTENCY":                     {"Declared Frame Length is 24–1232 bytes and equals 24 + the sum of contained message lengths."},
 	"FRAME.SEQ_DUP_DIVERGENT":                      {"A frame re-using a port sequence number carries identical payload; a divergent duplicate is non-conformant."},

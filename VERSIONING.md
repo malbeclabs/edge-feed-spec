@@ -32,16 +32,16 @@ The current state of every feed:
 
 | Spec | Frame `Magic` | `Schema Version` | Version |
 |------|---------------|------------------|---------|
-| [Top-of-Book & Trades](./top-of-book/spec.md) | `0x445A` | `2` | 2.0.0 |
+| [Top-of-Book & Trades](./top-of-book/spec.md) | `0x445A` | `3` | 3.0.0 |
 | [Midpoint](./midpoint/spec.md) | `0x4D44` | `1` | 1.0.0 |
-| [Market-by-Order](./market-by-order/spec.md) | `0x4444` | `2` | 2.0.0 |
-| [Market-by-Price](./market-by-price/spec.md) | `0x4442` | `2` | 2.0.0 |
-| [Order-Intent](./order-intent/spec.md) | `0x494F` | `2` | 2.0.0 |
-| [Perp Stats](./perp-stats/spec.md) | `0x4450` | `2` | 2.0.0 |
+| [Market-by-Order](./market-by-order/spec.md) | `0x4444` | `3` | 3.0.0 |
+| [Market-by-Price](./market-by-price/spec.md) | `0x4442` | `3` | 3.0.0 |
+| [Order-Intent](./order-intent/spec.md) | `0x494F` | `3` | 3.0.0 |
+| [Perp Stats](./perp-stats/spec.md) | `0x4450` | `3` | 3.0.0 |
 | [Reference Data Distribution](./reference-data/spec.md) | *(host feed's)* | *(host feed's)* | 1.0.1 |
 | [Source ID Registry](./sources/spec.md) | *(none)* | *(none)* | 1.0.0 |
 
-Midpoint sits at `1` while its siblings are at `2` because the `2.0.0` release widened `InstrumentDefinition`'s `Symbol` field and midpoint was deliberately left on its 64-byte variant. This is the scheme working as intended: the specs are siblings, not a single versioned family, and a decoder reads each feed's byte to know which layout it is holding.
+Midpoint sits at `1` while its siblings are at `3` because it was deliberately left on its 64-byte `InstrumentDefinition` variant when the shared layout changed at both `2.0.0` and `3.0.0`. This is the scheme working as intended: the specs are siblings, not a single versioned family, and a decoder reads each feed's byte to know which layout it is holding.
 
 `Magic` and `Schema Version` do different jobs and both are mandatory checks. `Magic` answers "is this the feed I subscribed to?" and rejects a misrouted sibling feed. `Schema Version` answers "is this a wire format I implement?" and rejects a future incompatible generation of the correct feed.
 
@@ -59,7 +59,7 @@ The additive row is only safe because every spec already requires decoders to sk
 
 Two changes already made under this rule, both `MINOR`, both with the byte left at `1`: `0x08 Liquidation` was added as a shared trade-companion message type, and Asset Class value `5` (Perpetual Future) was added.
 
-One `MAJOR` change has been made: widening `InstrumentDefinition`'s `Symbol` from `char[16]` to `char[64]` moved every field after it and grew the message from 80 to 128 bytes. Five feeds went to `2.0.0` with `Schema Version = 2`; midpoint kept its 64-byte variant and stayed at `1.0.0`.
+Two `MAJOR` changes have been made to the shared non-midpoint `InstrumentDefinition`. Version `2.0.0` widened `Symbol` from `char[16]` to `char[64]`, moving every later field and growing the message from 80 to 128 bytes. Version `3.0.0` inserted `Source ID` (`u16`) after `Instrument ID`, shifting every later field by two bytes and growing the message to 130 bytes. Five feeds now use `Schema Version = 3`; midpoint kept its 64-byte variant and stayed at `1.0.0`.
 
 ---
 

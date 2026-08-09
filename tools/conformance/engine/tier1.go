@@ -28,7 +28,7 @@ func expectedMsgLen(feed core.Feed, typ uint8) uint8 {
 		if feed == core.FeedMidpoint {
 			return 64
 		}
-		return 128
+		return 130
 	case wire.TypeQuote: // 0x03: Quote (TOB) or Midpoint
 		if feed == core.FeedTOB {
 			return 60

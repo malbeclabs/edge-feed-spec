@@ -210,17 +210,17 @@ func tier1Cases() []struct {
 			good: wb.Frame(wire.MagicTOB).Msg(wire.TypeHeartbeat, 16, heartbeatBody(0)).Bytes(),
 		},
 		{
-			// TOB is at spec 2.x, so Schema Version 2 is conformant and the
-			// stale 1 an un-migrated publisher would emit is a violation.
+			// TOB is at spec 3.x, so Schema Version 3 is conformant and the
+			// stale 2 an un-migrated publisher would emit is a violation.
 			rule:  "FRAME.SCHEMA_VERSION",
 			feed:  core.FeedTOB,
 			magic: wire.MagicTOB,
 			port:  core.PortMktData,
-			bad:   wb.Frame(wire.MagicTOB).Schema(1).Msg(wire.TypeHeartbeat, 16, heartbeatBody(0)).Bytes(),
-			good:  wb.Frame(wire.MagicTOB).Schema(2).Msg(wire.TypeHeartbeat, 16, heartbeatBody(0)).Bytes(),
+			bad:   wb.Frame(wire.MagicTOB).Schema(2).Msg(wire.TypeHeartbeat, 16, heartbeatBody(0)).Bytes(),
+			good:  wb.Frame(wire.MagicTOB).Schema(3).Msg(wire.TypeHeartbeat, 16, heartbeatBody(0)).Bytes(),
 		},
 		{
-			// Midpoint stayed at spec 1.x when its siblings went to 2.x, so the
+			// Midpoint stayed at spec 1.x when its siblings went to 3.x, so the
 			// expectation is per-feed. This case fails if the check is ever
 			// re-hardcoded to a single global value.
 			rule:  "FRAME.SCHEMA_VERSION",
@@ -488,6 +488,18 @@ func tier1Cases() []struct {
 			bad:  wb.Frame(wire.MagicMid).Msg(wire.TypeMidpoint, 40, midpointBody(1, 0, 2000 /*book*/, 1000 /*compute < book*/, 500)).Bytes(),
 			good: wb.Frame(wire.MagicMid).Msg(wire.TypeMidpoint, 40, midpointBody(1, 0, 1000, 2000, 500)).Bytes(),
 		},
+	}
+}
+
+// TestInstrumentDefinitionLengthIsFeedSpecific catches a shared length table
+// that either leaves the non-midpoint v3 definition at 128 bytes or changes
+// Midpoint's independent 64-byte layout with it.
+func TestInstrumentDefinitionLengthIsFeedSpecific(t *testing.T) {
+	if got := expectedMsgLen(core.FeedTOB, wire.TypeInstrumentDef); got != 130 {
+		t.Fatalf("TOB InstrumentDefinition length = %d, want 130", got)
+	}
+	if got := expectedMsgLen(core.FeedMidpoint, wire.TypeInstrumentDef); got != 64 {
+		t.Fatalf("Midpoint InstrumentDefinition length = %d, want 64", got)
 	}
 }
 
