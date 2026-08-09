@@ -116,7 +116,7 @@ echo "exit: $?"   # 1
 
 `nonconformant_mbp.pcap` is different in kind: a real capture from a live publisher on venue data, on ports `31000`/`41000`/`51000`, taken **before** its defects were fixed. It carries oversized frames and the snapshot flag set on refdata, so it exits 1 by design — it is a regression fixture for the market-by-price rules, not a conformant sample. It is also two orders of magnitude larger than the hand-built captures, which is the cost of covering a feed whose snapshot stream is most of its bytes. That cost bought something: three defects in the consumer survived the synthetic tests and were found only by running against this data.
 
-It was captured before the market-by-price spec went to `2.0.0`, so it carries `Schema Version = 1` and now also reports `FRAME.SCHEMA_VERSION` on every frame. That is correct — it is a `1.x` capture being judged against the `2.x` rules — and it does not diminish the fixture's value: the original defects still fire, and the snapshot oracle still reaches the same pass counts. Read past the schema rows when using it.
+It was captured before the market-by-price spec went to `2.0.0`, so it carries `Schema Version = 1` and now also reports `FRAME.SCHEMA_VERSION` on every frame. That is correct — it is a `1.x` capture being judged against the current `3.x` rules — and it does not diminish the fixture's value: the original defects still fire, and the snapshot oracle still reaches the same pass counts. Read past the schema rows when using it.
 
 ```bash
 # Exits 1: the capture's known defects are reported.
