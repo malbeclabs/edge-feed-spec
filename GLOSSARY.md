@@ -35,7 +35,6 @@ Use `venue` for the external exchange. `exchange` is a synonym; prefer `venue`.
 | **Channel** | A logical shard of instruments with its own `Channel ID` (`u8`), sequence series, reset count, and snapshot cycle. | A port role, a `chan`/`mpsc`, a venue's pub/sub topic |
 | **Datagram** | The contents of one UDP packet: a 24-byte datagram header plus N application messages. | A message |
 | **Message** | One application record inside a datagram, with its own 4-byte header. | A datagram |
-| **Path** | One of several redundant publishers or transports carrying the same data, raced against each other. | A channel, a network route |
 
 Prefer `datagram` over `frame` or `packet` for our own traffic. A frame is a layer-2 construct carrying Ethernet and IP headers; what we define and version is the UDP payload.
 
@@ -67,9 +66,7 @@ Neither half of either pair is redefined here. `receiver` in particular keeps it
 
 | Banned | Use instead | Note |
 |---|---|---|
-| `arm` (redundant publisher) | `path` | |
-| `arm` (`match`/`select!` branch) | `branch` | `arm` is acceptable inside code comments only; never in specs, docs, or plans |
-| `arm` / `disarm` | — | Allowed only for the Order-Intent dead-man switch |
+| `arm`, `disarm` (every sense) | see the note below | No exceptions |
 | `bot` (our components) | `book-builder` | |
 | `lane` | `feed` or `path` | |
 | `feed` (upstream vendor) | `upstream <vendor>` | |
@@ -85,6 +82,10 @@ Neither half of either pair is redefined here. `receiver` in particular keeps it
 | `normalization` | `decode` | Reserve `normalization` for cross-feed latency metrics |
 | `venue` (Rust trait over product lines) | `product line` or `adapter` | |
 | `roster`, `active set` | `published set` | |
+
+**`arm` is banned outright**, in every sense and every place: specs, docs, plans, identifiers, CLI flags, config keys, metric names, log fields, and code comments alike. There is no surviving exception. Replace it by sense — a redundant publisher is a `path`, a `match` or `select!` branch is a `branch`, and the Order-Intent dead-man switch is **set** and **cleared** rather than armed and disarmed. That last one costs nothing on the wire: the switch is carried by `ScheduleCancel`'s `Trigger Time`, where a non-zero timestamp sets it and `0` clears it, so `arm` was only ever prose.
+
+`path` is deliberately not defined in this glossary. It is used in its ordinary English sense — one of several redundant routes carrying the same data — and needs no house meaning.
 
 **`source` always takes a qualifier.** The word is banned bare — in specs, docs, plans, identifiers, CLI flags, config keys, metric names, and log fields. Write the qualified form and the sense is unambiguous:
 
@@ -151,6 +152,7 @@ Ordered by blast radius. `file:line` citations are starting points, not the full
 | "frame", "Frame Header" | `datagram`, `Datagram Header` | All six specs, `VERSIONING.md`, `README.md`, `tools/conformance/wire/header.go` — 174 uses. Wire layout is unchanged, so this is a doc rename, but `Frame Header` is a named section in every spec: schedule it with a spec revision |
 | Bare `source` | Qualify it | ~12 sites: `top-of-book/spec.md:209` ("originating source", "a single source"), `order-intent/spec.md:183,377,394,402,404` ("live edge of the source", "source liveness"), `sources/spec.md:18,26` ("Assigned Sources" → "Assigned Source IDs") |
 | `Bid Source Count` / `Ask Source Count` | `Bid Venue Count` / `Ask Venue Count` | `top-of-book/spec.md:217-218` — "source" meant contributing venues, colliding with `Source ID`. Renamed on branch `fix/tob-venue-count`; the wire layout is unchanged, so it is editorial (`PATCH`). Downstream field names still to follow: `kalshi/app/publisher/crates/dz-tob-protocol/src/quote.rs:26-27`, `edge-multicast-ref/go/topofbook-parser/sink_csv.go:16` |
+| "arm"/"disarm" (dead-man switch) | "set"/"clear" | `order-intent/spec.md:5,120,342,356,360` — prose only; `Trigger Time` already encodes it as non-zero vs `0`, so this is editorial |
 | "epoch" | `era` | `reference-data/spec.md:93` |
 | "feed channel" | `channel` | `tools/conformance/README.md:3` |
 | "publisher operator" | `operator` | `reference-data/spec.md:189` |
