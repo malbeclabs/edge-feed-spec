@@ -2,7 +2,7 @@
 
 The DoubleZero Top-of-Book & Trades Feed is a wire format for L1 price feeds delivered over the DoubleZero Edge service. It defines a compact, fixed-size, multicast-native binary protocol for publishing two-sided market data (best bid / best ask quotes and trades) from any venue with an order book.
 
-This document specifies version **3.0.1**: the frame header, application message header, and the set of message types sufficient to operate a working publisher and subscriber.
+This document specifies version **3.0.2**: the frame header, application message header, and the set of message types sufficient to operate a working publisher and subscriber.
 
 ---
 
@@ -208,6 +208,10 @@ The core message. A single, fixed-size, two-sided BBO update.
 |                      Ask Quantity (qty, u64)                  |
 |                                                               |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|      Bid Venue Count (u16)    |     Ask Venue Count (u16)     |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                           Reserved (4B)                       |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 ```
 
 | Offset | Field | Type | Description |
@@ -222,9 +226,13 @@ The core message. A single, fixed-size, two-sided BBO update.
 | 28 | Bid Quantity | `qty` | Size at best bid. Uses instrument's Qty Exponent. |
 | 36 | Ask Price | `price` | Best ask. Uses instrument's Price Exponent. 0 if ask gone. |
 | 44 | Ask Quantity | `qty` | Size at best ask. Uses instrument's Qty Exponent. |
-| 52 | Bid Source Count | `u16` | Orders/sources at best bid. 0 if unavailable. |
-| 54 | Ask Source Count | `u16` | Orders/sources at best ask. 0 if unavailable. |
+| 52 | Bid Venue Count | `u16` | Number of distinct venues aggregated into the best bid. `0` when the publisher does not aggregate, or does not expose the count. |
+| 54 | Ask Venue Count | `u16` | Number of distinct venues aggregated into the best ask. `0` when the publisher does not aggregate, or does not expose the count. |
 | 56 | Reserved | 4B | Padding to 60 bytes. |
+
+`Bid Venue Count` and `Ask Venue Count` count **venues, not orders**. A publisher consolidating several venues into one BBO reports how many contributed to each side; a publisher carrying a single venue reports `1`, or `0` if it does not populate the field. The count of resting orders at a price level is a different quantity and is not carried on this feed — see `Order Count` on the [market-by-price feed](../market-by-price/spec.md), which additionally uses `0xFFFF` rather than `0` for "not exposed". The two conventions differ; do not port one reading to the other.
+
+Because a consolidated BBO can transiently cross or lock while its constituent venues disagree, a crossed book is **not** a violation on this feed.
 
 ### 0x04 Trade (52 bytes)
 
@@ -310,7 +318,7 @@ The format is fixed-size and binary, so parsing requires no allocation, no strin
 
 ## Versioning and Forward Compatibility
 
-This document is version **3.0.1**, versioned independently of the sibling specs. The Schema Version byte in the frame header is `3` and equals this spec's MAJOR version, so it stays `3` for every `3.x.y` release and changes only on a breaking wire change. See the [Versioning Policy](../VERSIONING.md) for the full rule, the change classification, and the tag scheme.
+This document is version **3.0.2**, versioned independently of the sibling specs. The Schema Version byte in the frame header is `3` and equals this spec's MAJOR version, so it stays `3` for every `3.x.y` release and changes only on a breaking wire change. See the [Versioning Policy](../VERSIONING.md) for the full rule, the change classification, and the tag scheme.
 
 Future `3.x` versions of this specification MAY, without a Schema Version bump:
 
@@ -321,6 +329,8 @@ Future `3.x` versions of this specification MAY, without a Schema Version bump:
 Existing field layouts and semantics will not change within the `3.x` line. A change that moves or resizes a field, alters a message length, or redefines existing semantics requires a MAJOR release and a Schema Version bump, which old decoders MUST reject rather than parse.
 
 ### Changes
+
+**3.0.2** — editorial. Renamed the `u16` pair at offsets 52 and 54 from `Bid Source Count` / `Ask Source Count` to `Bid Venue Count` / `Ask Venue Count`, and replaced the "Orders/sources at best bid" gloss, which named two different quantities and matched neither the field's purpose nor `Source ID` at offset 8. The fields count contributing venues, never resting orders; the market-by-price feed's `Order Count` is the order-level quantity and uses a different unavailable convention. No wire change: offsets, widths, and message length are untouched and the Schema Version byte stays `3`. The Quote diagram also now shows all 60 bytes — it previously stopped at offset 52 and omitted these two fields.
 
 **3.0.1** — editorial. Qualified the bare uses of "source" on the `Quote` `Source ID` row and in Design Principle 6, and added an *Identity Model* section stating that instrument identity is the `(channel_id, instrument_id)` tuple. Adopted the glossary's "published set". No wire change.
 

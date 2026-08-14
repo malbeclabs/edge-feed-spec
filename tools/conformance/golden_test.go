@@ -382,8 +382,8 @@ func buildTOBGoldenEntries() []goldenPcapEntry {
 			b.U64(10)            // BidQty        body[24]
 			b.I64(200)           // AskPrice      body[32]
 			b.U64(10)            // AskQty        body[40]
-			b.U16(1)             // BidSourceCount body[48]
-			b.U16(1)             // AskSourceCount body[50]
+			b.U16(1)             // BidVenueCount body[48]
+			b.U16(1)             // AskVenueCount body[50]
 			b.Pad(4)             // Reserved      body[52]
 		}).Bytes()
 	addMkt(quote, 1)

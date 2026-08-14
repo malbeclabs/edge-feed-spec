@@ -120,7 +120,7 @@ var testedRules = map[string]string{
 	"TOB.QUOTE.CROSSED_LOCKED":         "TestTier1Rules/TOB.QUOTE.CROSSED_LOCKED (tier1_test.go)",
 	"TOB.QUOTE.UPDATE_FLAGS_COHERENCE": "TestTier1Rules/TOB.QUOTE.UPDATE_FLAGS_COHERENCE (tier1_test.go)",
 	"TOB.QUOTE.SOURCE_ID_REGISTRY":     "TestTier1Rules/TOB.QUOTE.SOURCE_ID_REGISTRY (tier1_test.go)",
-	"TOB.QUOTE.SOURCE_COUNT":           "TestTier1Rules/TOB.QUOTE.SOURCE_COUNT (tier1_test.go)",
+	"TOB.QUOTE.VENUE_COUNT":           "TestTier1Rules/TOB.QUOTE.VENUE_COUNT (tier1_test.go)",
 	"TOB.QUOTE.REFDATA_KNOWN":          "TestTOBRefdataKnownAfterReadyUnknownInstrument (tob_test.go)",
 	"TOB.TRADE.FIELDS":                 "TestTier1Rules/TOB.TRADE.FIELDS (tier1_test.go)",
 

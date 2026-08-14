@@ -143,8 +143,8 @@ func quoteBody(sourceID uint16, updateFlags uint8, bidPrice, askPrice int64, bid
 		b.U64(bidQty)        // BidQty (body off 24)
 		b.I64(askPrice)      // AskPrice (body off 32)
 		b.U64(askQty)        // AskQty (body off 40)
-		b.U16(bidSrc)        // BidSourceCount (body off 48)
-		b.U16(askSrc)        // AskSourceCount (body off 50)
+		b.U16(bidSrc)        // BidVenueCount (body off 48)
+		b.U16(askSrc)        // AskVenueCount (body off 50)
 		b.Pad(4)             // Reserved (body off 52) → total body 56 → msg 60
 	}
 }
@@ -433,11 +433,11 @@ func tier1Cases() []struct {
 			good: wb.Frame(wire.MagicTOB).Msg(wire.TypeQuote, 60, quoteBody(1, 0x03, 100, 101, 10, 10, 1, 1)).Bytes(),
 		},
 		{
-			rule:  "TOB.QUOTE.SOURCE_COUNT",
+			rule:  "TOB.QUOTE.VENUE_COUNT",
 			feed:  core.FeedTOB,
 			magic: wire.MagicTOB,
 			port:  core.PortMktData,
-			// bid source_count=0 on a live bid → info finding (Pass status).
+			// bid venue_count=0 on a live bid → info finding (Pass status).
 			bad:  wb.Frame(wire.MagicTOB).Msg(wire.TypeQuote, 60, quoteBody(1, 0x03, 100, 101, 10, 10, 0 /*bidSrc=0*/, 1)).Bytes(),
 			good: wb.Frame(wire.MagicTOB).Msg(wire.TypeQuote, 60, quoteBody(1, 0x03, 100, 101, 10, 10, 1, 1)).Bytes(),
 		},

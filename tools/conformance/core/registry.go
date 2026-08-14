@@ -121,7 +121,7 @@ var Rules = []RuleMeta{
 	{"TOB.QUOTE.CROSSED_LOCKED", Info, 1, StateNone, tobOnly, false},
 	{"TOB.QUOTE.UPDATE_FLAGS_COHERENCE", Should, 1, StateNone, tobOnly, false},
 	{"TOB.QUOTE.SOURCE_ID_REGISTRY", Must, 1, StateNone, tobOnly, false},
-	{"TOB.QUOTE.SOURCE_COUNT", Info, 1, StateNone, tobOnly, false},
+	{"TOB.QUOTE.VENUE_COUNT", Info, 1, StateNone, tobOnly, false},
 	{"TOB.QUOTE.REFDATA_KNOWN", Should, 2, StateRefdata, tobOnly, false},
 	{"TOB.TRADE.FIELDS", Must, 1, StateNone, tobOnly, false},
 	// --- Midpoint ---

@@ -49,8 +49,8 @@ func buildQuoteFrame(magic uint16, ch uint8, instrID uint32) []byte {
 			b.U64(10)            // BidQty (body off 24)
 			b.I64(200)           // AskPrice (body off 32)
 			b.U64(10)            // AskQty (body off 40)
-			b.U16(1)             // BidSourceCount (body off 48)
-			b.U16(1)             // AskSourceCount (body off 50)
+			b.U16(1)             // BidVenueCount (body off 48)
+			b.U16(1)             // AskVenueCount (body off 50)
 			b.Pad(4)             // Reserved (body off 52) → total body 56 → msg 60
 		}).
 		Bytes()

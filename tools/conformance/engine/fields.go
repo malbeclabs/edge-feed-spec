@@ -147,15 +147,15 @@ func snapshotEndSnapshotID(m wire.Message) uint32   { return bodyU32LE(m, 12) }
 // spec offset 28 = Bid Quantity (u64);  Body[24]
 // spec offset 36 = Ask Price (i64);     Body[32]
 // spec offset 44 = Ask Quantity (u64);  Body[40]
-// spec offset 52 = Bid Source Count (u16); Body[48]
-// spec offset 54 = Ask Source Count (u16); Body[50]
+// spec offset 52 = Bid Venue Count (u16); Body[48]
+// spec offset 54 = Ask Venue Count (u16); Body[50]
 func quoteInstrumentID(m wire.Message) uint32   { return bodyU32LE(m, 0) }
 func quoteSourceID(m wire.Message) uint16       { return bodyU16LE(m, 4) }
 func quoteUpdateFlags(m wire.Message) uint8     { return bodyU8(m, 6) }
 func quoteBidPrice(m wire.Message) int64        { return int64(bodyU64LE(m, 16)) }
 func quoteAskPrice(m wire.Message) int64        { return int64(bodyU64LE(m, 32)) }
-func quoteBidSourceCount(m wire.Message) uint16 { return bodyU16LE(m, 48) }
-func quoteAskSourceCount(m wire.Message) uint16 { return bodyU16LE(m, 50) }
+func quoteBidVenueCount(m wire.Message) uint16 { return bodyU16LE(m, 48) }
+func quoteAskVenueCount(m wire.Message) uint16 { return bodyU16LE(m, 50) }
 
 // --- Trade (0x04, 52 bytes total) ---
 // spec offset  4 = Instrument ID (u32); Body[0]

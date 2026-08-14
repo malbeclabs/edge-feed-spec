@@ -92,6 +92,8 @@ For the MBO feed the engine reconstructs the order book independently from both 
 
 The full 88-rule catalog — rule ID, severity, tier, applicable feeds — is defined in `core/registry.go` (the in-code source of truth), with one-line per-rule summaries in `core/ruledoc.go`. `core/registry_test.go` and `core/ruledoc_test.go` guarantee the set stays complete and documented.
 
+**Renamed rule:** `TOB.QUOTE.SOURCE_COUNT` is now `TOB.QUOTE.VENUE_COUNT`, following the same rename in top-of-book `3.0.1`. Rule IDs are emitted as the `rule_id` Prometheus label and appear in `--json-report` output, so any dashboard, alert, or report parser matching the old string needs updating. The check itself is unchanged.
+
 ## Quick start
 
 ### Try it now (bundled captures)
