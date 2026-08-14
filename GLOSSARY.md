@@ -30,26 +30,29 @@ Use `venue` for the external exchange. `exchange` is a synonym; prefer `venue`.
 
 | Term | Definition | Not |
 |---|---|---|
-| **Multicast group** | The IP group frames are sent to. Say "group" only where multicast is unambiguous. | A channel, a feed |
+| **Multicast group** | The IP group datagrams are sent to. Say "group" only where multicast is unambiguous. | A channel, a feed |
 | **Port role** | One of exactly `mktdata`, `refdata`, `snapshot`. Use these tokens verbatim. | A channel |
 | **Channel** | A logical shard of instruments with its own `Channel ID` (`u8`), sequence series, reset count, and snapshot cycle. | A port role, a `chan`/`mpsc`, a venue's pub/sub topic |
-| **Frame** | One UDP datagram: 24-byte frame header plus N application messages. | A message |
-| **Message** | One application record inside a frame, with its own 4-byte header. | A frame |
+| **Datagram** | The contents of one UDP packet: a 24-byte datagram header plus N application messages. | A message |
+| **Message** | One application record inside a datagram, with its own 4-byte header. | A datagram |
 | **Path** | One of several redundant publishers or transports carrying the same data, raced against each other. | A channel, a network route |
 
-Prefer `frame` over `packet` or `datagram` for our own traffic.
+Prefer `datagram` over `frame` or `packet` for our own traffic. A frame is a layer-2 construct carrying Ethernet and IP headers; what we define and version is the UDP payload.
 
 ## Protocol and roles
 
 | Term | Definition | Not |
 |---|---|---|
-| **Feed** | A wire protocol defined by a spec in `edge-feed-spec` (Top-of-Book, Midpoint, Market-by-Order, Market-by-Price, Order-Intent, Perp-Stats). | Live traffic, a multicast group, an upstream vendor |
-| **Stream** | The live traffic of one feed on one channel. | The protocol |
-| **Publisher** | The process that emits frames onto a multicast group. Matches the public glossary's multicast sender role. | A deploy unit, a struct, one redundant path |
-| **Subscriber** | A process that joins a multicast group and decodes frames. | A trading client |
+| **Feed** | Both the wire protocol defined by a spec in `edge-feed-spec` (Top-of-Book, Midpoint, Market-by-Order, Market-by-Price, Order-Intent, Perp-Stats) and the live traffic carrying it on one channel. Say "feed spec" or "live feed" only where the difference matters. | A multicast group, an upstream vendor |
+| **Publisher** | The process that transmits datagrams using a multicast group. Matches the public glossary's multicast sender role. | A deploy unit, a struct, one redundant path |
+| **Subscriber** | A process that joins a multicast group, strips headers, and decodes datagrams. | A trading client |
 | **Era** | The span between two `Reset Count` values. | An epoch |
-| **Snapshot** | A full-state restatement on the `snapshot` port. | A blockchain state dump |
+| **Snapshot** | A moment-in-time copy of the order book, published on the `snapshot` port. | A blockchain state dump |
 | **Delta** | An incremental book-mutating message on `mktdata`. | |
+
+Two pairs, one per layer, and both are correct. From the network's point of view a publisher is a **transmitter** (or **sender**) and a subscriber is a **receiver**: use those for the act of moving datagrams. For the roles themselves use **publisher** and **subscriber**, matching the public glossary.
+
+Neither half of either pair is redefined here. `receiver` in particular keeps its plain meaning — anything that receives — so every subscriber is a receiver, and the specs' normative "Publishers SHOULD … receivers MUST …" is correct as written.
 
 ## Components
 
@@ -59,7 +62,6 @@ Prefer `frame` over `packet` or `datagram` for our own traffic.
 | **Parser** | A binary that subscribes, decodes, and republishes records downstream. | The decoder inside it |
 | **Book-builder** | A binary consuming parser output that maintains book state and optionally persists it. | A bot |
 | **Bot** | A real automated trading client. We ship none. | Any component in these repos |
-| **Receiver** | A binary consuming the Solana shred multicast stream. Unrelated to market-data feeds. | A parser |
 
 ## Banned words
 
@@ -70,13 +72,12 @@ Prefer `frame` over `packet` or `datagram` for our own traffic.
 | `arm` / `disarm` | — | Allowed only for the Order-Intent dead-man switch |
 | `bot` (our components) | `book-builder` | |
 | `lane` | `feed` or `path` | |
-| `feed` (live traffic) | `stream` | |
 | `feed` (upstream vendor) | `upstream <vendor>` | |
+| `stream` (our live traffic) | `feed` | A live feed is a feed; the extra word bought nothing |
+| `frame` (our own traffic) | `datagram` | |
 | `channel` (port role) | `port role` | |
 | `channel` (venue pub/sub topic) | `venue topic` | |
-| `source` (ingest transport choice) | `transport` | |
-| `source` (an input) | `input` | |
-| `source` (metrics sample origin) | rename the type | |
+| `source` (unqualified) | a qualified form | Never bare — see the note below |
 | `epoch` | `era` | |
 | `sibling feed` | `feed` | All feeds are siblings; the word adds nothing |
 | `tee` | `fan-out` | |
@@ -85,7 +86,17 @@ Prefer `frame` over `packet` or `datagram` for our own traffic.
 | `venue` (Rust trait over product lines) | `product line` or `adapter` | |
 | `roster`, `active set` | `published set` | |
 
-Keep `source_ts` / `source_timestamp_ns` (the venue's own clock) and `source_id` (venue identity). They share a prefix and mean unrelated things; do not add more `source_*` names.
+**`source` always takes a qualifier.** The word is banned bare — in specs, docs, plans, identifiers, CLI flags, config keys, metric names, and log fields. Write the qualified form and the sense is unambiguous:
+
+| Qualified form | Means |
+|---|---|
+| `source_id` | Venue identity, as assigned by the Source ID Registry |
+| `source_ts` / `source_timestamp_ns` | The venue's own clock |
+| `source IP address` | The layer-3 sender of a datagram |
+| `source publisher` | Which publisher a subscriber received given data from |
+| `upstream source` | The external vendor or venue API a publisher reads |
+
+These mean unrelated things and several share a prefix, which is why the qualifier is mandatory rather than stylistic. Where a bare use means none of the above, replace the word outright: an ingest transport choice is a `transport`, an input is an `input`, and a metrics sample origin needs its type renamed.
 
 ## Rename worklist
 
@@ -137,6 +148,9 @@ Ordered by blast radius. `file:line` citations are starting points, not the full
 
 | Current | Replacement | Where |
 |---|---|---|
+| "frame", "Frame Header" | `datagram`, `Datagram Header` | All six specs, `VERSIONING.md`, `README.md`, `tools/conformance/wire/header.go` — 174 uses. Wire layout is unchanged, so this is a doc rename, but `Frame Header` is a named section in every spec: schedule it with a spec revision |
+| Bare `source` | Qualify it | ~12 sites: `top-of-book/spec.md:209` ("originating source", "a single source"), `order-intent/spec.md:183,377,394,402,404` ("live edge of the source", "source liveness"), `sources/spec.md:18,26` ("Assigned Sources" → "Assigned Source IDs") |
+| `Bid Source Count` / `Ask Source Count` | `Bid Venue Count` / `Ask Venue Count` | `top-of-book/spec.md:217-218` — "source" meant contributing venues, colliding with `Source ID`. Renamed on branch `fix/tob-venue-count`; the wire layout is unchanged, so it is editorial (`PATCH`). Downstream field names still to follow: `kalshi/app/publisher/crates/dz-tob-protocol/src/quote.rs:26-27`, `edge-multicast-ref/go/topofbook-parser/sink_csv.go:16` |
 | "epoch" | `era` | `reference-data/spec.md:93` |
 | "feed channel" | `channel` | `tools/conformance/README.md:3` |
 | "publisher operator" | `operator` | `reference-data/spec.md:189` |
@@ -160,3 +174,5 @@ These need a decision before the affected text can be corrected. Several are pro
 6. **Source ID 3 is `Lashay` with a blank `Kind`**, though `sources/spec.md:26` makes `Kind` required. `doublezero-edge-connect` treats `LASHAY` as a legacy input-only alias for Kalshi. Decide the canonical name and fill in `Kind`.
 
 7. **`tools/conformance/engine/source_ids.json` is stale.** Its `spec_revision` reads "assigned IDs: 1=Hyperliquid, 2=Phoenix" and was last read 2026-06-15, omitting ID 3, which shipped in the registry's first stable release. Harmless in practice — the range check accepts all of `[1,1023]`. Separately, `tools/conformance/README.md:3` and its `--feed` table advertise three feeds while the tool implements four of six.
+
+8. **Top-of-Book and Market-by-Price disagree on the "unavailable" sentinel** for the same concept. `market-by-price/spec.md:337` gives `Order Count` the value `0xFFFF` for "the venue does not expose it, or the count exceeds `0xFFFE`", and states that `0` is a real value. Top-of-Book's venue count (`top-of-book/spec.md:217-218`) uses `0` for unavailable, so it cannot express a genuine zero and saturates silently. Harmonizing would redefine a field and therefore needs a MAJOR bump, so it must ride the next Top-of-Book major rather than a rename.
