@@ -4,7 +4,7 @@ The DoubleZero Midpoint Feed is a wire format for single-value mid prices delive
 
 This is a sibling protocol to the DoubleZero Top-of-Book & Trades Feed, not a layer on top. Where the top-of-book feed carries two-sided BBO data and trades, the midpoint feed carries a single derived price plus the provenance needed to interpret it. A publisher MAY operate both feeds for the same set of instruments; subscribers MAY consume one without the other.
 
-This document specifies version **1.0.0**: the frame header, application message header, and the message types sufficient to operate a working midpoint publisher and subscriber.
+This document specifies version **1.0.1**: the frame header, application message header, and the message types sufficient to operate a working midpoint publisher and subscriber.
 
 ---
 
@@ -285,7 +285,7 @@ The format is fixed-size and binary, so parsing requires no allocation, no strin
 
 ## Versioning and Forward Compatibility
 
-This document is version **1.0.0**, versioned independently of the sibling specs. The Schema Version byte in the frame header is `1` and equals this spec's MAJOR version, so it stays `1` for every `1.x.y` release and changes only on a breaking wire change. See the [Versioning Policy](../VERSIONING.md) for the full rule, the change classification, and the tag scheme.
+This document is version **1.0.1**, versioned independently of the sibling specs. The Schema Version byte in the frame header is `1` and equals this spec's MAJOR version, so it stays `1` for every `1.x.y` release and changes only on a breaking wire change. See the [Versioning Policy](../VERSIONING.md) for the full rule, the change classification, and the tag scheme.
 
 Future `1.x` versions of this specification MAY, without a Schema Version bump:
 
@@ -296,6 +296,8 @@ Future `1.x` versions of this specification MAY, without a Schema Version bump:
 Existing field layouts and semantics will not change within the `1.x` line. A change that moves or resizes a field, alters a message length, or redefines existing semantics requires a MAJOR release and a Schema Version bump, which old decoders MUST reject rather than parse.
 
 ### Changes
+
+**1.0.1** — editorial. Removed the *Relationship to Sibling Feeds* enumeration and adopted the glossary's "published set". No wire change.
 
 **1.0.0** — first stable release. Promoted from the `0.1.0` draft with no wire change; Schema Version was `1` before and after.
 

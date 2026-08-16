@@ -4,7 +4,7 @@ This supplement defines a continuous in-band mechanism for DoubleZero Edge feeds
 
 The mechanism is payload-independent. Any feed in the DoubleZero Edge family that uses the shared 24-byte frame header and 4-byte application message header MAY adopt it. All six currently do: the Top-of-Book & Trades, Midpoint, Market-by-Order, Market-by-Price, Order-Intent, and Perp Stats feeds each carry `ManifestSummary` on their `refdata` port and a `Manifest Seq` field in their `InstrumentDefinition`.
 
-This document specifies version **1.0.1**: the two-port transport model, the `ManifestSummary` message, the publisher cadence requirements, and the subscriber algorithm.
+This document specifies version **1.0.2**: the two-port transport model, the `ManifestSummary` message, the publisher cadence requirements, and the subscriber algorithm.
 
 ---
 
@@ -192,7 +192,7 @@ The subscriber sees a `ManifestSummary` within `M` seconds (worst case), then wa
 
 ## Forward Compatibility
 
-This document is version **1.0.1**. It is a supplement, not a feed: it defines a mechanism that rides on a host feed's frame header and therefore has no `Magic` and no `Schema Version` of its own. Frames carrying it are versioned by the host feed. It is versioned independently of the feed specs that adopt it, because a subscriber and publisher operating under the same version of this supplement interoperate correctly regardless of which feed specs they implement. See the [Versioning Policy](../VERSIONING.md) for the full scheme.
+This document is version **1.0.2**. It is a supplement, not a feed: it defines a mechanism that rides on a host feed's frame header and therefore has no `Magic` and no `Schema Version` of its own. Frames carrying it are versioned by the host feed. It is versioned independently of the feed specs that adopt it, because a subscriber and publisher operating under the same version of this supplement interoperate correctly regardless of which feed specs they implement. See the [Versioning Policy](../VERSIONING.md) for the full scheme.
 
 Future `1.x` versions of this supplement MAY, without a host-feed Schema Version bump:
 
@@ -207,6 +207,8 @@ The following is a known candidate that would be **breaking**, requiring a MAJOR
 The two-port transport model and the subscriber algorithm are stable for the `1.x` line.
 
 ### Changes
+
+**1.0.2** — editorial. Replaced "epoch" with "era" for the post-reset span, dropped the redundant qualifier in "publisher operator", and adopted the glossary's "published set". No wire change.
 
 **1.0.1** — editorial. Refreshed the bandwidth worked example for the 128-byte `InstrumentDefinition` introduced by the feed specs at their `2.0.0` (was 80 bytes), and corrected the `Manifest Seq` width rationale, which described reserved space that the widened layout no longer has. No change to this supplement's own requirements or to `ManifestSummary`.
 

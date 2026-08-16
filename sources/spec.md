@@ -4,7 +4,7 @@ This supplement is the canonical registry of `Source ID` values carried in the `
 
 A Source ID identifies the venue whose order book a price message was derived from. Every price message on every feed carries exactly one Source ID. IDs assigned here are stable: once allocated, an ID MUST NOT be reused for a different venue.
 
-This document specifies version **1.0.0**: the reserved ranges, the current assignment set, and the process for requesting a new ID.
+This document specifies version **1.0.1**: the reserved ranges, the current assignment set, and the process for requesting a new ID.
 
 ## Reserved Ranges
 
@@ -40,5 +40,7 @@ Assigning a new Source ID is an additive change and is therefore a **MINOR** rel
 Because assigned IDs are stable and MUST NOT be renumbered, reordered, removed, or reused, this registry has no mechanism by which a MAJOR release could arise. A subscriber pinned to any `1.x` version of this registry will find that every ID it knows still means what it meant; a later version only adds IDs it has not seen. Subscribers MUST treat an unrecognized Source ID as an unknown venue rather than an error, exactly as if they were running against an older copy of this registry.
 
 ### Changes
+
+**1.0.1** — editorial. Renamed the *Assigned Sources* and *Adding a New Source* headings to name Source IDs rather than bare sources. No assignment changed.
 
 **1.0.0** — first stable release. Covers Source IDs `1` (Hyperliquid), `2` (Phoenix), and `3` (Lashay).

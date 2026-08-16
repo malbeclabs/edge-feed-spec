@@ -2,7 +2,7 @@
 
 The DoubleZero Perp Stats Feed is a sibling cadence feed carrying per-perpetual derived state — funding, mark price, oracle price, open interest, and premium — relayed from the venue's REST surface. It is not the order-book hot path; data originates from REST polls rather than the matching engine, so it runs on a separate cadence from the top-of-book and market-by-order feeds.
 
-This document specifies version **3.0.0**: the transport, message types, `PerpStats` wire layout, emission model, and instrument scope.
+This document specifies version **3.0.1**: the transport, message types, `PerpStats` wire layout, emission model, and instrument scope.
 
 ---
 
@@ -213,7 +213,7 @@ The publisher MUST follow the cadence and atomicity rules in the [Reference Data
 
 ## Versioning and Forward Compatibility
 
-This document is version **3.0.0**, versioned independently of the sibling feed specs. The Schema Version byte in the frame header is `3` and equals this spec's MAJOR version, so it stays `3` for every `3.x.y` release and changes only on a breaking wire change. See the [Versioning Policy](../VERSIONING.md) for the full rule, the change classification, and the tag scheme.
+This document is version **3.0.1**, versioned independently of the sibling feed specs. The Schema Version byte in the frame header is `3` and equals this spec's MAJOR version, so it stays `3` for every `3.x.y` release and changes only on a breaking wire change. See the [Versioning Policy](../VERSIONING.md) for the full rule, the change classification, and the tag scheme.
 
 Because this feed defers the frame header to the top-of-book spec except for `Magic`, a MAJOR release of the top-of-book feed that changes the frame header would also require a MAJOR release here. The two Schema Version bytes are not otherwise coupled: an additive change to either feed leaves the other untouched.
 
@@ -226,6 +226,8 @@ Future `3.x` versions of this specification MAY, without a Schema Version bump:
 Existing field layouts and semantics will not change within the `3.x` line. A change that moves or resizes a field, alters a message length, or redefines existing semantics requires a MAJOR release and a Schema Version bump, which old decoders MUST reject rather than parse.
 
 ### Changes
+
+**3.0.1** — editorial. Renamed the per-poll "full sweep" to a **full pass**, added an *Identity Model* section stating that instrument identity is the `(channel_id, instrument_id)` tuple, removed the *Relationship to Sibling Feeds* enumeration, and adopted the glossary's "published set". No wire change.
 
 **3.0.0** — added `Source ID` (`u16`) after `Instrument ID` in `InstrumentDefinition`. `Symbol` and every later field move two bytes, and the message grows from 128 to 130 bytes. This is a breaking change: the Schema Version byte is now `3`, and a decoder built for `2.x` MUST reject these frames rather than parse them at the old offsets. The midpoint feed remains unchanged at Schema Version `1`.
 
