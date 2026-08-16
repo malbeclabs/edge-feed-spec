@@ -752,26 +752,6 @@ The format is fixed-size and binary; parsing requires no allocation, no string h
 
 ---
 
-## Relationship to Sibling Feeds
-
-The DoubleZero Market-by-Order Feed is a sibling of the [Top-of-Book & Trades Feed](../top-of-book/spec.md) and the [Midpoint Feed](../midpoint/spec.md). Sibling feeds share:
-
-- The 24-byte frame header layout (except for the `Magic` value).
-- The 4-byte application message header.
-- The [Reference Data Distribution supplement](../reference-data/spec.md) conformance, including `InstrumentDefinition` (0x02) and `ManifestSummary` (0x07).
-- The cross-spec message Type IDs `0x01` (Heartbeat), `0x04` (Trade), `0x06` (EndOfSession) byte-for-byte.
-- The session-lifecycle and `Reset Count` patterns.
-- The forward-compatibility rules.
-
-Distinctions of the market-by-order feed:
-- `Magic` is `0x4444` (vs. `0x445A` top-of-book, `0x4D44` midpoint).
-- Three-port channel model (vs. two).
-- Market-by-order-specific payload Type IDs live in `0x10` and above.
-
-A publisher MAY operate any subset of the sibling feeds for the same instruments simultaneously. Subscribers MAY consume any subset independently.
-
----
-
 ## Versioning and Forward Compatibility
 
 This document is version **3.0.0**, versioned independently of the sibling specs. The Schema Version byte in the frame header is `3` and equals this spec's MAJOR version, so it stays `3` for every `3.x.y` release and changes only on a breaking wire change. See the [Versioning Policy](../VERSIONING.md) for the full rule, the change classification, and the tag scheme.

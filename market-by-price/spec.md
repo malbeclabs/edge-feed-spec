@@ -860,32 +860,6 @@ The format is fixed-size and binary; parsing requires no allocation, no string h
 
 ---
 
-## Relationship to Sibling Feeds
-
-The DoubleZero Market-by-Price Feed is a sibling of the [Top-of-Book & Trades Feed](../top-of-book/spec.md), the [Midpoint Feed](../midpoint/spec.md), and the [Market-by-Order Feed](../market-by-order/spec.md). Sibling feeds share:
-
-- The 24-byte frame header layout (except for the `Magic` value).
-- The 4-byte application message header.
-- The [Reference Data Distribution supplement](../reference-data/spec.md) conformance, including `InstrumentDefinition` (0x02) and `ManifestSummary` (0x07).
-- The cross-spec message Type IDs `0x01` (Heartbeat), `0x04` (Trade), `0x06` (EndOfSession), `0x08` (Liquidation) byte-for-byte.
-- The session-lifecycle and `Reset Count` patterns.
-- The forward-compatibility rules.
-
-Distinctions of the market-by-price feed:
-- `Magic` is `0x4442` (vs. `0x445A` top-of-book, `0x4444` market-by-order, `0x4D44` midpoint, `0x494F` order-intent, `0x4450` perp-stats).
-- Three-port channel model (vs. two), shared with the market-by-order feed.
-- New market-by-price payloads occupy `0x40`–`0x4F`, with `0x50`–`0x5F` reserved. `BatchBoundary` (`0x13`), `InstrumentReset` (`0x14`), `SnapshotBegin` (`0x20`) and `SnapshotEnd` (`0x22`) are shared with the market-by-order feed at its Type IDs rather than renumbered, because they are the same payload; `SnapshotBegin` is a prefix-superset with `Depth Bound` appended at offset 36.
-- `Per-Instrument Seq` is a `u32` at offset 12, identical in type, placement, and comparison semantics to the market-by-order feed's.
-
-Divergences that change subscriber or publisher code, beyond the message set itself:
-- `BatchBoundary` is required of batching publishers here, where the market-by-order feed makes it optional.
-- [Crossed-Book Monitoring](#crossed-book-monitoring) has no market-by-order counterpart.
-- `Depth Bound` and its publisher obligations have no market-by-order counterpart.
-
-The relationship to the market-by-order feed is one of projection, not layering: this feed carries the price-aggregated view of the same book that feed carries order-by-order. A consumer needing order identity, queue position, or per-order lifecycle uses market-by-order; a consumer needing aggregate depth uses this feed at materially lower cost. A publisher MAY operate any subset of the sibling feeds for the same instruments simultaneously. Subscribers MAY consume any subset independently.
-
----
-
 ## Versioning and Forward Compatibility
 
 This document is version **3.0.0**, versioned independently of the sibling specs. The Schema Version byte in the frame header is `3` and equals this spec's MAJOR version, so it stays `3` for every `3.x.y` release and changes only on a breaking wire change. See the [Versioning Policy](../VERSIONING.md) for the full rule, the change classification, and the tag scheme.

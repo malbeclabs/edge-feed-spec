@@ -299,14 +299,3 @@ Existing field layouts and semantics will not change within the `1.x` line. A ch
 
 **1.0.0** — first stable release. Promoted from the `0.1.0` draft with no wire change; Schema Version was `1` before and after.
 
----
-
-## Relationship to Sibling Feeds
-
-The DoubleZero Midpoint Feed is one of a family of sibling protocols that share framing conventions but differ in payload:
-
-- The **Top-of-Book & Trades Feed** carries two-sided BBO quotes and trade reports from a venue.
-- The **Midpoint Feed** (this document) carries a single derived mid price per instrument.
-- The **[Market-by-Order Feed](../market-by-order/spec.md)** carries the full resting-order population per instrument as a market-by-order stream of order events, anchored by a continuous in-band snapshot stream for recovery.
-
-Sibling feeds share the data type table, the 24-byte frame header layout, the 4-byte application message header, the session lifecycle, and the forward-compatibility rules. They differ in magic value, message type table, and message payloads. A subscriber MAY consume any subset of these feeds independently. Sibling feeds MUST use distinct Magic values and SHOULD use distinct multicast groups.

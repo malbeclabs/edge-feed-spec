@@ -59,6 +59,14 @@ The `price`, `qty`, and `ts_ns` types are reused from the [Top-of-Book & Trades 
 
 ---
 
+## Identity Model
+
+### Instrument IDs
+
+The unique key for an instrument in this feed is the tuple **`(channel_id, instrument_id)`**. `instrument_id` is a `u32` scoped to its channel; it need not be globally unique across channels. Subscribers consuming multiple channels MUST key their internal instrument map by the tuple.
+
+---
+
 ## Message Types
 
 | Type ID | Name | Size | Port | Description |
@@ -227,15 +235,3 @@ Existing field layouts and semantics will not change within the `3.x` line. A ch
 
 **0.1.1** (draft, never tagged) — registered the frame `Magic` value `0x4450` ("DP") for this feed and added the consumer validation requirement (see [Transport Framing](#transport-framing)). Previously the header was deferred wholesale to the top-of-book spec, leaving the value ambiguous even though the sibling-feed rule already required a distinct one. No wire-layout change; Schema Version remained `1`.
 
----
-
-## Relationship to Sibling Feeds
-
-The DoubleZero Perp Stats Feed is one of a family of sibling protocols sharing framing conventions:
-
-- The **[Top-of-Book & Trades Feed](../top-of-book/spec.md)** carries two-sided BBO quotes and trade reports from a venue, on the matching-engine hot path.
-- The **[Midpoint Feed](../midpoint/spec.md)** carries a single derived mid price per instrument.
-- The **[Market-by-Order Feed](../market-by-order/spec.md)** carries the full resting-order population per instrument.
-- The **Perp Stats Feed** (this document) carries per-perpetual derived state — funding, mark, oracle, OI, premium — relayed from the venue REST surface on a cadence path.
-
-Sibling feeds share the 24-byte frame header, the 4-byte application message header, and the forward-compatibility rules. They differ in magic value, message type table, and payload. Sibling feeds MUST use distinct Magic values and SHOULD use distinct multicast groups. The Perp Stats feed's `Magic` is `0x4450` (vs. `0x445A` top-of-book, `0x4444` market-by-order, `0x4D44` midpoint, `0x494F` order-intent).

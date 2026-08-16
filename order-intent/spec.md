@@ -429,30 +429,6 @@ The wire format above is venue-generic. The [Source ID Registry](../sources/spec
 
 ---
 
-## Relationship to Sibling Feeds
-
-The DoubleZero Order-Intent Feed is a sibling of the [Top-of-Book & Trades Feed](../top-of-book/spec.md), the [Market-by-Order Feed](../market-by-order/spec.md), and the [Midpoint Feed](../midpoint/spec.md). Sibling feeds share:
-
-- The 24-byte frame header layout (except for the `Magic` value).
-- The 4-byte application message header.
-- The [Reference Data Distribution supplement](../reference-data/spec.md) conformance, including `InstrumentDefinition` (`0x02`) and `ManifestSummary` (`0x07`).
-- The cross-spec message Type IDs `0x01` (Heartbeat) and `0x07` (ManifestSummary) byte-for-byte.
-- The `Reset Count` reset pattern.
-- The forward-compatibility rules.
-
-Distinctions of the order-intent feed:
-
-- `Magic` is `0x494F` (vs. `0x445A` top-of-book, `0x4444` market-by-order, `0x4D44` midpoint).
-- It has **no session-boundary message** — the siblings end a session with `EndOfSession` (`0x06`); this real-time intent feed has no session concept (a publisher restart is signaled by a `Reset Count` change), so `0x06` is reserved and unused.
-- It carries **pre-consensus intent**, not accepted book state — events are observed submissions, never fills (see [Trust semantics](#doublezero-order-intent-feed)).
-- It does **not** carry `Trade` (`0x04`) or any quote/book payload; those Type IDs are not used here.
-- It has **no snapshot/recovery mechanism** — there is no canonical state to snapshot.
-- Order-intent-specific payload Type IDs live in `0x30`–`0x3F`.
-
-A publisher MAY operate any subset of the sibling feeds for the same instruments simultaneously. Subscribers MAY consume any subset independently.
-
----
-
 ## Versioning and Forward Compatibility
 
 This document is version **3.0.0**, versioned independently of the sibling specs. The Schema Version byte in the frame header is `3` and equals this spec's MAJOR version, so it stays `3` for every `3.x.y` release and changes only on a breaking wire change. See the [Versioning Policy](../VERSIONING.md) for the full rule, the change classification, and the tag scheme.

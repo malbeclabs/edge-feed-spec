@@ -93,6 +93,14 @@ Every application message begins with:
 
 ---
 
+## Identity Model
+
+### Instrument IDs
+
+The unique key for an instrument in this feed is the tuple **`(channel_id, instrument_id)`**. `instrument_id` is a `u32` scoped to its channel; it need not be globally unique across channels. Subscribers consuming multiple channels MUST key their internal instrument map by the tuple.
+
+---
+
 ## Message Types
 
 | Type ID | Name | Size | Port | Description |
