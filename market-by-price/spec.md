@@ -122,11 +122,11 @@ Operators running multiple publisher instances that share a single `source_id` (
 
 Within an instrument, a price level is identified by the tuple **`(Side, Price)`**. There is no positional level index in the addressing model: a level is never identified by its rank, and a subscriber MUST NOT key book state on rank. `Price` is interpreted using the instrument's `Price Exponent` from reference data.
 
-A `(channel_id, instrument_id)` identifies **one book from one source**. A publisher MUST NOT emit level updates for a single `(channel, instrument)` under more than one `Source ID`; an instrument observed at two venues is two instruments with two `InstrumentDefinition` entries and two `instrument_id` values, not one `instrument_id` with two sources.
+A `(channel_id, instrument_id)` identifies **one book from one Source ID**. A publisher MUST NOT emit level updates for a single `(channel, instrument)` under more than one `Source ID`; an instrument observed at two venues is two instruments with two `InstrumentDefinition` entries and two `instrument_id` values, not one `instrument_id` with two Source IDs.
 
 ### Channel Sharding
 
-Sharding the published instrument set across multiple publisher instances — each on its own channel — is supported natively via `Channel ID` in the frame header. Each channel is an independent state machine with its own `Reset Count`, `Sequence Number` series per port, `Manifest Seq`, and snapshot cycle. Grouping criteria (by asset class, by liquidity tier, by source venue) and discovery mechanisms are deployment-level concerns and out of scope for this spec.
+Sharding the published instrument set across multiple publisher instances — each on its own channel — is supported natively via `Channel ID` in the frame header. Each channel is an independent state machine with its own `Reset Count`, `Sequence Number` series per port, `Manifest Seq`, and snapshot cycle. Grouping criteria (by asset class, by liquidity tier, by venue) and discovery mechanisms are deployment-level concerns and out of scope for this spec.
 
 ---
 
@@ -461,7 +461,7 @@ Subscribers with strict atomicity requirements MAY buffer deltas between boundar
 | Offset | Field | Type | Description |
 |--------|-------|------|-------------|
 | 0 | Header | 4B | Type=`0x13`, Length=16 |
-| 4 | Batch ID | `u32` | Publisher-defined, monotonically increasing within the current `Reset Count` era. For blockchain sources, SHOULD be the block number truncated to `u32`. |
+| 4 | Batch ID | `u32` | Publisher-defined, monotonically increasing within the current `Reset Count` era. For blockchain venues, SHOULD be the block number truncated to `u32`. |
 | 8 | Batch Time | `ts_ns` | Venue time of the batch |
 
 `BatchBoundary` is informational for book reconstruction — a subscriber that ignores it MUST still produce a correct book state — but it does govern when the comparison in [Crossed-Book Monitoring](#crossed-book-monitoring) applies. Publishers whose upstream batches MUST emit it; see [Publisher Behavior](#delta-stream).
@@ -797,7 +797,7 @@ If the publisher detects that its internal book state has diverged from the upst
 
 For channel-wide inconsistency (not localised to one instrument), the publisher MUST bump `Reset Count` and restart the session rather than emit many `InstrumentReset` messages.
 
-Publishers whose upstream provides no retransmission or replay carry the whole recovery burden themselves: an upstream gap is not recoverable from the source, so the publisher MUST detect it, re-read the upstream book, and issue `InstrumentReset` for the affected instruments. `InstrumentReset` with `Reason = 3` (UpstreamGap) exists for exactly this case.
+Publishers whose upstream provides no retransmission or replay carry the whole recovery burden themselves: an upstream gap is not recoverable from the upstream source, so the publisher MUST detect it, re-read the upstream book, and issue `InstrumentReset` for the affected instruments. `InstrumentReset` with `Reason = 3` (UpstreamGap) exists for exactly this case.
 
 ---
 

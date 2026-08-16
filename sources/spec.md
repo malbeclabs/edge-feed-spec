@@ -15,7 +15,7 @@ This document specifies version **1.0.0**: the reserved ranges, the current assi
 | `1024` – `32767` | Reserved for future assignment. |
 | `32768` – `65535` | Private / experimental. Publishers MAY use these for internal testing; subscribers MUST NOT assume any meaning. |
 
-## Assigned Sources
+## Assigned Source IDs
 
 | ID | Name | Kind | Notes |
 |----|------|------|-------|
@@ -23,7 +23,7 @@ This document specifies version **1.0.0**: the reserved ranges, the current assi
 | `2` | Phoenix | Perpetual DEX | |
 | `3` | Lashay | | |
 
-## Adding a New Source
+## Adding a New Source ID
 
 To request a new Source ID, open a pull request against this file that:
 

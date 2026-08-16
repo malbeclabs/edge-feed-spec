@@ -206,7 +206,7 @@ The core message. A single, fixed-size, two-sided BBO update.
 |--------|-------|------|-------------|
 | 0 | Header | 4B | Type=`0x03`, Length=60 |
 | 4 | Instrument ID | `u32` | Instrument this quote applies to |
-| 8 | Source ID | `u16` | Originating source. Publishers operating a single source MAY use a fixed value (e.g., `1`). |
+| 8 | Source ID | `u16` | Originating `source_id`, as assigned by the [Source ID Registry](../sources/spec.md). Publishers operating a single Source ID MAY use a fixed value (e.g., `1`). |
 | 10 | Update Flags | `u8` | Bit 0: bid updated, bit 1: ask updated, bit 2: bid gone, bit 3: ask gone |
 | 11 | Reserved | `u8` | Padding |
 | 12 | Source Timestamp | `ts_ns` | Timestamp from the originating venue |

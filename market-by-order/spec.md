@@ -112,7 +112,7 @@ Operators running multiple publisher instances that share a single `source_id` (
 
 ### Channel Sharding
 
-Sharding the published instrument set across multiple publisher instances — each on its own channel — is supported natively via `Channel ID` in the frame header. Each channel is an independent state machine with its own `Reset Count`, `Sequence Number` series per port, `Manifest Seq`, and snapshot cycle. Grouping criteria (by asset class, by liquidity tier, by source venue) and discovery mechanisms are deployment-level concerns and out of scope for this spec.
+Sharding the published instrument set across multiple publisher instances — each on its own channel — is supported natively via `Channel ID` in the frame header. Each channel is an independent state machine with its own `Reset Count`, `Sequence Number` series per port, `Manifest Seq`, and snapshot cycle. Grouping criteria (by asset class, by liquidity tier, by venue) and discovery mechanisms are deployment-level concerns and out of scope for this spec.
 
 ---
 
@@ -430,7 +430,7 @@ Subscribers with strict atomicity requirements MAY buffer deltas between boundar
 | Offset | Field | Type | Description |
 |--------|-------|------|-------------|
 | 0 | Header | 4B | Type=`0x13`, Length=16 |
-| 4 | Batch ID | `u32` | Publisher-defined, monotonically increasing within the current `Reset Count` era. For blockchain sources, SHOULD be the block number truncated to `u32`. |
+| 4 | Batch ID | `u32` | Publisher-defined, monotonically increasing within the current `Reset Count` era. For blockchain venues, SHOULD be the block number truncated to `u32`. |
 | 8 | Batch Time | `ts_ns` | Venue time of the batch |
 
 `BatchBoundary` is informational; a subscriber that ignores it MUST still produce a correct book state.
