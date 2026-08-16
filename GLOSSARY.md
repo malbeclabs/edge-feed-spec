@@ -74,7 +74,7 @@ Neither half of either pair is redefined here. `receiver` in particular keeps it
 | `bot` (our components) | `book-builder` | |
 | `lane` | `feed` or `path` | |
 | `feed` (upstream vendor) | `upstream <vendor>` | |
-| `stream` (our live traffic) | `feed` | A live feed is a feed; the extra word bought nothing |
+| `stream` (our live traffic) | `feed` | A live feed is a feed; the extra word bought nothing. `snapshot stream` and `delta stream` are the exception: they name the two traffic shapes within one three-port feed, a distinction `feed` cannot carry |
 | `frame` (our own traffic) | `datagram` | |
 | `channel` (port role) | `port role` | |
 | `channel` (venue pub/sub topic) | `venue topic` | |
@@ -82,7 +82,7 @@ Neither half of either pair is redefined here. `receiver` in particular keeps it
 | `epoch` | `era` | |
 | `sibling feed` | `feed` | All feeds are siblings; the word adds nothing |
 | `tee` | `fan-out` | |
-| `sweep` | Name the operation | Currently means three unrelated things |
+| `sweep` | Name the operation | Currently means three unrelated things. `Trade Flags` bit 1 keeps the name: it is the standard term for an order sweeping several levels, externally defined and carried on the wire |
 | `normalization` | `decode` | Reserve `normalization` for cross-feed latency metrics |
 | `venue` (Rust trait over product lines) | `product line` or `adapter` | |
 | `roster`, `active set` | `published set` | |
