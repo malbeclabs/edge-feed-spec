@@ -102,7 +102,7 @@ Every application message begins with:
 | `0x03` | Quote | 60 | mktdata | Two-sided BBO update (the core L1 message) |
 | `0x04` | Trade | 52 | mktdata | Last trade report |
 | `0x06` | EndOfSession | 12 | mktdata | No more data for this session |
-| `0x07` | ManifestSummary | 24 | refdata | Active instrument set summary (see supplement) |
+| `0x07` | ManifestSummary | 24 | refdata | Published instrument set summary (see supplement) |
 | `0x08` | Liquidation | 48 | mktdata | Annotation for a forced (liquidation/ADL) `Trade`, keyed on `Trade ID` |
 
 A decoder encountering an unknown type MUST skip the message using its Message Length field and continue parsing the frame.
@@ -246,7 +246,7 @@ No more data on this channel for the current session.
 
 ### 0x07 ManifestSummary (24 bytes)
 
-Periodic summary of the active instrument set on this channel. Carried on the reference data port. Defined in the [Reference Data Distribution supplement](../reference-data/spec.md); the layout is reproduced here for convenience.
+Periodic summary of the published instrument set on this channel. Carried on the reference data port. Defined in the [Reference Data Distribution supplement](../reference-data/spec.md); the layout is reproduced here for convenience.
 
 | Offset | Field | Type | Description |
 |--------|-------|------|-------------|
@@ -254,9 +254,9 @@ Periodic summary of the active instrument set on this channel. Carried on the re
 | 4  | Channel ID | `u8` | Redundant with frame header; useful for standalone logging |
 | 5  | Valid | `u8` | `1` when the channel has an established instrument set; `0` when the publisher is uninitialized or the channel is inactive. See supplement. |
 | 6  | Reserved | 2B | Padding |
-| 8  | Manifest Seq | `u16` | Increments every time the active instrument set changes on this channel |
+| 8  | Manifest Seq | `u16` | Increments every time the published instrument set changes on this channel |
 | 10 | Reserved | 2B | Padding |
-| 12 | Instrument Count | `u32` | Number of instruments currently in the active set |
+| 12 | Instrument Count | `u32` | Number of instruments currently in the published set |
 | 16 | Timestamp | `ts_ns` | When the publisher emitted this summary |
 
 ### 0x08 Liquidation (48 bytes)
@@ -285,7 +285,7 @@ A typical publisher session proceeds as follows:
 3. Begins emitting **ManifestSummary** with `Valid = 1` on the reference data port at the manifest cadence (recommended 1 s).
 4. Begins sending **Quote** (and optionally **Trade**) messages on the market data port as market data arrives. Multiple messages MAY be batched into a single frame.
 5. When the market data path is idle → sends **Heartbeat** every N seconds on the market data port.
-6. When the active instrument set changes → bumps `Manifest Seq`, retags subsequent `InstrumentDefinition` retransmissions, and emits an updated `ManifestSummary` within the manifest cadence interval.
+6. When the published instrument set changes → bumps `Manifest Seq`, retags subsequent `InstrumentDefinition` retransmissions, and emits an updated `ManifestSummary` within the manifest cadence interval.
 7. On shutdown → sends **EndOfSession** on the market data port.
 
 The publisher MUST follow the cadence and atomicity rules in the [Reference Data Distribution supplement](../reference-data/spec.md).

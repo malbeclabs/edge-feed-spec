@@ -66,7 +66,7 @@ The `price`, `qty`, and `ts_ns` types are reused from the [Top-of-Book & Trades 
 | `0x01` | Heartbeat | 16 | mktdata | Channel liveness signal |
 | `0x02` | InstrumentDefinition | 130 | refdata | Reference data for a perpetual instrument |
 | `0x06` | EndOfSession | 12 | mktdata | No more data for this session |
-| `0x07` | ManifestSummary | 24 | refdata | Active instrument set summary (see supplement) |
+| `0x07` | ManifestSummary | 24 | refdata | Published instrument set summary (see supplement) |
 | `0x30` | PerpStats | 124 | mktdata | Per-perpetual derived state snapshot |
 
 Type IDs `0x03`, `0x04`, `0x05`, and `0x08` are intentionally not carried on this feed. `0x03` (`Quote`), `0x04` (`Trade`), and `0x08` (`Liquidation`) are message types of the top-of-book and market-by-order feeds, and `0x05` is reserved there; leaving them absent here prevents accidental cross-decoding if a frame is misrouted between feeds.
@@ -105,7 +105,7 @@ No more data on this channel for the current session.
 
 ### 0x07 ManifestSummary (24 bytes)
 
-Periodic summary of the active instrument set on this channel. Carried on the reference data port. Defined in the [Reference Data Distribution supplement](../reference-data/spec.md); the layout is reproduced here for convenience.
+Periodic summary of the published instrument set on this channel. Carried on the reference data port. Defined in the [Reference Data Distribution supplement](../reference-data/spec.md); the layout is reproduced here for convenience.
 
 | Offset | Field | Type | Description |
 |--------|-------|------|-------------|
@@ -113,9 +113,9 @@ Periodic summary of the active instrument set on this channel. Carried on the re
 | 4  | Channel ID | `u8` | Redundant with frame header; useful for standalone logging |
 | 5  | Valid | `u8` | `1` when the channel has an established instrument set; `0` when the publisher is uninitialized or the channel is inactive. See supplement. |
 | 6  | Reserved | 2B | Padding |
-| 8  | Manifest Seq | `u16` | Increments every time the active instrument set changes on this channel |
+| 8  | Manifest Seq | `u16` | Increments every time the published instrument set changes on this channel |
 | 10 | Reserved | 2B | Padding |
-| 12 | Instrument Count | `u32` | Number of instruments currently in the active set (perps only) |
+| 12 | Instrument Count | `u32` | Number of instruments currently in the published set (perps only) |
 | 16 | Timestamp | `ts_ns` | When the publisher emitted this summary |
 
 ### 0x30 PerpStats (124 bytes)
@@ -173,7 +173,7 @@ Only the `HlPerp` entry of `predictedFundings` is relayed. CEX entries (Binance,
 
 On each `metaAndAssetCtxs` poll, the publisher emits a **full sweep**: one `PerpStats` message per active perpetual, packed into frames up to the 1,232-byte MTU (~28 KB for ~230 perps, ~26 frames per sweep at 9 messages per frame, ~0.2 Mbps at 1 s cadence). The interval between sweeps equals the poll cadence.
 
-This is a deliberate departure from the Reference Data Distribution supplement's *cycling* model for `InstrumentDefinition`. That model spreads definitions evenly across a 30-second cycle and MUST NOT burst, because definitions rarely change and the goal is steady-state recovery coverage. `PerpStats` is the opposite: the entire active set genuinely refreshes every poll, so emitting the full sweep promptly per poll is correct, not a retransmission violation.
+This is a deliberate departure from the Reference Data Distribution supplement's *cycling* model for `InstrumentDefinition`. That model spreads definitions evenly across a 30-second cycle and MUST NOT burst, because definitions rarely change and the goal is steady-state recovery coverage. `PerpStats` is the opposite: the entire published set genuinely refreshes every poll, so emitting the full sweep promptly per poll is correct, not a retransmission violation.
 
 ### Recovery and Late Joiners
 
@@ -196,7 +196,7 @@ A typical publisher session proceeds as follows:
 3. Begins emitting **ManifestSummary** with `Valid = 1` on the reference data port at the manifest cadence (recommended 1 s).
 4. On each `metaAndAssetCtxs` poll, emits a full sweep of **PerpStats** messages on the market data port.
 5. When the market data path is idle → sends **Heartbeat** on the market data port.
-6. When the active instrument set changes → bumps `Manifest Seq`, retags subsequent `InstrumentDefinition` retransmissions, and emits an updated `ManifestSummary` within the manifest cadence interval.
+6. When the published instrument set changes → bumps `Manifest Seq`, retags subsequent `InstrumentDefinition` retransmissions, and emits an updated `ManifestSummary` within the manifest cadence interval.
 7. On shutdown → sends **EndOfSession** on the market data port.
 
 The publisher MUST follow the cadence and atomicity rules in the [Reference Data Distribution supplement](../reference-data/spec.md).

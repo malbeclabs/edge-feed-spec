@@ -126,7 +126,7 @@ A `(channel_id, instrument_id)` identifies **one book from one source**. A publi
 
 ### Channel Sharding
 
-Sharding the active instrument set across multiple publisher instances — each on its own channel — is supported natively via `Channel ID` in the frame header. Each channel is an independent state machine with its own `Reset Count`, `Sequence Number` series per port, `Manifest Seq`, and snapshot cycle. Grouping criteria (by asset class, by liquidity tier, by source venue) and discovery mechanisms are deployment-level concerns and out of scope for this spec.
+Sharding the published instrument set across multiple publisher instances — each on its own channel — is supported natively via `Channel ID` in the frame header. Each channel is an independent state machine with its own `Reset Count`, `Sequence Number` series per port, `Manifest Seq`, and snapshot cycle. Grouping criteria (by asset class, by liquidity tier, by source venue) and discovery mechanisms are deployment-level concerns and out of scope for this spec.
 
 ---
 
@@ -140,7 +140,7 @@ Sharding the active instrument set across multiple publisher instances — each 
 | `0x04` | Trade | 52 | mktdata | Venue-level trade summary. **Identical byte-for-byte to the top-of-book feed's Trade**, carried here as a convenience for consumers who want a trade tape alongside the book. |
 | `0x05` | *(reserved)* | — | — | |
 | `0x06` | EndOfSession | 12 | mktdata | Inherited. No more data for this session. |
-| `0x07` | ManifestSummary | 24 | refdata | Active instrument set summary. Inherited; see the [Reference Data Distribution supplement](../reference-data/spec.md). |
+| `0x07` | ManifestSummary | 24 | refdata | Published instrument set summary. Inherited; see the [Reference Data Distribution supplement](../reference-data/spec.md). |
 | `0x08` | Liquidation | 48 | mktdata | Trade-companion annotation. **Identical byte-for-byte to the top-of-book feed's Liquidation.** Emitted in the same frame as its `Trade`. |
 | `0x13` | BatchBoundary | 16 | mktdata | Atomic-batch delimiter. **Byte-for-byte identical to the market-by-order feed's `0x13`.** Required of batching publishers, absent on non-batching channels. |
 | `0x14` | InstrumentReset | 28 | mktdata | Per-instrument surgical resync signal. **Byte-for-byte identical to the market-by-order feed's `0x14`.** |
@@ -264,7 +264,7 @@ Inherited. No more data on this channel for the current session.
 
 ### 0x07 ManifestSummary (24 bytes)
 
-Inherited. Periodic summary of the active instrument set on this channel. Carried on the `refdata` port. Defined in the [Reference Data Distribution supplement](../reference-data/spec.md); reproduced here for convenience.
+Inherited. Periodic summary of the published instrument set on this channel. Carried on the `refdata` port. Defined in the [Reference Data Distribution supplement](../reference-data/spec.md); reproduced here for convenience.
 
 | Offset | Field | Type | Description |
 |--------|-------|------|-------------|
@@ -272,9 +272,9 @@ Inherited. Periodic summary of the active instrument set on this channel. Carrie
 | 4  | Channel ID | `u8` | Redundant with frame header; useful for standalone logging |
 | 5  | Valid | `u8` | `1` when the channel has an established instrument set; `0` when the publisher is uninitialized or the channel is inactive. See supplement. |
 | 6  | Reserved | 2B | Padding |
-| 8  | Manifest Seq | `u16` | Increments every time the active instrument set changes on this channel |
+| 8  | Manifest Seq | `u16` | Increments every time the published instrument set changes on this channel |
 | 10 | Reserved | 2B | Padding |
-| 12 | Instrument Count | `u32` | Number of instruments currently in the active set |
+| 12 | Instrument Count | `u32` | Number of instruments currently in the published set |
 | 16 | Timestamp | `ts_ns` | When the publisher emitted this summary |
 
 ### 0x08 Liquidation (48 bytes)
@@ -810,7 +810,7 @@ A typical publisher session proceeds as follows:
 3. Begins emitting `ManifestSummary` with `Valid = 1` on the `refdata` port at the manifest cadence (recommended 1 s).
 4. Begins emitting `SnapshotBegin` / `SnapshotLevel` / `SnapshotEnd` on the `snapshot` port, round-robin across active instruments, at the configured snapshot cycle period.
 5. Begins emitting `LevelUpdate`, `BookClear`, `Trade`, and (optionally) `BatchBoundary` on the `mktdata` port as venue events arrive. Emits `Heartbeat` on `mktdata` when idle.
-6. When the active instrument set changes → bumps `Manifest Seq`, retags subsequent `InstrumentDefinition` retransmissions, emits an updated `ManifestSummary`, and ensures the next snapshot cycle includes the new set.
+6. When the published instrument set changes → bumps `Manifest Seq`, retags subsequent `InstrumentDefinition` retransmissions, emits an updated `ManifestSummary`, and ensures the next snapshot cycle includes the new set.
 7. On shutdown → emits `EndOfSession` on the `mktdata` port.
 
 The publisher MUST follow the cadence and atomicity rules in the [Reference Data Distribution supplement](../reference-data/spec.md).

@@ -1,6 +1,6 @@
 # DoubleZero Edge Reference Data Distribution
 
-This supplement defines a continuous in-band mechanism for DoubleZero Edge feeds to advertise their active instrument set. It allows new subscribers to reach a complete reference-data state without an offline file, an out-of-band catalog, or a replay service.
+This supplement defines a continuous in-band mechanism for DoubleZero Edge feeds to advertise their published instrument set. It allows new subscribers to reach a complete reference-data state without an offline file, an out-of-band catalog, or a replay service.
 
 The mechanism is payload-independent. Any feed in the DoubleZero Edge family that uses the shared 24-byte frame header and 4-byte application message header MAY adopt it. All six currently do: the Top-of-Book & Trades, Midpoint, Market-by-Order, Market-by-Price, Order-Intent, and Perp Stats feeds each carry `ManifestSummary` on their `refdata` port and a `Manifest Seq` field in their `InstrumentDefinition`.
 
@@ -15,7 +15,7 @@ Continuous markets — crypto spot, prediction markets, perpetuals — do not ha
 1. Discover which instruments the publisher considers active.
 2. Receive an `InstrumentDefinition` for each one.
 3. Detect when it has a complete view.
-4. Detect when the active set changes (instruments added or removed).
+4. Detect when the published set changes (instruments added or removed).
 
 Without an in-band mechanism, the alternatives are an offline catalog file (which drifts), a replay service (which adds infrastructure), or a definition retransmission triggered by some out-of-band signal (which doesn't exist in a multicast-only world). This supplement provides the in-band mechanism.
 
@@ -50,9 +50,9 @@ A new application message type, advertised periodically on the reference-data po
 | 4  | Channel ID | `u8` | Redundant with frame header; useful for standalone logging |
 | 5  | Valid | `u8` | `1` when the channel has an established instrument set; `0` when the publisher is uninitialized or the channel is inactive. See Publisher Behavior. |
 | 6  | Reserved | 2B | Padding |
-| 8  | Manifest Seq | `u16` | Increments every time the active instrument set changes on this channel |
+| 8  | Manifest Seq | `u16` | Increments every time the published instrument set changes on this channel |
 | 10 | Reserved | 2B | Padding |
-| 12 | Instrument Count | `u32` | Number of instruments currently in the active set |
+| 12 | Instrument Count | `u32` | Number of instruments currently in the published set |
 | 16 | Timestamp | `ts_ns` | When the publisher emitted this summary |
 
 `ManifestSummary` carries no list of Instrument IDs. The combination of `Manifest Seq` and `Instrument Count`, together with the `Manifest Seq` field on each `InstrumentDefinition` (see below), is sufficient for a subscriber to determine when it has a complete view.
@@ -77,13 +77,13 @@ A publisher operating a channel adopting this supplement MUST:
 
 1. **Retransmit every active `InstrumentDefinition` periodically.** The maximum interval between successive retransmissions of any single definition is the **definition cycle period**. Recommended cycle period: **30 seconds**.
 
-2. **Spread retransmissions across the cycle.** Definitions SHOULD be paced evenly over the cycle period. Publishers MUST NOT emit the entire active set as a single burst. MTU-packed frames evenly spaced over the cycle is the canonical implementation.
+2. **Spread retransmissions across the cycle.** Definitions SHOULD be paced evenly over the cycle period. Publishers MUST NOT emit the entire published set as a single burst. MTU-packed frames evenly spaced over the cycle is the canonical implementation.
 
 3. **Emit `ManifestSummary` periodically on the reference-data port.** The maximum interval between `ManifestSummary` messages is the **manifest cadence**. Recommended cadence: **1 second**. The manifest cadence MUST be shorter than the definition cycle period so that a new subscriber sees a `ManifestSummary` before it has finished collecting definitions.
 
 4. **Set the `Valid` flag to reflect channel state.** A publisher MUST set `Valid = 1` on every `ManifestSummary` once its instrument set is established, and `Valid = 0` when the channel is uninitialized or the publisher is shutting down.
 
-5. **Bump `Manifest Seq` atomically when the active set changes.** When an instrument is added to or removed from the active set, the publisher MUST:
+5. **Bump `Manifest Seq` atomically when the published set changes.** When an instrument is added to or removed from the published set, the publisher MUST:
    - (a) Increment `Manifest Seq` by 1.
    - (b) Tag all subsequent `InstrumentDefinition` retransmissions with the new `Manifest Seq` value.
    - (c) Emit a `ManifestSummary` with `Valid = 1` carrying the new `Manifest Seq` and the new `Instrument Count` no later than the next manifest cadence interval.

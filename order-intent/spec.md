@@ -112,7 +112,7 @@ Every application message begins with:
 | `0x04` | *(reserved)* | — | — | Trade in the top-of-book and market-by-order feeds. This feed carries intent, not executions; intentionally unused. |
 | `0x05` | *(reserved)* | — | — | |
 | `0x06` | *(reserved)* | — | — | EndOfSession in sibling feeds. This is a real-time intent stream with no session boundary — a publisher going away is signaled by a `Reset Count` change on its return, not a session-end message — so it is intentionally unused here. |
-| `0x07` | ManifestSummary | 24 | refdata | Active instrument set summary. Inherited; see the [Reference Data Distribution supplement](../reference-data/spec.md). |
+| `0x07` | ManifestSummary | 24 | refdata | Published instrument set summary. Inherited; see the [Reference Data Distribution supplement](../reference-data/spec.md). |
 | `0x30` | OrderNew | 124 | mktdata | A new order was submitted. |
 | `0x31` | OrderCancel | 88 | mktdata | Cancel request by venue order id. |
 | `0x32` | OrderCancelByClientId | 96 | mktdata | Cancel request by client order id. |
@@ -174,7 +174,7 @@ Publishers SHOULD use the most accurate Asset Class / Market Model value availab
 
 #### 0x07 ManifestSummary (24 bytes)
 
-Inherited. Periodic summary of the active instrument set on this channel. Carried on the `refdata` port. Defined in the [Reference Data Distribution supplement](../reference-data/spec.md); reproduced here for convenience.
+Inherited. Periodic summary of the published instrument set on this channel. Carried on the `refdata` port. Defined in the [Reference Data Distribution supplement](../reference-data/spec.md); reproduced here for convenience.
 
 | Offset | Field | Type | Description |
 |--------|-------|------|-------------|
@@ -182,9 +182,9 @@ Inherited. Periodic summary of the active instrument set on this channel. Carrie
 | 4  | Channel ID | `u8` | Redundant with frame header; useful for standalone logging |
 | 5  | Valid | `u8` | `1` when the channel has an established instrument set; `0` when the publisher is uninitialized or the channel is inactive. See supplement. Asserts that the channel's instrument set is established — **not** that the source is producing flow. |
 | 6  | Reserved | 2B | Padding |
-| 8  | Manifest Seq | `u16` | Increments every time the active instrument set changes on this channel |
+| 8  | Manifest Seq | `u16` | Increments every time the published instrument set changes on this channel |
 | 10 | Reserved | 2B | Padding |
-| 12 | Instrument Count | `u32` | Number of instruments currently in the active set |
+| 12 | Instrument Count | `u32` | Number of instruments currently in the published set |
 | 16 | Timestamp | `ts_ns` | When the publisher emitted this summary |
 
 ### Common Event Fields
