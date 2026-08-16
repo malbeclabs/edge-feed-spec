@@ -2,7 +2,7 @@
 
 The DoubleZero Order-Intent Feed is a wire format for normalized, pre-consensus order-intent events delivered over the DoubleZero Edge service. It defines a fixed-size, multicast-native binary protocol for publishing the order, cancel, and modify *submissions* observed in a venue's mempool (or equivalent pre-consensus layer) — attributed to the signing account when signature recovery succeeds, otherwise carried as an unauthenticated, zero-signer observation — typically before the venue's consensus commits them.
 
-This is a sibling protocol to the DoubleZero [Top-of-Book & Trades Feed](../top-of-book/spec.md), the [Market-by-Order Feed](../market-by-order/spec.md), and the [Midpoint Feed](../midpoint/spec.md), not a layer on top. Where those feeds carry accepted book state — quotes, resting orders, mid prices — this feed carries *intent*: every successfully normalized supported submission, plus dead-man-switch arm/disarm, as a fixed-size binary message.
+This is a sibling protocol to the DoubleZero [Top-of-Book & Trades Feed](../top-of-book/spec.md), the [Market-by-Order Feed](../market-by-order/spec.md), and the [Midpoint Feed](../midpoint/spec.md), not a layer on top. Where those feeds carry accepted book state — quotes, resting orders, mid prices — this feed carries *intent*: every successfully normalized supported submission, plus dead-man-switch set/clear, as a fixed-size binary message.
 
 This document specifies version **3.0.0**: the frame header, application message header, and the message types that define the wire format. The wire format is venue-generic; the per-venue derivations it deliberately does not fix (account-id encoding, Action Tag rule, source-message mapping) are defined out of band by each venue's publisher and are not part of this specification. The [Source ID Registry](../sources/spec.md) only assigns the Source ID → venue mapping.
 
@@ -117,7 +117,7 @@ Every application message begins with:
 | `0x31` | OrderCancel | 88 | mktdata | Cancel request by venue order id. |
 | `0x32` | OrderCancelByClientId | 96 | mktdata | Cancel request by client order id. |
 | `0x33` | OrderModify | 148 | mktdata | Modify request (cancel-replace semantics). |
-| `0x34` | ScheduleCancel | 88 | mktdata | Dead-man-switch arm/disarm (account-wide). |
+| `0x34` | ScheduleCancel | 88 | mktdata | Dead-man-switch set/clear (account-wide). |
 
 A decoder encountering an unknown type MUST skip the message using its `Message Length` field and continue parsing the frame.
 
@@ -339,7 +339,7 @@ Modify request (cancel-replace semantics). Carries both target-id fields at fixe
 
 ### 0x34 ScheduleCancel (88 bytes)
 
-Dead-man-switch arm/disarm (account-wide). Identical layout to `OrderCancel`, with the Order ID field replaced by **Trigger Time**.
+Dead-man-switch set/clear (account-wide). Identical layout to `OrderCancel`, with the Order ID field replaced by **Trigger Time**.
 
 | Offset | Field | Type | Description |
 |--------|-------|------|-------------|
@@ -353,11 +353,11 @@ Dead-man-switch arm/disarm (account-wide). Identical layout to `OrderCancel`, wi
 | 16 | Action Tag | `u64` | |
 | 24 | Nonce | `u64` | |
 | 32 | Source Timestamp | `ts_ns` | |
-| 40 | Trigger Time | `u64` | Milliseconds since the Unix epoch at which the dead-man switch fires — a `u64` **ms** value, **not** `ts_ns` (the venue's verbatim unit; contrast the nanosecond `Source Timestamp`); **`0` = disarm** |
+| 40 | Trigger Time | `u64` | Milliseconds since the Unix epoch at which the dead-man switch fires — a `u64` **ms** value, **not** `ts_ns` (the venue's verbatim unit; contrast the nanosecond `Source Timestamp`); **`0` = clear** |
 | 48 | Signer | `byte[20]` | |
 | 68 | Vault | `byte[20]` | |
 
-`Batch Index 0 / Count 1` is not a special rule but the general one: a schedule-cancel action contains no entry array, so it is single-entry by construction. `ScheduleCancel` is account-wide because an armed dead-man switch signals imminent mass cancellation — high-value intent — even though it is not tied to one instrument.
+`Batch Index 0 / Count 1` is not a special rule but the general one: a schedule-cancel action contains no entry array, so it is single-entry by construction. `ScheduleCancel` is account-wide because a set dead-man switch signals imminent mass cancellation — high-value intent — even though it is not tied to one instrument.
 
 Venue-specific mapping of source actions to these messages is defined out of band by each venue's publisher and is not part of this specification.
 
