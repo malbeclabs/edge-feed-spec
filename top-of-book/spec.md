@@ -13,7 +13,7 @@ This document specifies version **3.0.0**: the frame header, application message
 3. **Schema-versioned.** The frame header carries a version byte. New fields append to messages; old decoders ignore trailing bytes. Unknown message types are skipped using the Message Length field.
 4. **Multicast-native.** UDP multicast delivery. One frame per UDP datagram. The protocol defines application messages only; transport, addressing, and group membership are out of scope.
 5. **Instrument-ID based.** Numeric `u32` IDs on the market data path. Human-readable strings only in reference data.
-6. **Source-attributed.** Every price message carries a `u16` source ID. With a single publisher this is redundant; with many it is essential. Cheap to carry now, expensive to retrofit later.
+6. **Source-attributed.** Every price message carries a `u16` Source ID. With a single publisher this is redundant; with many it is essential. Cheap to carry now, expensive to retrofit later.
 7. **Domain-agnostic.** Anything with a two-sided book — bids and asks at prices with quantities — is a valid instrument: crypto spot, equities, futures, FX, prediction markets, or anything else.
 
 ---

@@ -15,7 +15,7 @@ This document specifies version **1.0.0**: the frame header, application message
 3. **Schema-versioned.** The frame header carries a version byte. New fields append to messages; old decoders ignore trailing bytes. Unknown message types are skipped using the Message Length field.
 4. **Multicast-native.** UDP multicast delivery. One frame per UDP datagram.
 5. **Instrument-ID based.** Numeric `u32` IDs on the market data path. Human-readable strings only in reference data.
-6. **Source-attributed.** Every price message carries a `u16` source ID identifying the venue whose book the mid was computed from.
+6. **Source-attributed.** Every price message carries a `u16` Source ID identifying the venue whose book the mid was computed from.
 7. **Single-value, not single-sided.** A midpoint message is one price. There is no degenerate "bid = ask" encoding; consumers that want a two-sided book should use the top-of-book feed.
 8. **Derivation-explicit.** Every midpoint declares *how* it was computed and carries the timestamps needed to localize latency. A derived price without provenance is a number without a contract.
 
