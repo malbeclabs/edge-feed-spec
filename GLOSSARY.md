@@ -70,7 +70,7 @@ Neither half of either pair is redefined here. `receiver` in particular keeps it
 
 | Banned | Use instead | Note |
 |---|---|---|
-| `arm`, `disarm` (every sense) | see the note below | No exceptions |
+| `arm`, `disarm` (every sense) | see the note below | Two external proper nouns aside — see the note below |
 | `bot` (our components) | `book-builder` | |
 | `lane` | `feed` or `path` | |
 | `feed` (upstream vendor) | `upstream <vendor>` | |
@@ -87,7 +87,7 @@ Neither half of either pair is redefined here. `receiver` in particular keeps it
 | `venue` (Rust trait over product lines) | `product line` or `adapter` | |
 | `roster`, `active set` | `published set` | |
 
-**`arm` is banned outright**, in every sense and every place: specs, docs, plans, identifiers, CLI flags, config keys, metric names, log fields, and code comments alike. There is no surviving exception. Replace it by sense — a redundant publisher is a `path`, a `match` or `select!` branch is a `branch`, and the Order-Intent dead-man switch is **set** and **cleared** rather than armed and disarmed. That last one costs nothing on the wire: the switch is carried by `ScheduleCancel`'s `Trigger Time`, where a non-zero timestamp sets it and `0` clears it, so `arm` was only ever prose.
+**`arm` is banned outright**, in every sense and every place: specs, docs, plans, identifiers, CLI flags, config keys, metric names, log fields, and code comments alike. The only things that survive are names we do not own — the `ARM64` architecture and the `ARM` vendor — which are proper nouns rather than a sense of the word. Replace it by sense — a redundant publisher is a `path`, a `match` or `select!` branch is a `branch`, and the Order-Intent dead-man switch is **set** and **cleared** rather than armed and disarmed. That last one costs nothing on the wire: the switch is carried by `ScheduleCancel`'s `Trigger Time`, where a non-zero timestamp sets it and `0` clears it, so `arm` was only ever prose.
 
 `path` is deliberately not defined in this glossary. It is used in its ordinary English sense — one of several redundant routes carrying the same data — and needs no house meaning.
 
