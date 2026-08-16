@@ -482,7 +482,9 @@ Opens a per-instrument snapshot group on the `snapshot` port.
 | 24 | Last Instrument Seq | `u32` | The `Per-Instrument Seq` of the last `OrderAdd`/`OrderCancel`/`OrderExecute` that was applied to this instrument at or before `Anchor Seq`. Subscribers MUST initialise their `last_applied_instrument_seq` tracker to this value after applying the snapshot. `0` if no deltas have been applied for this instrument in the current `Reset Count` era. |
 | 28 | Timestamp | `ts_ns` | Publisher wall-clock at capture. |
 
-Publishers MUST NOT interleave two snapshot groups for different instruments on the `snapshot` port. A `SnapshotBegin` for instrument A is always followed by exactly `Total Orders` `SnapshotOrder` messages for A and then a `SnapshotEnd` for A, before any `SnapshotBegin` for a different instrument.
+Publishers MUST NOT interleave two snapshot groups for different instruments **within a channel**. A `SnapshotBegin` for instrument A is always followed by exactly `Total Orders` `SnapshotOrder` messages for A and then a `SnapshotEnd` for A, before any `SnapshotBegin` for a different instrument on that channel.
+
+**Scoped to the channel, not to the port.** A channel is an independent state machine with its own snapshot cycle, and the frame header carries `Channel ID` precisely so a deployment may carry more than one on a `snapshot` port. Two channels whose groups alternate there are each conformant, and a subscriber tracks the open group per `Channel ID` — reading this as a port-wide constraint makes a conformant sharded publisher look like an interleaving one.
 
 An instrument with no resting orders at capture time is represented by `SnapshotBegin(total_orders=0)` immediately followed by `SnapshotEnd` with no intervening `SnapshotOrder` messages.
 
