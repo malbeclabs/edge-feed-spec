@@ -90,7 +90,7 @@ A publisher operating a channel adopting this supplement MUST:
 
 6. **Restart the definition cycle on `Manifest Seq` change.** When `Manifest Seq` bumps, the publisher SHOULD begin a fresh cycle of definition retransmissions tagged with the new seq, so that subscribers can collect a complete set under the new seq within one cycle period.
 
-7. **Reset via the frame header.** To reset the channel, the publisher increments `Reset Count` in the frame header and resets `Sequence Number` to 0. The publisher's `Manifest Seq` MAY restart from any value. Subscribers detect the reset by comparing `Reset Count` against their last-seen value and discard all cached state (see below). The reset takes effect at the beginning of the frame: all application messages in a frame carrying a new `Reset Count` belong to the post-reset epoch. A publisher that needs to reset MUST discard any partially constructed frame and start a new frame with the incremented `Reset Count`.
+7. **Reset via the frame header.** To reset the channel, the publisher increments `Reset Count` in the frame header and resets `Sequence Number` to 0. The publisher's `Manifest Seq` MAY restart from any value. Subscribers detect the reset by comparing `Reset Count` against their last-seen value and discard all cached state (see below). The reset takes effect at the beginning of the frame: all application messages in a frame carrying a new `Reset Count` belong to the post-reset era. A publisher that needs to reset MUST discard any partially constructed frame and start a new frame with the incremented `Reset Count`.
 
 ---
 
@@ -186,7 +186,7 @@ worst_case_ready = manifest_cadence + definition_cycle_period
 
 At recommended settings (M=1s, T=30s), this is **~31 seconds**.
 
-The subscriber sees a `ManifestSummary` within `M` seconds (worst case), then waits up to `T` seconds for a full pass of `InstrumentDefinition` retransmissions. Subscribers requiring faster cold-start can negotiate a shorter cycle period with the publisher operator; the spec sets the recommended values, not hard caps.
+The subscriber sees a `ManifestSummary` within `M` seconds (worst case), then waits up to `T` seconds for a full pass of `InstrumentDefinition` retransmissions. Subscribers requiring faster cold-start can negotiate a shorter cycle period with the operator; the spec sets the recommended values, not hard caps.
 
 ---
 

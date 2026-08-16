@@ -120,7 +120,7 @@ Periodic summary of the published instrument set on this channel. Carried on the
 
 ### 0x30 PerpStats (124 bytes)
 
-A per-perpetual future derived state snapshot, relayed from the venue's REST surface. One message per active perpetual future instrument per poll sweep. Fields whose upstream value is momentarily unavailable encode as `0`.
+A per-perpetual future derived state snapshot, relayed from the venue's REST surface. One message per active perpetual future instrument per poll pass. Fields whose upstream value is momentarily unavailable encode as `0`.
 
 | Offset | Field | Type | Description |
 |--------|-------|------|-------------|
@@ -164,26 +164,26 @@ Funding, mark price, oracle price, open interest, and premium are perpetual-futu
 
 The publisher runs two REST poll loops and merges their results into each `PerpStats` message:
 
-- **`metaAndAssetCtxs`** — the freshness driver (mark price, oracle price, mid price, open interest, premium, impact prices, volume). One request returns all active perps. Default cadence: **1 second**, configurable. This sets the sweep rate.
+- **`metaAndAssetCtxs`** — the freshness driver (mark price, oracle price, mid price, open interest, premium, impact prices, volume). One request returns all active perps. Default cadence: **1 second**, configurable. This sets the pass rate.
 - **`predictedFundings`** — predicted funding rate, next funding time, and funding interval. Funding accrues on an hourly cycle, so this is polled more slowly. Default cadence: **60 seconds**, configurable. The most-recent values are merged into every `PerpStats` message until the next `predictedFundings` poll.
 
 Only the `HlPerp` entry of `predictedFundings` is relayed. CEX entries (Binance, Bybit, etc.) are the venue re-publishing other venues' data and are out of scope.
 
-### Full Sweep Per Poll
+### Full Pass Per Poll
 
-On each `metaAndAssetCtxs` poll, the publisher emits a **full sweep**: one `PerpStats` message per active perpetual, packed into frames up to the 1,232-byte MTU (~28 KB for ~230 perps, ~26 frames per sweep at 9 messages per frame, ~0.2 Mbps at 1 s cadence). The interval between sweeps equals the poll cadence.
+On each `metaAndAssetCtxs` poll, the publisher emits a **full pass**: one `PerpStats` message per active perpetual, packed into frames up to the 1,232-byte MTU (~28 KB for ~230 perps, ~26 frames per pass at 9 messages per frame, ~0.2 Mbps at 1 s cadence). The interval between passes equals the poll cadence.
 
-This is a deliberate departure from the Reference Data Distribution supplement's *cycling* model for `InstrumentDefinition`. That model spreads definitions evenly across a 30-second cycle and MUST NOT burst, because definitions rarely change and the goal is steady-state recovery coverage. `PerpStats` is the opposite: the entire published set genuinely refreshes every poll, so emitting the full sweep promptly per poll is correct, not a retransmission violation.
+This is a deliberate departure from the Reference Data Distribution supplement's *cycling* model for `InstrumentDefinition`. That model spreads definitions evenly across a 30-second cycle and MUST NOT burst, because definitions rarely change and the goal is steady-state recovery coverage. `PerpStats` is the opposite: the entire published set genuinely refreshes every poll, so emitting the full pass promptly per poll is correct, not a retransmission violation.
 
 ### Recovery and Late Joiners
 
-The full sweep **is** the recovery mechanism. There are no deltas; every `PerpStats` message is a complete current snapshot for its instrument. A late-joining subscriber:
+The full pass **is** the recovery mechanism. There are no deltas; every `PerpStats` message is a complete current snapshot for its instrument. A late-joining subscriber:
 
 1. Binds both the `mktdata` and `refdata` ports.
 2. Collects `InstrumentDefinition` messages and a `ManifestSummary` (which carries the expected perp instrument count).
-3. After one full sweep, has a complete, current view of every active perpetual.
+3. After one full pass, has a complete, current view of every active perpetual.
 
-Anchor time is at most one poll interval (~1 s at default cadence). No dedicated snapshot port or sequence-recovery model is needed. `Heartbeat` is still emitted on `mktdata` per convention for liveness during any gap; in practice the 1 s sweep provides continuous traffic.
+Anchor time is at most one poll interval (~1 s at default cadence). No dedicated snapshot port or sequence-recovery model is needed. `Heartbeat` is still emitted on `mktdata` per convention for liveness during any gap; in practice the 1 s pass provides continuous traffic.
 
 ---
 
@@ -194,7 +194,7 @@ A typical publisher session proceeds as follows:
 1. Publisher starts → increments `Reset Count` in the frame header and resets `Sequence Number` to 0.
 2. Begins emitting **InstrumentDefinition** for every active perpetual on the reference data port, paced evenly across the definition cycle period (recommended 30 s). Definitions are retransmitted continuously.
 3. Begins emitting **ManifestSummary** with `Valid = 1` on the reference data port at the manifest cadence (recommended 1 s).
-4. On each `metaAndAssetCtxs` poll, emits a full sweep of **PerpStats** messages on the market data port.
+4. On each `metaAndAssetCtxs` poll, emits a full pass of **PerpStats** messages on the market data port.
 5. When the market data path is idle → sends **Heartbeat** on the market data port.
 6. When the published instrument set changes → bumps `Manifest Seq`, retags subsequent `InstrumentDefinition` retransmissions, and emits an updated `ManifestSummary` within the manifest cadence interval.
 7. On shutdown → sends **EndOfSession** on the market data port.
