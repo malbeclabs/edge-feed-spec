@@ -1,6 +1,6 @@
 # dz-conformance
 
-A conformance subscriber for edge-feed publishers. Subscribes to one feed channel (TOB, Midpoint, or MBO) — live multicast or pcap replay — validates the stream against 82 explicit conformance rules drawn from the [edge-feed-spec](../../) (this repo), and returns a CI-friendly exit code.
+A conformance subscriber for edge-feed publishers. Subscribes to one channel (TOB, Midpoint, MBO, or MBP) — live multicast or pcap replay — validates the feed against 88 explicit conformance rules drawn from the [edge-feed-spec](../../) (this repo), and returns a CI-friendly exit code.
 
 Unlike a production consumer — which is tolerant of publisher quirks (skipping unknown types, ignoring reserved bits, recovering silently from loss) — this tool is **strict by design**: it flags every structural, sequence, and semantic violation the spec defines. `core/registry.go` is the in-code source of truth for the full rule set.
 
@@ -13,7 +13,7 @@ multicast group (or .pcap)
   └── snapshot port ──► frame decoder (MBO only)
            │
            ▼
-      engine (82-rule validator)
+      engine (88-rule validator)
            │
     ┌──────┴──────┐
     │             │
@@ -90,7 +90,7 @@ For the MBO feed the engine reconstructs the order book independently from both 
 
 ## Rule catalog
 
-The full 82-rule catalog — rule ID, severity, tier, applicable feeds — is defined in `core/registry.go` (the in-code source of truth), with one-line per-rule summaries in `core/ruledoc.go`. `core/registry_test.go` and `core/ruledoc_test.go` guarantee the set stays complete and documented.
+The full 88-rule catalog — rule ID, severity, tier, applicable feeds — is defined in `core/registry.go` (the in-code source of truth), with one-line per-rule summaries in `core/ruledoc.go`. `core/registry_test.go` and `core/ruledoc_test.go` guarantee the set stays complete and documented.
 
 ## Quick start
 
