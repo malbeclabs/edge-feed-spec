@@ -423,8 +423,8 @@ func (e *Engine) checkTier1TOB(m wire.Message, port core.Port, ch uint8, seq uin
 
 		// TOB.QUOTE.CROSSED_LOCKED (info): a crossed/locked book (bid >= ask, both
 		// sides present) is surfaced for visibility, but the spec does NOT declare it
-		// illegal — this feed carries Bid/Ask Source Count, i.e. aggregated
-		// multi-source BBOs, where transient crossed/locked is normal and conformant.
+		// illegal — this feed carries Bid/Ask Venue Count, i.e. BBOs aggregated
+		// across venues, where transient crossed/locked is normal and conformant.
 		// Hence info severity (see registry), not a violation that fails CI.
 		if !bidGone && !askGone && bidPrice >= askPrice {
 			e.Emit("TOB.QUOTE.CROSSED_LOCKED", core.Violation, port, seq, ch, 0,
@@ -455,17 +455,17 @@ func (e *Engine) checkTier1TOB(m wire.Message, port core.Port, ch uint8, seq uin
 				fmt.Sprintf("Quote source_id %d not in registry", srcID))
 		}
 
-		// TOB.QUOTE.SOURCE_COUNT: bid/ask source counts are informational; a value of
+		// TOB.QUOTE.VENUE_COUNT: bid/ask venue counts are informational; a value of
 		// 0 when the side is live (not gone) is noteworthy (info).
-		bidCnt := quoteBidSourceCount(m)
-		askCnt := quoteAskSourceCount(m)
+		bidCnt := quoteBidVenueCount(m)
+		askCnt := quoteAskVenueCount(m)
 		if !bidGone && bidPrice != 0 && bidCnt == 0 {
-			e.Emit("TOB.QUOTE.SOURCE_COUNT", core.Pass, port, seq, ch, 0,
-				"bid_source_count is 0 for a live bid (unavailable)")
+			e.Emit("TOB.QUOTE.VENUE_COUNT", core.Pass, port, seq, ch, 0,
+				"bid_venue_count is 0 for a live bid (unavailable)")
 		}
 		if !askGone && askPrice != 0 && askCnt == 0 {
-			e.Emit("TOB.QUOTE.SOURCE_COUNT", core.Pass, port, seq, ch, 0,
-				"ask_source_count is 0 for a live ask (unavailable)")
+			e.Emit("TOB.QUOTE.VENUE_COUNT", core.Pass, port, seq, ch, 0,
+				"ask_venue_count is 0 for a live ask (unavailable)")
 		}
 
 	case wire.TypeTrade: // 0x04

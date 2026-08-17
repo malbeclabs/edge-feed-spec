@@ -162,9 +162,9 @@ var ruleDocs = map[string]RuleDoc{
 	"TOB.QUOTE.CROSSED_LOCKED":         {"When both sides are present, Bid Price < Ask Price (not crossed or locked)."},
 	"TOB.QUOTE.UPDATE_FLAGS_COHERENCE": {"Quote Update Flags are internally coherent (updated vs gone not contradictory)."},
 	"TOB.QUOTE.SOURCE_ID_REGISTRY":     {"Quote Source ID is non-zero and within the registry's allowed range."},
-	"TOB.QUOTE.SOURCE_COUNT":           {"Bid/Ask Source Count is advisory (0 = unavailable); observability only."},
+	"TOB.QUOTE.VENUE_COUNT":            {"Bid/Ask Venue Count is advisory (0 = unavailable); observability only."},
 	"TOB.QUOTE.REFDATA_KNOWN":          {"A Quote/Trade Instrument ID resolves to a current-manifest definition."},
-	"TOB.TRADE.FIELDS":                 {"Trade (0x04) fields are valid: Aggressor Side 0/1/2, flag bits 0–2, registered source id."},
+	"TOB.TRADE.FIELDS":                 {"Trade (0x04) fields are valid: Aggressor Side 0/1/2, flag bits 0–2, registered Source ID."},
 
 	// --- Midpoint ---
 	"MID.STRUCT_LEN_TYPE":          {"A Midpoint (0x03) is exactly 40 bytes, mktdata only, magic 0x4D44."},
