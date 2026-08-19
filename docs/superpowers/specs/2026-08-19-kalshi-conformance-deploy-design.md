@@ -72,16 +72,37 @@ kept its slimmed 64-byte `InstrumentDefinition`).
 `git ls-remote --tags origin` shows only `refs/tags/conformance/v0.1.0`. No `v0.2.0+` has appeared.
 Local `HEAD` == `origin/main` == `fea26c3`.
 
-### 1.1 Two corrections to the received framing
+### 1.1 Corrections to the received framing
 
-Both strengthen the conclusion rather than change it, and both are recorded because the wrong
-mechanism in a note becomes the wrong decision later.
+Recorded because the wrong mechanism in a note becomes the wrong decision later — and one of these was
+itself a wrong correction in an earlier draft of this section, which is exactly the failure it warns
+about.
 
-**`FRAME.SCHEMA_VERSION` is `Info` severity, not `Must`** — at v0.1.0 (`tools/conformance/core/registry.go:24`) and on
-main. So v0.1.0 pointed at a Kalshi feed does *not* produce a must-violation on every frame. What it
-actually does is worse and quieter: it decodes a schema-3 `InstrumentDefinition` at schema-1 offsets,
-so `Symbol` and every later field are read two bytes off and every refdata-derived rule grades
-shifted bytes. The release is still required; the reason is misalignment, not severity.
+**`FRAME.SCHEMA_VERSION` is `Info` severity, not `Must`** — at v0.1.0
+(`tools/conformance/core/registry.go:24`) and on main. That much is true and worth keeping: it is not
+what pages.
+
+**But v0.1.0 on a Kalshi feed *does* fire a must-violation per definition frame, and an earlier draft
+of this section said it did not.** At that tag `expectedMsgLen` returns **80** for
+`InstrumentDefinition` (`tools/conformance/engine/tier1.go:31` at `conformance/v0.1.0`), Kalshi emits
+**130**, and `MSG.LENGTH_PER_TYPE` is `Must` (`core/registry.go:37`). So the loud effect is present, and
+this is the exact mirror image of §2.2 rather than a contrast with it.
+
+**Both effects occur, because the two paths are gated differently.** Tier-1 message checks are gated on
+the length matching — `exp := expectedMsgLen(...)`, `lengthOK := exp == 0 || m.Length == exp`
+(`engine/tier1.go:292-293`) — so a wrong length suppresses the *downstream* per-field Tier-1 rules and
+leaves `MSG.LENGTH_PER_TYPE` itself firing. The refdata state machine has no such gate: it reads
+`instrDefAllFields` straight off the message (`engine/refdata.go:655-657`). So v0.1.0 against Kalshi
+pages on every definition frame **and** feeds misaligned fields into every refdata-derived rule. The
+release is required for both reasons.
+
+**The shift is 50 bytes after `Symbol`, not two.** Per `VERSIONING.md:62`: `2.0.0` widened `Symbol` from
+`char[16]` to `char[64]`, "moving every later field and growing the message from 80 to 128 bytes", and
+`3.0.0` inserted `Source ID` (`u16`) after `Instrument ID`, "shifting every later field by two bytes and
+growing the message to 130 bytes". Schema 1 -> 3 is therefore both changes: `Symbol` itself starts two
+bytes late, and everything after `Symbol` lands 50 bytes off (2 + 48). An earlier draft cited only the
+two-byte figure, which understates the corruption by a factor of 25 and describes a schema-2-to-3 delta
+that no deployed feed exercises.
 
 **Symmetrically, the reason not to bump HL's pin is `MSG.LENGTH_PER_TYPE` (`Must`), not
 `FRAME.SCHEMA_VERSION`.** See §2.2.
@@ -240,9 +261,18 @@ The Hyperliquid publisher emits **schema 1** (`hyperliquid/app/publisher/server/
 v0.1.0 works for it. A release built from main expects 3.
 
 Bumping the fleet-wide `dz_conformance_version` would put v0.2.0 on HL's schema-1 feed, where
-`InstrumentDefinition` is 80 bytes and the binary expects 128 (`Symbol` widened from `char[16]` to
-`char[64]` at schema 2). `MSG.LENGTH_PER_TYPE` is `Must`, and it would fire on every definition
-frame. **That** is what would page — not `FRAME.SCHEMA_VERSION`, which is `Info`.
+`InstrumentDefinition` is **80** bytes and the binary expects **130**
+(`tools/conformance/engine/tier1.go:31`). `MSG.LENGTH_PER_TYPE` is `Must`, and it would fire on every
+definition frame. **That** is what would page — not `FRAME.SCHEMA_VERSION`, which is `Info`.
+
+**130, not 128 — and the difference matters because 128 is a schema no feed runs.** `VERSIONING.md:62`
+records two `MAJOR` steps on the shared non-midpoint `InstrumentDefinition`: `2.0.0` widened `Symbol`
+from `char[16]` to `char[64]`, growing the message from 80 to 128 bytes, and `3.0.0` inserted
+`Source ID` (`u16`) after `Instrument ID`, growing it to 130. Every non-midpoint feed is at schema 3, so
+the live gap is 80 vs 130 and it is the sum of both changes. An earlier draft of this section said
+"expects 128" and attributed the whole delta to the `Symbol` widening; that number was also copied into
+the permanent `group_vars` comment the plan writes onto **both** fleets, where a wrong constant outlives
+the review that introduced it.
 
 So: HL stays pinned to `v0.1.0`, Kalshi gets `v0.2.0`, and the comment next to each pin states the
 schema-1-vs-3 reason, because a future reader will otherwise tidy the two pins into one.
@@ -302,17 +332,26 @@ as the `stream` label (`malbeclabs/infra:ansible/playbooks/roles/monitoring/temp
 alert matchers in §4 select on, and the Grafana feed-race dashboard buckets on a leading plane prefix
 the same way the capture ids do.
 
-**The prefix is a naming convention, not an alert matcher.** An earlier draft of this design used
-`stream=~"^kalshi_"` in §4.3 to avoid an enumeration that has to be edited whenever a stream is added.
-That is the wrong trade for a `Must` rule: it makes every future Kalshi stream inherit an exemption
-nobody assessed. §4.3 therefore matches each deviating stream by exact name, and the cost of editing
-the matcher when a stream is added is the point — a new stream pages until someone decides it should
-not.
+**The prefix is a naming convention, not an alert matcher — and an earlier draft of this design made it
+one, incorrectly.** That draft used `stream=~"^kalshi_"` in §4.3 to avoid an enumeration that has to be
+edited whenever a stream is added. It failed twice over:
+
+1. **It matched nothing.** Prometheus anchors regex label matchers fully — `=~"foo"` compiles to
+   `^(?:foo)$` — so `stream=~"^kalshi_"` becomes `^(?:^kalshi_)$` and matches only the literal label
+   value `kalshi_`, never `kalshi_perps_tob`. The exclusion was a no-op, so the deviation would have
+   paged exactly as if the alert had never been edited.
+2. **Repairing it to `kalshi_.*` would then be wrong for the opposite reason.** A working prefix hands
+   the exemption to every current *and future* Kalshi stream, which for a `Must` rule means a stream
+   nobody assessed inherits an exemption (§4.2).
+
+§4.3 therefore matches each deviating stream by exact name. The cost of editing the matcher when a
+stream is added is the point — a new stream pages until someone decides it should not — and an
+equality matcher cannot be silently defeated by anchoring.
 
 ### 3.3 Cadence expectations are a 1.1x budget, derived not copied
 
 `REFDATA.MANIFEST_CADENCE` and `HEARTBEAT.CADENCE` compare with a bare `>` and no slack
-(`tools/conformance/engine/refdata.go:396`, `tools/conformance/engine/engine.go:345`). The measured medians sit *above* target — manifest
+(`tools/conformance/engine/refdata.go:396`, `tools/conformance/engine/engine.go:379`). The measured medians sit *above* target — manifest
 1.000008 s, heartbeat 5.000017 s — so a periodic timer whose mean period equals its target puts
 roughly half its samples over the line. Measured: 31 of 61 manifest gaps and 6 of 12 heartbeat gaps
 violated, at a worst overshoot anywhere in the capture of **830 µs on a 1 s timer** (0.08%).
@@ -339,9 +378,20 @@ would be that mistake. No rule reads `ExpectSnapshotCycle` today — it is parse
 (findings §5.1, §8.1) — which is precisely why it has to be right now, before a rule starts reading
 it and the error becomes visible as a finding rather than as a config diff.
 
-`--expect-definition-cycle=33s` enables `REFDATA.DEFINITION_CYCLE_COVERAGE`. The measured NFL run
-passed `30s` exactly and produced no findings on that rule, so `33s` carries slack over a value
-already known to be clean.
+`--expect-definition-cycle=33s` arms **three** rules, not one, and two of them are `Must`
+(`tools/conformance/engine/config.go:39-52`):
+
+| rule | severity | registry |
+| --- | --- | --- |
+| `REFDATA.DEFINITION_CYCLE_COVERAGE` | `Must` | `core/registry.go:106` |
+| `REFDATA.NEVER_REACHES_READY` | `Must` | `core/registry.go:112` |
+| `REFDATA.NO_BURST_DEFINITIONS` | `Should` | `core/registry.go:113` |
+
+This matters for the canary gate, not just for completeness: the acceptance criterion stops the rollout
+on any `must` violation other than `MSG.WRONG_PORT_PLACEMENT`, so an armed `Must` rule nobody listed
+will stop it and look like a new finding. The measured NFL run passed `30s` exactly with no findings on
+the coverage rule, so `33s` carries slack over a value already known to be clean — but that measurement
+covers one of the three, and the other two are armed by the same flag.
 
 ---
 
@@ -436,16 +486,26 @@ increase(dz_conformance_unverifiable_total{stream=~"kalshi_perps_mbp|kalshi_spor
 
 Both sides carry identical label sets, so `unless` drops exactly the known pairs and **every other
 rule on every Kalshi stream still pages**. That property is the whole point: a blanket
-`stream!~"^kalshi_"` would be one matcher instead of two queries, but it would also mean no Kalshi
+`stream!~"kalshi_.*"` would be one matcher instead of two queries, but it would also mean no Kalshi
 finding ever reaches Slack, which is a validator that reports to nobody.
 
-**Every matcher names its streams; none of them is a prefix.** `MSG.WRONG_PORT_PLACEMENT` is
-registered `allFeeds` and `MBP.SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT` is `mbpOnly`
-(`tools/conformance/core/registry.go:38`, `:70`), so a `^kalshi_` prefix on either would extend the
-exemption to streams where the deviation is unmeasured — the MBP planes for the first (§4.2), and any
-future Kalshi MBP stream for the second. An enumeration has to be edited when a stream is added, and
-that is the desired behaviour: a new stream pages until someone decides it should not. The exemption
-is per (stream, rule_id) because that is the granularity at which the deviations were measured.
+**Every matcher names its streams; none of them is a prefix.** Two independent reasons, and the first
+one is a correctness bug rather than a judgement call:
+
+- **`stream=~"^kalshi_"` matches no series at all.** Prometheus anchors regex label matchers fully
+  (`=~"foo"` compiles to `^(?:foo)$`), so that matcher becomes `^(?:^kalshi_)$` and selects only a label
+  whose entire value is `kalshi_`. An earlier draft of this design used exactly that form on both rules,
+  which means neither deviation would have been scoped out at all.
+- **A repaired prefix (`kalshi_.*`) would over-suppress.** `MSG.WRONG_PORT_PLACEMENT` is registered
+  `allFeeds` and `MBP.SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT` is `mbpOnly`
+  (`tools/conformance/core/registry.go:38`, `:70`), so a working prefix would extend each exemption to
+  streams where the deviation is unmeasured — the MBP planes for the first (§4.2), and every future
+  Kalshi MBP stream for the second.
+
+The exemption is per (stream, rule_id) because that is the granularity at which the deviations were
+measured. Note the surviving regex, `stream=~"kalshi_perps_mbp|kalshi_sports_mbp_nfl"`, is correct under
+full anchoring — it compiles to `^(?:kalshi_perps_mbp|kalshi_sports_mbp_nfl)$` — and any future
+alternation has to be written the same way: no leading `^`, no trailing `.*` needed.
 
 Rejected alternatives, for the record:
 
@@ -469,14 +529,24 @@ tooling offers: `make grafana-lint` is `grafana/scripts/lint.sh`, which for aler
 required-field presence and warns on a missing `annotations.summary`. It does not parse PromQL and
 does not know that `stream` is a label.
 
-Two consequences for the rollout order, both carried into the plan:
+**This is how the earlier `^kalshi_` bug survived its own review.** The matcher selected nothing, so the
+`unless` dropped nothing, so the expression returned the HL series unchanged — which is precisely the
+"no-op today" the verify step was written to look for. A broken matcher and a correct one produced
+identical output, and the check was reported as passing.
 
-1. **The right-hand side is verified on its own, before the `unless` is trusted.** Querying only the
-   exclusion selector must return the specific series it is meant to drop — and it can only do that
-   once the canary is emitting. So the sequence is: sync the scoped rules, start the canary, then
-   confirm the exclusion selector actually selects, and confirm the full expression no longer carries
-   those series while still carrying every other Kalshi rule.
-2. **The sync happens before the canary, not after.** §4's premise is that alerts are scoped *before
+Three consequences for the rollout order, all carried into the plan:
+
+1. **The mechanism is provable before the canary, by substituting a stream that IS emitting.** HL is
+   emitting today, so building the exclusion clause against a live HL `(stream, rule_id)` pair — say
+   `stream="tob_mainnet2"`, `rule_id="FRAME.LENGTH_CONSISTENCY"` — and confirming those series
+   *disappear* from the full expression proves the `unless`, the label names and the anchoring all work.
+   This is not tautological and it does not wait for Kalshi. Revert to the Kalshi pair afterwards.
+2. **The real matcher is verified on its own, once the canary emits.** Querying only the exclusion
+   selector must return the specific series it is meant to drop, and it can only do that after the
+   instances start. So: sync the scoped rules, start the canary, then confirm the selector actually
+   selects, and confirm the full expression no longer carries those series while still carrying every
+   other Kalshi rule.
+3. **The sync happens before the canary, not after.** §4's premise is that alerts are scoped *before
    anything emits*; an approval gate that stops at "edited the JSON" leaves Grafana holding the old
    unscoped rules while the canary starts. The gate is therefore on the sync itself, and the sync is a
    step, not an afterthought.
@@ -547,6 +617,20 @@ The coverage-loss exclusion is removed when the upstream `pending` deferral land
 completed snapshot group until the delta port reaches `K`. Findings §8 calls that a real change
 rather than a one-liner, and it belongs in `edge-feed-spec`, not here.
 
+### 6.3 Source ID `3` is Kalshi, and this repo owns the row
+
+`sources/spec.md:24` reads `| 3 | Lashay | | |` — assigned, but with a blank `Kind` and no note. That is
+not an unrelated tenant: `kalshi_feed_capture_cmh.yml:27-29` records that the capture ids were
+`tob_lashay_1`/`mbp_lashay_2` until 2026-08-11, because "lashay" was the group's name "before the edge
+feeds were renamed to `edge-kalshi-*` on the DZ ledger". So ID `3` is the Kalshi publisher under its
+former name, and the registry that grades it is owned in **this** repository.
+
+Fill the row in (`Kind`, and a note naming the rename) as part of Task 1a. Two reasons it is not
+cosmetic: the embedded registry is what `TOB.QUOTE.SOURCE_ID_REGISTRY` checks against, so a reader
+auditing a source-ID finding lands on a row that identifies nothing; and if the assumption is wrong — if
+ID `3` is *not* Kalshi — then the recorded pin is wrong and the canary's "no source-ID violations"
+criterion is measuring the wrong thing. Either way the row has to say which.
+
 ---
 
 ## 7. What this does **not** catch
@@ -583,7 +667,29 @@ Three further limits:
    absent.
 2. **Neither cadence rule ever emits a pass**, so a healthy run and a run where the rule never got
    to look are byte-identical in the JSON report (findings §8.1).
-3. **One sports channel of thirty-one.** NFL is the only channel with a measured baseline; the other
+3. **The two cadence rules are not symmetric on the page path, and the heartbeat half pages nowhere.**
+   `REFDATA.MANIFEST_CADENCE` is `Must` (`core/registry.go:105`) but `HEARTBEAT.CADENCE` is `Info`
+   (`core/registry.go:62`). `Info` never moves the exit code, with or without `--strict`, and never
+   matches the must-violation rule's `severity="must"` selector — so a real heartbeat stall on a Kalshi
+   stream reaches no alert and no non-zero exit. It is visible only by reading the metric. (§1.3 adds a
+   second, independent reason the heartbeat rule is blind pre-fix: one `lastHbSendTS` for two
+   interleaved arms.)
+4. **A 1.1x budget on a bare `>` hides a real cadence regression.** Both rules compare a single observed
+   gap against the expectation with no slack and no distributional test
+   (`engine/refdata.go:396`, `engine/engine.go:379`). With `--expect-manifest-cadence=1100ms`, a
+   publisher that degraded to a ~1.09 s *mean* manifest cadence — a 9% regression on a 1 s timer —
+   produces no gap over the threshold and stays permanently invisible. The budget buys silence on a
+   healthy feed (§3.3) at the cost of a blind band directly above target; that is the right trade for a
+   `Must` rule that would otherwise fire on half of all samples, but it is a blind band and not a
+   tolerance.
+5. **Source-ID identity is never validated; only its range is, and only on TOB.** The single source-ID
+   rule is `TOB.QUOTE.SOURCE_ID_REGISTRY` — `Must`, but `tobOnly` (`core/registry.go:123`) — and it
+   checks membership of the accepted ranges (`engine/sources.go:26-36`), not that the ID identifies the
+   publisher it claims. On MBP there is no check at all: `Source ID` is documented in the message layout
+   but has no accessor (`engine/mbp_fields.go:12-32`), so two of the three deployed streams do not
+   inspect it even for range. A clean source-ID line in the canary output therefore means "the TOB
+   stream's IDs are inside 1-1023", not "the publisher is who it says it is".
+6. **One sports channel of thirty-one.** NFL is the only channel with a measured baseline; the other
    30 are unvalidated and stay that way here.
 
 ---
@@ -609,6 +715,14 @@ Read-only checks against Grafana Cloud Prometheus and the two repositories.
 | Exit code depends on `--strict` | `run.go:241` `agg.ExitCode(opts.Cfg.Strict)` | report must record it (§1.2) |
 | Child group_vars beat the parent here | `ansible-inventory --host` on all six hosts, change applied to a scratch inventory | HL unchanged, Kalshi as intended |
 | `make grafana-lint` does not parse PromQL | `grafana/scripts/lint.sh` — required fields + a summary warning only | verification widened (§4.4) |
+| Prometheus anchors regex matchers fully | `=~"foo"` compiles to `^(?:foo)$` | `^kalshi_` matched nothing; §3.2/§4.3 corrected |
+| v0.1.0 on Kalshi fires `MSG.LENGTH_PER_TYPE` | `engine/tier1.go:31` at `conformance/v0.1.0` returns 80 vs the 130 emitted | §1.1 was inverted, corrected |
+| `InstrumentDefinition` is 80 / 128 / 130 at schema 1 / 2 / 3 | `VERSIONING.md:62`; `engine/tier1.go:31` on main | §1.1/§2.2 constants corrected |
+| Refdata decode is not length-gated | `engine/refdata.go:655-657` vs `engine/tier1.go:292-293` | both effects occur |
+| `--expect-definition-cycle` arms three rules | `engine/config.go:39-52`; `registry.go:106`, `:112`, `:113` | two `Must`, one `Should` (§3.3) |
+| `HEARTBEAT.CADENCE` is `Info` | `core/registry.go:62` vs `:105` | pages nowhere (§7 limit 3) |
+| `Source ID` has no MBP accessor | `engine/mbp_fields.go:12-32` | unchecked on 2 of 3 streams (§7 limit 5) |
+| Source ID `3` is recorded as "Lashay", `Kind` blank | `sources/spec.md:24` | filled in as Kalshi (§6.3) |
 
 **One stale comment corrected.** `malbeclabs/infra:ansible/inventory/mainnet-beta/group_vars/kalshi_feed_capture_dub.yml` states that
 `aws-dub-mn-recorder1` "is NOT yet subscribed" to the perps groups. It is: measured

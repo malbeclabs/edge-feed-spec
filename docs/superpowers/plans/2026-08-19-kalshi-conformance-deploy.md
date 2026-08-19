@@ -103,6 +103,7 @@ from `tools/conformance`.
 - Create: `tools/conformance/main_test.go`
 - Modify: `tools/conformance/run.go`
 - Modify: `tools/conformance/report/json.go`
+- Modify: `sources/spec.md`
 - Modify: `tools/conformance/README.md`
 
 - [ ] **Step 1: `--version` prints version and commit**
@@ -163,7 +164,20 @@ depending on a flag the report does not record. Emit the effective `strict` sett
 status) at the top level and cover **both** modes in the test — a report that says
 `should: 1` without saying whether strict was on still does not determine the exit code.
 
-- [ ] **Step 4: document both in `tools/conformance/README.md`**
+- [ ] **Step 4: fill in the Source ID `3` row in `sources/spec.md`**
+
+`sources/spec.md:24` reads `| 3 | Lashay | | |` — assigned, `Kind` blank, no note. It is the Kalshi
+publisher under its former name: `malbeclabs/infra:.../group_vars/kalshi_feed_capture_cmh.yml:27-29`
+records that the capture ids were `tob_lashay_1`/`mbp_lashay_2` until 2026-08-11 because "lashay" was the
+group's name "before the edge feeds were renamed to `edge-kalshi-*` on the DZ ledger". This repo owns the
+registry that `TOB.QUOTE.SOURCE_ID_REGISTRY` grades against, so fill in `Kind` and a note naming the
+rename.
+
+**If that identification turns out to be wrong, stop and say so** — the canary's "no source-ID
+violations" criterion and the decision not to set `dz_conformance_source_registry_path` both rest on
+`source_id: 3` being this publisher.
+
+- [ ] **Step 5: document all of it in `tools/conformance/README.md`**
 
 - [ ] **Verify:** `cd tools/conformance && go test ./... && golangci-lint run`. Build locally and
   confirm `--version` prints `dev+none` in the default build and `v0.0.0-test+abc123def456` under
@@ -174,7 +188,7 @@ status) at the top level and cover **both** modes in the test — a report that 
   re-run the same pcap with `--strict` and confirm the recorded value tracks the flag and the exit
   code.
 
-- [ ] **Step 5: PR to `malbeclabs/edge-feed-spec`**, `Summary of Changes` / `Testing Verification`,
+- [ ] **Step 6: PR to `malbeclabs/edge-feed-spec`**, `Summary of Changes` / `Testing Verification`,
   commit style `conformance: <lowercase description>`. Merge before Task 1c.
 
 ### Task 1b: key frame state per `(port, channel_id)`
@@ -351,9 +365,19 @@ Keep `dz_conformance_version: "v0.1.0"` there as the fleet default and add the r
 # **This is the Hyperliquid pin and it must not be unified with Kalshi's.** The HL
 # publisher emits wire schema 1; a release built from edge-feed-spec main expects 3
 # (tools/conformance/wire/header.go). v0.2.0 on this feed would mis-size
-# InstrumentDefinition (80 vs 128 bytes, Symbol char[16] -> char[64] at schema 2) and
-# fire MSG.LENGTH_PER_TYPE — a **must** rule — on every definition frame.
-# Kalshi pins v0.2.0 in group_vars/kalshi_feed_capture.yml for the mirror-image reason.
+# InstrumentDefinition -- 80 bytes on the wire against the 130 the binary expects
+# (tools/conformance/engine/tier1.go:31) -- and fire MSG.LENGTH_PER_TYPE, a **must**
+# rule, on every definition frame.
+#
+# 130, not 128: per edge-feed-spec VERSIONING.md:62 schema 2.0.0 widened Symbol from
+# char[16] to char[64] (80 -> 128 bytes) and schema 3.0.0 then inserted Source ID (u16)
+# after Instrument ID (128 -> 130). No deployed feed runs schema 2, so the live gap is
+# the sum of both steps. Fields after Symbol land 50 bytes off, not two.
+#
+# Kalshi pins v0.2.0 in group_vars/kalshi_feed_capture.yml for the mirror-image reason,
+# and it is a true mirror: v0.1.0 against Kalshi expects 80 against the 130 emitted, so
+# it fires the same must rule AND misaligns the refdata decode, which is not
+# length-gated (engine/refdata.go:655-657 vs engine/tier1.go:292-293).
 # Two pins is the correct state here, not an untidied one.
 ```
 
@@ -382,9 +406,12 @@ In `malbeclabs/infra:ansible/inventory/mainnet-beta/group_vars/kalshi_feed_captu
 # separate: v0.1.0 has no MBP engine at all (-feed accepts only tob|midpoint|mbo) and
 # hardcodes `SchemaVersion != 1`, while this publisher emits schema 3
 # (dz-tob-protocol/src/constants.rs:26, including on the deployed publisher/v0.9.0).
-# Against a Kalshi feed v0.1.0 decodes InstrumentDefinition at schema-1 offsets, so
-# every refdata-derived rule grades bytes shifted by two. See
-# group_vars/dz_conformance.yml for why HL cannot move to v0.2.0.
+# Against a Kalshi feed v0.1.0 expects an 80-byte InstrumentDefinition against the 130
+# emitted, so MSG.LENGTH_PER_TYPE (a **must** rule) fires on every definition frame --
+# and because the refdata path is not length-gated (engine/refdata.go:655-657 vs
+# engine/tier1.go:292-293) it ALSO grades misaligned bytes: Symbol two bytes late and
+# every field after it 50 bytes off. See group_vars/dz_conformance.yml for the byte
+# arithmetic and for why HL cannot move to v0.2.0.
 dz_conformance_version: "v0.2.0"
 ```
 
@@ -424,12 +451,22 @@ dz_conformance_feeds:
     metrics_port: 9120
     # Cadence expectations at 1.1x the publisher's configured values, NOT copies of
     # them. REFDATA.MANIFEST_CADENCE and HEARTBEAT.CADENCE compare with a bare `>`
-    # and no slack (engine/refdata.go:396, engine/engine.go:345), and the measured
+    # and no slack (engine/refdata.go:396, engine/engine.go:379), and the measured
     # medians sit above target (manifest 1.000008s, heartbeat 5.000017s) — so exact
     # values violate on ~half of all samples on a healthy feed. Worst overshoot ever
     # measured is 830us on a 1s timer; re-running the same capture at 1100/5500ms
     # exits 0 with both rules silent. Flag-side budget, no code change.
     # Source: malbeclabs/kalshi group_vars/kalshi_publishers_perps.yml:314-316.
+    #
+    # --expect-definition-cycle arms THREE rules, not one, and two are **must**
+    # (engine/config.go:39-52): REFDATA.DEFINITION_CYCLE_COVERAGE (must,
+    # registry.go:106), REFDATA.NEVER_REACHES_READY (must, :112) and
+    # REFDATA.NO_BURST_DEFINITIONS (should, :113). Only the first has a measured
+    # baseline, so the other two are the plausible source of an unexpected canary stop.
+    #
+    # --expect-heartbeat arms HEARTBEAT.CADENCE, which is **info** (registry.go:62),
+    # NOT must like REFDATA.MANIFEST_CADENCE (:105). A heartbeat stall therefore moves
+    # no exit code and reaches no alert; it is visible only in the metric.
     extra_args:
       - --expect-manifest-cadence=1100ms   # 1.1 x manifest_cadence_seconds: 1
       - --expect-heartbeat=5500ms          # 1.1 x heartbeat_interval_seconds: 5
@@ -620,7 +657,15 @@ Replace the `refId: A` expression with:
 increase(dz_conformance_violations_total{severity="must"}[5m]) unless increase(dz_conformance_violations_total{severity="must",stream="kalshi_perps_tob",rule_id="MSG.WRONG_PORT_PLACEMENT"}[5m])
 ```
 
-**`stream="kalshi_perps_tob"` exactly — not `stream=~"^kalshi_"`.** The rule is registered `allFeeds`
+**`stream="kalshi_perps_tob"` exactly — not `stream=~"^kalshi_"`, which is what an earlier draft of this
+plan had and which matches nothing.** Prometheus anchors regex label matchers fully (`=~"foo"` compiles
+to `^(?:foo)$`), so `stream=~"^kalshi_"` becomes `^(?:^kalshi_)$` and selects only a label whose entire
+value is the literal `kalshi_`. The exclusion would have been a no-op and the deviation would have paged
+exactly as if the file had never been edited — and the old Verify step, which looked for "a no-op today",
+would have reported that as success.
+
+Equality also removes the failure mode entirely: `stream="..."` cannot be defeated by anchoring. And a
+*repaired* prefix would still be wrong here. The rule is registered `allFeeds`
 (`tools/conformance/core/registry.go:38`), so a prefix would exempt the two MBP streams as well. The
 deviation is not theirs: `emit_control_both` exists only in the top-of-book path
 (`malbeclabs/kalshi:.../publisher/tob/venue.rs:1297`, `.../publisher/tob_feed.rs:701`,
@@ -636,10 +681,13 @@ to stay correct.
 increase(dz_conformance_unverifiable_total[5m]) unless increase(dz_conformance_unverifiable_total{stream=~"kalshi_perps_mbp|kalshi_sports_mbp_nfl",rule_id="MBP.SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT"}[5m])
 ```
 
-Enumerate the two streams the measurement covers rather than the prefix. The rule is `mbpOnly`
-(`registry.go:70`), so today's TOB stream cannot emit it either way — but a prefix would hand the
-exemption to every *future* Kalshi MBP stream before anyone assessed it, and adding a stream is exactly
-when that assessment should be forced.
+Enumerate the two streams the measurement covers rather than the prefix — the same anchoring trap
+applies, and the earlier `stream=~"^kalshi_"` here matched nothing either. Under full anchoring this
+alternation compiles to `^(?:kalshi_perps_mbp|kalshi_sports_mbp_nfl)$`, which is correct: **no leading
+`^`, and no trailing `.*` needed.** Beyond the bug, the rule is `mbpOnly` (`registry.go:70`) so today's
+TOB stream cannot emit it either way — but a prefix would hand the exemption to every *future* Kalshi
+MBP stream before anyone assessed it, and adding a stream is exactly when that assessment should be
+forced.
 
 Both sides carry identical label sets, so `unless` drops exactly the excluded series and **every
 other rule on every Kalshi stream still pages**. `stream` comes from the Alloy scrape
@@ -820,9 +868,15 @@ Acceptance:
   This is the Task 1b acceptance test in production: both streams carry two publishers on one port, so
   a non-zero value here means the `(port, channel_id)` keying is not in the deployed binary or does not
   work, and the rollout stops. Do not reinterpret it as host or path loss until this reads 0 once.
-- **no source-ID rule violations.** `source_id: 3` is inside the embedded registry's accepted 1-1023
-  range, so `dz_conformance_source_registry_path` stays empty. If source-ID rules do fire, that is
-  the documented trigger for setting it to an on-host registry path.
+- **no source-ID rule violations — and know how little that proves.** `source_id: 3` is inside the
+  embedded registry's accepted ranges (`engine/source_ids.json`, `[[1,1023]]`), so
+  `dz_conformance_source_registry_path` stays empty. If source-ID rules do fire, that is the documented
+  trigger for setting it to an on-host registry path. But the only source-ID rule is
+  `TOB.QUOTE.SOURCE_ID_REGISTRY` — `Must`, yet `tobOnly` (`core/registry.go:123`) — and it checks range
+  membership, not identity. On MBP there is no check at all: `Source ID` is in the message layout but has
+  no accessor (`engine/mbp_fields.go:12-32`). So a clean line here means "the TOB stream's IDs are inside
+  1-1023", not "the publisher is who it claims to be", and it says nothing at all about two of the three
+  streams (spec §7 limit 5).
 - `checks_total{result="pass"}` advancing across the two scrapes **on both ports** — a silent stream and
   a clean stream are otherwise indistinguishable, and this is also the only signal that the gated rules
   are alive rather than parked behind a latched `dirtyWindow`
@@ -831,7 +885,12 @@ Acceptance:
   (spec §1.3), so confirm at least one `MBP.*` rule appears with a `pass` or a `Violation` rather than
   exclusively in `unverifiable_total`
 - the only `must` violations are `MSG.WRONG_PORT_PLACEMENT` on the TOB stream; anything else is a new
-  finding and stops the rollout
+  finding and stops the rollout. **Before treating a stop as a new finding, check the three rules the
+  flags arm**: `--expect-definition-cycle=33s` arms `REFDATA.DEFINITION_CYCLE_COVERAGE` (`Must`),
+  `REFDATA.NEVER_REACHES_READY` (`Must`) and `REFDATA.NO_BURST_DEFINITIONS` (`Should`)
+  (`engine/config.go:39-52`), and only the first has a measured baseline. A stop on either of the other
+  two is an armed rule meeting this feed for the first time, not necessarily a publisher regression —
+  report the counter and the flag together.
 
 - [ ] **Step 4b: now verify the alert exclusions against live series**
 
