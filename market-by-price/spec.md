@@ -244,7 +244,7 @@ A future shared supplement is anticipated to factor `Trade` out of the sibling s
 |--------|-------|------|-------------|
 | 0 | Header | 4B | Type=`0x04`, Length=52 |
 | 4 | Instrument ID | `u32` | Instrument traded |
-| 8 | Source ID | `u16` | Originating source |
+| 8 | Source ID | `u16` | Originating `source_id`, as assigned by the [Source ID Registry](../sources/spec.md). |
 | 10 | Aggressor Side | `u8` | 1=Buy, 2=Sell, 0=Unknown |
 | 11 | Trade Flags | `u8` | Bit 0: block, bit 1: sweep, bit 2: cross. Set to 0 if not applicable. |
 | 12 | Source Timestamp | `ts_ns` | Venue timestamp of execution |
@@ -327,7 +327,7 @@ The core message. The aggregate resting quantity at one price level changed.
 |--------|-------|------|-------------|
 | 0  | Header | 4B | Type=`0x40`, Length=48 |
 | 4  | Instrument ID | `u32` | Instrument this level belongs to |
-| 8  | Source ID | `u16` | Originating source. |
+| 8  | Source ID | `u16` | Originating `source_id`, as assigned by the [Source ID Registry](../sources/spec.md). |
 | 10 | Side | `u8` | `0`=Bid/Buy, `1`=Ask/Sell |
 | 11 | Action | `u8` | See Action table. **Informational only**; see [Absolute Apply Semantics](#absolute-apply-semantics). |
 | 12 | Per-Instrument Seq | `u32` | See [Per-Instrument Delta Sequence](#per-instrument-delta-sequence). Same type and offset as the market-by-order feed's. |

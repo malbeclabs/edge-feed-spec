@@ -78,8 +78,8 @@ Neither half of either pair is redefined here. `receiver` in particular keeps it
 | `frame` (our own traffic) | `datagram` | |
 | `channel` (port role) | `port role` | |
 | `channel` (venue pub/sub topic) | `venue topic` | |
-| `source` (unqualified) | a qualified form | Never bare — see the note below |
-| `epoch` | `era` | |
+| `source` (unqualified) | a qualified form | Never bare — see the note below. `source of truth` is the exception: a fixed English idiom naming authority, not an origin |
+| `epoch` | `era` | `Unix epoch` is the exception: it is the externally owned name of the 1970-01-01T00:00:00Z origin, not a sense of the word. Use `era` for our own `Reset Count` span |
 | `sibling feed` | `feed` | All feeds are siblings; the word adds nothing |
 | `tee` | `fan-out` | |
 | `sweep` | Name the operation | Currently means three unrelated things. `Trade Flags` bit 1 keeps the name: it is the standard term for an order sweeping several levels, externally defined and carried on the wire |

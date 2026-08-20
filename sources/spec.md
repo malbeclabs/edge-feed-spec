@@ -27,7 +27,7 @@ This document specifies version **1.0.1**: the reserved ranges, the current assi
 
 To request a new Source ID, open a pull request against this file that:
 
-1. Adds a row to the **Assigned Sources** table with the next unused ID in the production range.
+1. Adds a row to the **Assigned Source IDs** table with the next unused ID in the production range.
 2. Fills in the `Name`, `Kind`, and (optionally) `Notes` columns.
 3. Does not renumber, reorder, or remove existing rows.
 

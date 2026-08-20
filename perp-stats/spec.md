@@ -227,7 +227,7 @@ Existing field layouts and semantics will not change within the `3.x` line. A ch
 
 ### Changes
 
-**3.0.1** — editorial. Renamed the per-poll "full sweep" to a **full pass**, added an *Identity Model* section stating that instrument identity is the `(channel_id, instrument_id)` tuple, removed the *Relationship to Sibling Feeds* enumeration, and adopted the glossary's "published set". No wire change.
+**3.0.1** — editorial. Renamed the per-poll "full sweep" to a **full pass**, added an *Identity Model* section stating that instrument identity is the `(channel_id, instrument_id)` tuple, removed the *Relationship to Sibling Feeds* enumeration (its `Magic` distinctness requirement is relocated verbatim to the [Versioning Policy](../VERSIONING.md)), and adopted the glossary's "published set". No wire change.
 
 **3.0.0** — added `Source ID` (`u16`) after `Instrument ID` in `InstrumentDefinition`. `Symbol` and every later field move two bytes, and the message grows from 128 to 130 bytes. This is a breaking change: the Schema Version byte is now `3`, and a decoder built for `2.x` MUST reject these frames rather than parse them at the old offsets. The midpoint feed remains unchanged at Schema Version `1`.
 
@@ -235,5 +235,5 @@ Existing field layouts and semantics will not change within the `3.x` line. A ch
 
 **1.0.0** — first stable release. Promoted from the `0.1.1` draft with no wire change; Schema Version was `1` before and after.
 
-**0.1.1** (draft, never tagged) — registered the frame `Magic` value `0x4450` ("DP") for this feed and added the consumer validation requirement (see [Transport Framing](#transport-framing)). Previously the header was deferred wholesale to the top-of-book spec, leaving the value ambiguous even though the sibling-feed rule already required a distinct one. No wire-layout change; Schema Version remained `1`.
+**0.1.1** (draft, never tagged) — registered the frame `Magic` value `0x4450` ("DP") for this feed and added the consumer validation requirement (see [Transport Framing](#transport-framing)). Previously the header was deferred wholesale to the top-of-book spec, leaving the value ambiguous even though the [Versioning Policy](../VERSIONING.md) already required a distinct one. No wire-layout change; Schema Version remained `1`.
 

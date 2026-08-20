@@ -255,7 +255,7 @@ A new order was submitted.
 | 12 | TIF | `u8` | See TIF |
 | 13 | Event Flags | `u8` | See Event Flags |
 | 14 | Batch Index | `u16` | Position within the exploded signed action (0-based) |
-| 16 | Batch Count | `u16` | Source entry count of the signed action (≥ 1) |
+| 16 | Batch Count | `u16` | Entry count of the signed action (≥ 1) |
 | 18 | Grouping | `u8` | See Grouping |
 | 19 | Reserved | `u8` | Padding; zeroed |
 | 20 | Action Tag | `u64` | Per-action correlation handle |
@@ -359,7 +359,7 @@ Dead-man-switch set/clear (account-wide). Identical layout to `OrderCancel`, wit
 
 `Batch Index 0 / Count 1` is not a special rule but the general one: a schedule-cancel action contains no entry array, so it is single-entry by construction. `ScheduleCancel` is account-wide because a set dead-man switch signals imminent mass cancellation — high-value intent — even though it is not tied to one instrument.
 
-Venue-specific mapping of source actions to these messages is defined out of band by each venue's publisher and is not part of this specification.
+The mapping from a venue's own actions to these messages is defined out of band by that venue's publisher and is not part of this specification.
 
 ---
 
@@ -385,7 +385,7 @@ Per-host, per-channel, per-port `Sequence Number` gaps are a health signal only;
 
 A publisher operating this feed MUST:
 
-1. **Emit in source order** on `mktdata` as venue events arrive, exploding each multi-entry signed action into one fixed-size event per entry sharing the action's Action Tag, Nonce, Signer, Vault, and Batch Count (per [Common Event Fields](#common-event-fields)). Pack multiple messages into a frame up to the MTU.
+1. **Emit in venue order** on `mktdata` as venue events arrive, exploding each multi-entry signed action into one fixed-size event per entry sharing the action's Action Tag, Nonce, Signer, Vault, and Batch Count (per [Common Event Fields](#common-event-fields)). Pack multiple messages into a frame up to the MTU.
 2. **Maintain a monotonic `Sequence Number`** per `(host, channel, port)`, starting at 0 and resetting only on `Reset Count` change.
 3. **Pre-compute the Action Tag and recover the Signer** so the market-data path carries no strings or crypto. All hosts of one venue MUST run identical tag-derivation behavior in steady state.
 4. **Perform first-observation dedup** over a bounded window, using a venue-defined publisher dedupe identity (a full-precision per-venue key, distinct from the truncated wire Action Tag), so a re-observed copy of an action it already published is not re-emitted by the same host. (Cross-host duplicates remain possible and are reconciled by the subscriber.)
@@ -423,7 +423,7 @@ The format is fixed-size and binary, so parsing requires no allocation, no strin
 
 ---
 
-## Venue Genericity and the Source Registry
+## Venue Genericity and the Source ID Registry
 
 The wire format above is venue-generic. The [Source ID Registry](../sources/spec.md) assigns the Source ID → venue mapping — and nothing more. Three further things vary per venue and are defined **out of band by each venue's publisher**, not by this spec or the registry: the account-id encoding of Signer/Vault (see [Account Identifier Encoding](#account-identifier-encoding-venue-defined)), the Action Tag derivation rule (see [Common Event Fields](#common-event-fields)), and the mapping from the venue's own actions to these messages. The wire layouts do not change per venue; a venue's publisher is responsible for emitting conformant frames and for documenting and testing its own derivations.
 

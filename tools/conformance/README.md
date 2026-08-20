@@ -1,6 +1,6 @@
 # dz-conformance
 
-A conformance subscriber for edge-feed publishers. Subscribes to one channel (TOB, Midpoint, MBO, or MBP) — live multicast or pcap replay — validates the feed against 88 explicit conformance rules drawn from the [edge-feed-spec](../../) (this repo), and returns a CI-friendly exit code.
+A conformance subscriber for edge-feed publishers. Subscribes to one feed (TOB, Midpoint, MBO, or MBP) on one channel — live multicast or pcap replay — validates the feed against 88 explicit conformance rules drawn from the [edge-feed-spec](../../) (this repo), and returns a CI-friendly exit code.
 
 Unlike a production consumer — which is tolerant of publisher quirks (skipping unknown types, ignoring reserved bits, recovering silently from loss) — this tool is **strict by design**: it flags every structural, sequence, and semantic violation the spec defines. `core/registry.go` is the in-code source of truth for the full rule set.
 

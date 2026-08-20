@@ -297,7 +297,7 @@ Existing field layouts and semantics will not change within the `1.x` line. A ch
 
 ### Changes
 
-**1.0.1** — editorial. Removed the *Relationship to Sibling Feeds* enumeration and adopted the glossary's "published set". No wire change.
+**1.0.1** — editorial. Removed the *Relationship to Sibling Feeds* enumeration, relocating its `Magic` distinctness requirement verbatim to the [Versioning Policy](../VERSIONING.md) so it binds every feed rather than only the ones that happened to restate it, and adopted the glossary's "published set". No wire change.
 
 **1.0.0** — first stable release. Promoted from the `0.1.0` draft with no wire change; Schema Version was `1` before and after.
 

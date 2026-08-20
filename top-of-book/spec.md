@@ -234,7 +234,7 @@ Reports a single trade execution.
 |--------|-------|------|-------------|
 | 0 | Header | 4B | Type=`0x04`, Length=52 |
 | 4 | Instrument ID | `u32` | Instrument traded |
-| 8 | Source ID | `u16` | Originating source |
+| 8 | Source ID | `u16` | Originating `source_id`, as assigned by the [Source ID Registry](../sources/spec.md). |
 | 10 | Aggressor Side | `u8` | 1=Buy, 2=Sell, 0=Unknown |
 | 11 | Trade Flags | `u8` | Bit 0: block, bit 1: sweep, bit 2: cross. Set to 0 if not applicable. |
 | 12 | Source Timestamp | `ts_ns` | Venue timestamp of execution |
@@ -322,7 +322,7 @@ Existing field layouts and semantics will not change within the `3.x` line. A ch
 
 ### Changes
 
-**3.0.1** — editorial. Qualified the bare uses of "source" on the `Quote` `Source ID` row and in Design Principle 6, and added an *Identity Model* section stating that instrument identity is the `(channel_id, instrument_id)` tuple. Adopted the glossary's "published set". No wire change.
+**3.0.1** — editorial. Qualified the bare uses of "source" on the `Quote` and `Trade` `Source ID` rows and in Design Principle 6, and added an *Identity Model* section stating that instrument identity is the `(channel_id, instrument_id)` tuple. Adopted the glossary's "published set". No wire change.
 
 **3.0.0** — added `Source ID` (`u16`) after `Instrument ID` in `InstrumentDefinition`. `Symbol` and every later field move two bytes, and the message grows from 128 to 130 bytes. This is a breaking change: the Schema Version byte is now `3`, and a decoder built for `2.x` MUST reject these frames rather than parse them at the old offsets. The midpoint feed remains unchanged at Schema Version `1`.
 
