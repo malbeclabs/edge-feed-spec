@@ -4,7 +4,7 @@ The DoubleZero Order-Intent Feed is a wire format for normalized, pre-consensus 
 
 This is a sibling protocol to the DoubleZero [Top-of-Book & Trades Feed](../top-of-book/spec.md), the [Market-by-Order Feed](../market-by-order/spec.md), and the [Midpoint Feed](../midpoint/spec.md), not a layer on top. Where those feeds carry accepted book state — quotes, resting orders, mid prices — this feed carries *intent*: every successfully normalized supported submission, plus dead-man-switch arm/disarm, as a fixed-size binary message.
 
-This document specifies version **0.1.0**: the frame header, application message header, and the message types that define the wire format. The wire format is venue-generic; the per-venue derivations it deliberately does not fix (account-id encoding, Action Tag rule, source-message mapping) are defined out of band by each venue's publisher and are not part of this specification. The [Source ID Registry](../sources/spec.md) only assigns the Source ID → venue mapping.
+This document specifies version **3.0.0**: the frame header, application message header, and the message types that define the wire format. The wire format is venue-generic; the per-venue derivations it deliberately does not fix (account-id encoding, Action Tag rule, source-message mapping) are defined out of band by each venue's publisher and are not part of this specification. The [Source ID Registry](../sources/spec.md) only assigns the Source ID → venue mapping.
 
 **Trust semantics (normative).** Events are *observed signed submissions*, not accepted orders. An event may reference an invalid order, a replay, an action the venue later rejects, or intent that never executes. The publisher performs no venue-level validation: it *attempts* signature recovery to attribute the event, but recovery is **not a gate on publication** — when recovery fails or is skipped, the event is still published with a zeroed Signer and the `signer unverified` flag (an unauthenticated observation; see [Common Event Fields](#common-event-fields)). Subscribers MUST treat the feed as intent, never as fills or book state. The boundary is syntactic, not semantic: values that parse and convert exactly are published as-is even if venue-invalid (zero quantity, a past schedule-cancel time, an order id that never existed). "Successfully normalized" means malformed, unmappable, or precision-violating entries are dropped; the feed does not promise every observed submission.
 
@@ -55,7 +55,7 @@ Each channel is delivered to **one multicast group on two destination ports**, p
 
 The frame header and application message header are identical on both ports. A subscriber bootstrapping from a cold start MUST bind both ports. A subscriber that already has out-of-band `InstrumentDefinition` data MAY bind only the market data port; doing so forgoes not just the in-band instrument definitions but also the `refdata` liveness signal and the `ManifestSummary` (its `Valid` flag, `Manifest Seq`, and instrument-count) — so a `mktdata`-only subscriber will not observe instrument-set changes in band. Concrete port assignments are out of scope for this spec; each deployment publishes its port mapping out of band.
 
-v1 uses a single channel (ID 0). The frame header supports instrument sharding across channels later without format change.
+This version uses a single channel (ID 0). The frame header supports instrument sharding across channels later without format change.
 
 ### Frame Header (24 bytes)
 
@@ -78,7 +78,7 @@ v1 uses a single channel (ID 0). The frame header supports instrument sharding a
 | Offset | Field | Type | Description |
 |--------|-------|------|-------------|
 | 0 | Magic | `u16` | `0x494F` ("OI", wire bytes `[0x4F, 0x49]`). Frame delimiter. Distinct from the top-of-book feed's `0x445A`, the market-by-order feed's `0x4444`, and the midpoint feed's `0x4D44` to prevent cross-protocol misrouting. |
-| 2 | Schema Version | `u8` | Protocol version. Starts at `1`. |
+| 2 | Schema Version | `u8` | Wire format generation, equal to this spec's MAJOR version. `3` for all `3.x.y` releases. A subscriber MUST discard frames whose version it does not implement. |
 | 3 | Channel ID | `u8` | Logical channel for instrument sharding. `0` in v1. |
 | 4 | Sequence Number | `u64` | Monotonically increasing **per publisher host, per channel, per port**, starting from 0. Resets to 0 when `Reset Count` changes. Used for per-port gap detection. The `mktdata` and `refdata` ports each have an independent series. The frame header carries no Source ID, so a subscriber binding several hosts on one multicast group sees one independent sequence series **per originating host** and MUST track them keyed by transport origin (the datagram's source IP and destination port; each host of a venue publishes on a distinct destination port, and the per-host port offset is a deployment convention defined out of band, not by this spec). Hosts of one venue all carry the **same** Source ID (per-venue; see [Common Event Fields](#common-event-fields)), so the host is identified by transport, not by the in-message Source ID. Sequence gaps are a per-host, per-channel, per-port health signal and never gate delivery. |
 | 12 | Send Timestamp | `ts_ns` | When the publisher sent this frame. Subscribers can measure publisher-internal latency as the difference from a message's Source Timestamp. |
@@ -107,7 +107,7 @@ Every application message begins with:
 | Type ID | Name | Size | Port | Description |
 |---------|------|-----:|------|-------------|
 | `0x01` | Heartbeat | 16 | mktdata | Channel liveness signal. Inherited; byte-for-byte identical to siblings. |
-| `0x02` | InstrumentDefinition | 80 | refdata | Reference data for an instrument. Inherited from the top-of-book feed verbatim. |
+| `0x02` | InstrumentDefinition | 130 | refdata | Reference data for an instrument. Inherited from the top-of-book feed verbatim. |
 | `0x03` | *(reserved)* | — | — | Quote in the top-of-book feed, Midpoint in the midpoint feed. Intentionally unused here to prevent accidental cross-decoding if a frame is misrouted. |
 | `0x04` | *(reserved)* | — | — | Trade in the top-of-book and market-by-order feeds. This feed carries intent, not executions; intentionally unused. |
 | `0x05` | *(reserved)* | — | — | |
@@ -123,7 +123,7 @@ A decoder encountering an unknown type MUST skip the message using its `Message 
 
 ### Cross-Spec Type ID Policy
 
-Order-intent payload Type IDs occupy the `0x30`–`0x3F` range, which does not overlap any sibling feed. As with the sibling specs, a Type ID that appears in more than one feed MUST carry the same semantic meaning in each. The inherited Type IDs `0x01` (Heartbeat) and `0x07` (ManifestSummary) are byte-for-byte identical to the siblings that carry them; `0x02` (InstrumentDefinition) shares the top-of-book/market-by-order 80-byte layout. The sibling Type IDs this feed does **not** use — `0x03` (Quote/Midpoint), `0x04` (Trade), and `0x06` (EndOfSession) — are reserved here, never reassigned to a different payload, so a misrouted sibling frame is rejected rather than mis-decoded.
+Order-intent payload Type IDs occupy the `0x30`–`0x3F` range, which does not overlap any sibling feed. As with the sibling specs, a Type ID that appears in more than one feed MUST carry the same semantic meaning in each. The inherited Type IDs `0x01` (Heartbeat) and `0x07` (ManifestSummary) are byte-for-byte identical to the siblings that carry them; `0x02` (InstrumentDefinition) shares the top-of-book/market-by-order 130-byte layout. The sibling Type IDs this feed does **not** use — `0x03` (Quote/Midpoint), `0x04` (Trade), and `0x06` (EndOfSession) — are reserved here, never reassigned to a different payload, so a misrouted sibling frame is rejected rather than mis-decoded.
 
 ---
 
@@ -146,28 +146,29 @@ Inherited verbatim. Sent every N seconds on the `mktdata` port when there is no 
 | 5 | Reserved | 3B | Padding |
 | 8 | Timestamp | `ts_ns` | Current time |
 
-#### 0x02 InstrumentDefinition (80 bytes)
+#### 0x02 InstrumentDefinition (130 bytes)
 
 Inherited from the top-of-book feed verbatim. Maps a numeric Instrument ID to human-readable metadata. Carried on the `refdata` port and retransmitted continuously per the [Reference Data Distribution supplement](../reference-data/spec.md). Not on the market data path.
 
 | Offset | Field | Type | Description |
 |--------|-------|------|-------------|
-| 0 | Header | 4B | Type=`0x02`, Length=80 |
+| 0 | Header | 4B | Type=`0x02`, Length=130 |
 | 4 | Instrument ID | `u32` | Unique numeric ID for this instrument |
-| 8 | Symbol | `char[16]` | Human-readable label. Truncate if needed (e.g., `"BTC-USDT"`). |
-| 24 | Leg1 | `char[8]` | First leg/component. Context-dependent: base currency, underlying, outcome name. |
-| 32 | Leg2 | `char[8]` | Second leg/component. Context-dependent: quote/settlement currency. |
-| 40 | Asset Class | `u8` | `0`=Unknown, `1`=Crypto Spot, `2`=Prediction Binary, `3`=Prediction Scalar, `4`=Prediction Categorical |
-| 41 | Price Exponent | `i8` | Implied decimal exponent for price fields. e.g., `-2` means divide raw value by 100. |
-| 42 | Qty Exponent | `i8` | Implied decimal exponent for quantity fields. |
-| 43 | Market Model | `u8` | `0`=Unknown, `1`=CLOB, `2`=AMM |
-| 44 | Tick Size | `price` | Minimum price increment (interpreted via Price Exponent). |
-| 52 | Lot Size | `qty` | Minimum quantity increment (interpreted via Qty Exponent). |
-| 60 | Contract Value | `u64` | Notional per contract. 0 if not applicable (e.g., spot). |
-| 68 | Expiry | `ts_ns` | Expiration timestamp. 0 for non-expiring. |
-| 76 | Settle Type | `u8` | 0=N/A, 1=Cash, 2=Physical |
-| 77 | Price Bound | `u8` | 0=Unbounded, 1=Bounded [0,1] (binary outcomes), 2=Non-negative only |
-| 78 | Manifest Seq | `u16` | The publisher's `Manifest Seq` at the time this definition was emitted. See supplement. |
+| 8 | Source ID | `u16` | Originating venue, as assigned by the [Source ID Registry](../sources/spec.md). |
+| 10 | Symbol | `char[64]` | Human-readable label, left-justified and null-padded (e.g., `"BTC-USDT"`). Truncate only if the venue's symbol exceeds 64 bytes. |
+| 74 | Leg1 | `char[8]` | First leg/component. Context-dependent: base currency, underlying, outcome name. |
+| 82 | Leg2 | `char[8]` | Second leg/component. Context-dependent: quote/settlement currency. |
+| 90 | Asset Class | `u8` | `0`=Unknown, `1`=Crypto Spot, `2`=Prediction Binary, `3`=Prediction Scalar, `4`=Prediction Categorical |
+| 91 | Price Exponent | `i8` | Implied decimal exponent for price fields. e.g., `-2` means divide raw value by 100. |
+| 92 | Qty Exponent | `i8` | Implied decimal exponent for quantity fields. |
+| 93 | Market Model | `u8` | `0`=Unknown, `1`=CLOB, `2`=AMM |
+| 94 | Tick Size | `price` | Minimum price increment (interpreted via Price Exponent). |
+| 102 | Lot Size | `qty` | Minimum quantity increment (interpreted via Qty Exponent). |
+| 110 | Contract Value | `u64` | Notional per contract. 0 if not applicable (e.g., spot). |
+| 118 | Expiry | `ts_ns` | Expiration timestamp. 0 for non-expiring. |
+| 126 | Settle Type | `u8` | 0=N/A, 1=Cash, 2=Physical |
+| 127 | Price Bound | `u8` | 0=Unbounded, 1=Bounded [0,1] (binary outcomes), 2=Non-negative only |
+| 128 | Manifest Seq | `u16` | The publisher's `Manifest Seq` at the time this definition was emitted. See supplement. |
 
 Publishers SHOULD use the most accurate Asset Class / Market Model value available; receivers MUST accept any `u8` value and treat unknown values as `0` (Unknown).
 
@@ -454,11 +455,23 @@ A publisher MAY operate any subset of the sibling feeds for the same instruments
 
 ## Versioning and Forward Compatibility
 
-The Schema Version byte in the frame header is `1` for this release (spec version **0.1.0**). Future versions of this specification MAY:
+This document is version **3.0.0**, versioned independently of the sibling specs. The Schema Version byte in the frame header is `3` and equals this spec's MAJOR version, so it stays `3` for every `3.x.y` release and changes only on a breaking wire change. See the [Versioning Policy](../VERSIONING.md) for the full rule, the change classification, and the tag scheme.
+
+Future `3.x` versions of this specification MAY, without a Schema Version bump:
 
 - Append new fields to existing messages (old decoders ignore trailing bytes within the declared Message Length).
 - Define new message types in currently-reserved Type ID ranges (old decoders skip unknown types using the Message Length field).
 - Define new values for enumerated fields such as Side, Order Type, TIF, and Grouping (decoders MUST accept any `u8` value and treat an unrecognized one as the field's unknown/unspecified member — `2` for Side, `0` for the others).
 - Define new Event Flag bits (decoders MUST ignore flag bits they do not recognize).
 
-Existing field layouts and semantics will not change within the v0.x line without a Schema Version bump.
+Existing field layouts and semantics will not change within the `3.x` line. A change that moves or resizes a field, alters a message length, or redefines existing semantics requires a MAJOR release and a Schema Version bump, which old decoders MUST reject rather than parse.
+
+Note that the per-venue derivations this spec deliberately leaves out of band (account-id encoding, Action Tag rule, source-message mapping) are not part of the wire format and are therefore outside this versioning scheme. A venue changing its Action Tag derivation does not bump this spec's version, and the wire carries no signal of it. That is a property of the design, not an oversight: see [Common Event Fields](#common-event-fields).
+
+### Changes
+
+**3.0.0** — added `Source ID` (`u16`) after `Instrument ID` in `InstrumentDefinition`. `Symbol` and every later field move two bytes, and the message grows from 128 to 130 bytes. This is a breaking change: the Schema Version byte is now `3`, and a decoder built for `2.x` MUST reject these frames rather than parse them at the old offsets. The midpoint feed remains unchanged at Schema Version `1`.
+
+**2.0.0** — widened the `InstrumentDefinition` `Symbol` field from `char[16]` to `char[64]`. Every field after `Symbol` moves and the message grows from 80 to 128 bytes, so this is a breaking change: the Schema Version byte is now `2`, and a decoder built for `1.x` MUST reject these frames rather than parse them at the old offsets. Nothing else on the wire changed. The midpoint feed keeps its 64-byte variant and stays at Schema Version `1`.
+
+**1.0.0** — first stable release. Promoted from the `0.1.0` draft with no wire change; Schema Version was `1` before and after.

@@ -103,16 +103,20 @@ func manifestBody(valid uint8, seq uint16, count uint32) func(*wb.Body) {
 }
 
 // --- InstrumentDefinition body builders ---
-// TOB/MBO InstrumentDef (80 bytes total = 4-byte header + 76-byte body):
+// TOB/MBO InstrumentDef (130 bytes total = 4-byte header + 126-byte body):
 //
-//	Body[0:4]  = Instrument ID (u32 LE)
-//	Body[4:74] = other fields (opaque for our purposes)
-//	Body[74:76]= Manifest Seq (u16 LE)  ← spec offset 78, body[74]
+//	Body[0:4]    = Instrument ID (u32 LE)
+//	Body[4:6]    = Source ID (u16 LE)
+//	Body[6:124]  = other fields (opaque for our purposes)
+//	Body[124:126]= Manifest Seq (u16 LE)  ← spec offset 128, body[124]
+//
+// Source ID was inserted at spec 3.0.0, shifting every later field by 2 bytes.
 func instrDefTOBBody(instrID uint32, manifestSeq uint16) func(*wb.Body) {
 	return func(b *wb.Body) {
 		b.U32(instrID)     // Instrument ID (body off 0)
-		b.Pad(70)          // other fields (body off 4..73)
-		b.U16(manifestSeq) // Manifest Seq (body off 74) → total body 76 → msg 80
+		b.U16(1)           // Source ID (body off 4)
+		b.Pad(118)         // other fields (body off 6..123)
+		b.U16(manifestSeq) // Manifest Seq (body off 124) → total body 126 → msg 130
 	}
 }
 
@@ -127,6 +131,25 @@ func instrDefMidBody(instrID uint32, manifestSeq uint16) func(*wb.Body) {
 		b.Pad(52)          // other fields (body off 4..55)
 		b.U16(manifestSeq) // Manifest Seq (body off 56)
 		b.Pad(2)           // Reserved (body off 58) → total body 60 → msg 64
+	}
+}
+
+// TestInstrumentDefinitionV3FieldOffsets catches a decoder that continues
+// reading the v2 Price Bound and Manifest Seq offsets after Source ID is
+// inserted immediately after Instrument ID.
+func TestInstrumentDefinitionV3FieldOffsets(t *testing.T) {
+	raw := wb.Frame(wire.MagicMBO).
+		Msg(wire.TypeInstrumentDef, 130, func(b *wb.Body) {
+			b.U32(42).U16(7).Pad(117).U8(2).U16(9)
+		}).
+		Bytes()
+	f, findings := wire.Decode(raw, wire.MagicMBO)
+	if len(findings) != 0 {
+		t.Fatalf("unexpected decode findings: %+v", findings)
+	}
+	instrID, manifestSeq, _, priceBound := instrDefAllFields(core.FeedMBO, f.Messages[0])
+	if instrID != 42 || manifestSeq != 9 || priceBound != 2 {
+		t.Fatalf("fields = (%d, %d, %d), want (42, 9, 2)", instrID, manifestSeq, priceBound)
 	}
 }
 
@@ -584,7 +607,7 @@ func buildManifestFrame(magic uint16, valid uint8, seq uint16, count uint32) []b
 
 // buildInstrDefFrameTOB builds a raw frame with a TOB InstrumentDef.
 func buildInstrDefFrameTOB(instrID uint32, manifestSeq uint16) []byte {
-	return wb.Frame(wire.MagicTOB).Msg(0x02, 80, instrDefTOBBody(instrID, manifestSeq)).Bytes()
+	return wb.Frame(wire.MagicTOB).Msg(0x02, 130, instrDefTOBBody(instrID, manifestSeq)).Bytes()
 }
 
 // buildInstrDefFrameMid builds a raw frame with a Midpoint InstrumentDef.

@@ -34,9 +34,9 @@ func Decode(raw []byte, expectMagic uint16) (*Frame, []StructFinding) {
 		// from walking non-frame bytes.
 		return f, fs
 	}
-	if h.SchemaVersion != 1 {
+	if want := ExpectedSchemaVersion(expectMagic); h.SchemaVersion != want {
 		fs = append(fs, StructFinding{"FRAME.SCHEMA_VERSION", 2,
-			fmt.Sprintf("schema version %d", h.SchemaVersion), false})
+			fmt.Sprintf("schema version %d, expected %d", h.SchemaVersion, want), false})
 	}
 	// Frame length: publisher-invalid (self-inconsistent / out of range) vs transport truncation.
 	switch {

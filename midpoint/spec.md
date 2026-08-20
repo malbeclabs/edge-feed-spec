@@ -4,7 +4,7 @@ The DoubleZero Midpoint Feed is a wire format for single-value mid prices delive
 
 This is a sibling protocol to the DoubleZero Top-of-Book & Trades Feed, not a layer on top. Where the top-of-book feed carries two-sided BBO data and trades, the midpoint feed carries a single derived price plus the provenance needed to interpret it. A publisher MAY operate both feeds for the same set of instruments; subscribers MAY consume one without the other.
 
-This document specifies version **0.1.0**: the frame header, application message header, and the message types sufficient to operate a working midpoint publisher and subscriber.
+This document specifies version **1.0.0**: the frame header, application message header, and the message types sufficient to operate a working midpoint publisher and subscriber.
 
 ---
 
@@ -73,7 +73,7 @@ The frame header and application message header are identical on both ports. A s
 | Offset | Field | Type | Description |
 |--------|-------|------|-------------|
 | 0 | Magic | `u16` | `0x4D44` ("DM"). Frame delimiter. Distinct from the top-of-book feed's magic to prevent cross-protocol misrouting. |
-| 2 | Schema Version | `u8` | Protocol version. Starts at `1`. |
+| 2 | Schema Version | `u8` | Wire format generation, equal to this spec's MAJOR version. `1` for all `1.x.y` releases. A subscriber MUST discard frames whose version it does not implement. |
 | 3 | Channel ID | `u8` | Logical channel for instrument sharding. |
 | 4 | Sequence Number | `u64` | Monotonically increasing per channel, starting from 0. Resets to 0 when `Reset Count` changes. Used for gap detection. |
 | 12 | Send Timestamp | `ts_ns` | When the publisher sent this frame. |
@@ -285,13 +285,19 @@ The format is fixed-size and binary, so parsing requires no allocation, no strin
 
 ## Versioning and Forward Compatibility
 
-The Schema Version byte in the frame header is `1` for this release. Future versions of the specification MAY:
+This document is version **1.0.0**, versioned independently of the sibling specs. The Schema Version byte in the frame header is `1` and equals this spec's MAJOR version, so it stays `1` for every `1.x.y` release and changes only on a breaking wire change. See the [Versioning Policy](../VERSIONING.md) for the full rule, the change classification, and the tag scheme.
+
+Future `1.x` versions of this specification MAY, without a Schema Version bump:
 
 - Append new fields to existing messages (old decoders ignore trailing bytes within the declared Message Length).
 - Define new message types in currently-reserved type ID ranges (old decoders skip unknown types using the Message Length field).
 - Define new values for enumerated fields such as Asset Class and Method (decoders MUST accept any `u8` value).
 
-Existing field layouts and semantics will not change within the v0.x line without a Schema Version bump.
+Existing field layouts and semantics will not change within the `1.x` line. A change that moves or resizes a field, alters a message length, or redefines existing semantics requires a MAJOR release and a Schema Version bump, which old decoders MUST reject rather than parse.
+
+### Changes
+
+**1.0.0** — first stable release. Promoted from the `0.1.0` draft with no wire change; Schema Version was `1` before and after.
 
 ---
 

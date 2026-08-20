@@ -36,13 +36,39 @@ func TestEmitConditionalDowngrade(t *testing.T) {
 func TestEmitUnknownSchemaDowngrade(t *testing.T) {
 	cap := &capture{}
 	e := New(Config{Feed: core.FeedMBO}, cap)
-	e.beginFrame(2)                                                           // schema version 2 > implemented
-	e.Emit("FIELD.SIDE_ENUM", core.Violation, core.PortMktData, 0, 0, 0, "x") // v1-specific → downgrade
+	// MBO implements schema 3 (spec 3.x), so 4 is the first unknown-future one.
+	e.beginFrame(4)                                                           // schema version 4 > implemented
+	e.Emit("FIELD.SIDE_ENUM", core.Violation, core.PortMktData, 0, 0, 0, "x") // version-specific → downgrade
 	if cap.last.Severity == core.Must || cap.last.Status == core.Violation {
-		t.Fatal("v1-specific check must downgrade under unknown schema")
+		t.Fatal("version-specific check must downgrade under unknown schema")
 	}
 	e.Emit("FRAME.MAGIC_MISMATCH", core.Violation, core.PortMktData, 0, 0, 0, "x") // envelope → stays
 	if cap.last.Status != core.Violation {
 		t.Fatal("envelope check must still fire under unknown schema")
+	}
+}
+
+// TestEmitStaleSchemaKeepsChecking pins the deliberate asymmetry in beginFrame:
+// a *future* schema downgrades version-specific rules, a *stale* one does not.
+//
+// Suppressing on stale would read as the friendlier migration behaviour, but it
+// silences rules that are still catching real defects — on the bundled pre-2.0
+// nonconformant_mbp capture it drops MSG.SNAPSHOT_FLAG_MATCHES_PORT from 6
+// violations to 0, turning a regression fixture into a clean-looking run. If
+// this test ever fails because someone changed > to !=, read the beginFrame
+// comment before "fixing" it.
+func TestEmitStaleSchemaKeepsChecking(t *testing.T) {
+	cap := &capture{}
+	e := New(Config{Feed: core.FeedMBO}, cap) // MBO implements schema 3
+	e.beginFrame(1)                           // stale 1.x publisher
+
+	e.Emit("MSG.LENGTH_PER_TYPE", core.Violation, core.PortRefData, 0, 0, 0, "x")
+	if cap.last.Status != core.Violation {
+		t.Fatal("a stale schema must NOT silence version-specific rules; they still catch real defects")
+	}
+
+	e.Emit("FRAME.SCHEMA_VERSION", core.Violation, core.PortRefData, 0, 0, 0, "x")
+	if cap.last.Status != core.Violation {
+		t.Fatal("FRAME.SCHEMA_VERSION is an envelope rule and must report the stale version itself")
 	}
 }

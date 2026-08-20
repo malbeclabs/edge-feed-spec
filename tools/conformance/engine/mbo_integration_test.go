@@ -82,12 +82,13 @@ func feedRefDataOneInstr(e *Engine, ch uint8, instrID uint32, startSeq uint64) u
 		Bytes())
 
 	feed(wb.Frame(wire.MagicMBO).Channel(ch).
-		Msg(wire.TypeInstrumentDef, 80, func(b *wb.Body) {
+		Msg(wire.TypeInstrumentDef, 130, func(b *wb.Body) {
 			b.U32(instrID) // Instrument ID  body[0..3]
-			b.Pad(69)      // opaque fields  body[4..72]
-			b.U8(0)        // priceBound=0   body[73]
-			b.U16(1)       // Manifest Seq=1 body[74..75]
-			// 76 body bytes total → 80-byte message (4 header + 76 body)
+			b.U16(1)       // Source ID      body[4..5]
+			b.Pad(117)     // opaque fields  body[6..122]
+			b.U8(0)        // priceBound=0   body[123]
+			b.U16(1)       // Manifest Seq=1 body[124..125]
+			// 126 body bytes total → 130-byte message (4 header + 126 body)
 		}).
 		Bytes())
 

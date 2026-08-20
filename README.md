@@ -2,7 +2,7 @@
 
 Specifications for multicast data feeds published over the [DoubleZero](https://doublezero.xyz) Edge service.
 
-This repository is the home of wire-format specifications that data publishers and subscribers can implement against. Each spec lives in its own directory and is versioned independently.
+This repository is the home of wire-format specifications that data publishers and subscribers can implement against. Each spec lives in its own directory and is versioned independently. See the [Versioning Policy](./VERSIONING.md) for how spec versions, the on-wire `Schema Version` byte, and release tags relate.
 
 ## Specifications
 
@@ -19,7 +19,11 @@ This repository is the home of wire-format specifications that data publishers a
 
 ## Status
 
-These specifications are drafts circulated for feedback from prospective publishers and subscribers. Field layouts and semantics may change between draft versions until a `v1.0.0` is declared stable.
+All specifications are stable to build against. Every feed's frame header carries a `Schema Version` byte equal to its spec's MAJOR version, so the byte on the wire tells a decoder which layout it is holding. Within a major line, changes are additive only: new message types, new enumerated values, and appended fields, all of which a conformant decoder already skips or ignores. Field layouts and semantics will not change without a MAJOR release and a `Schema Version` bump, which decoders MUST reject rather than parse.
+
+The five feeds carrying the 130-byte `InstrumentDefinition` are at **3.0.0** (`Schema Version = 3`). The Midpoint Feed keeps its slimmed 64-byte variant and remains at **1.0.0** (`Schema Version = 1`).
+
+See [VERSIONING.md](./VERSIONING.md) for the change classification, the compatibility promise, and the `<spec>/vMAJOR.MINOR.PATCH` tag scheme.
 
 ## License
 
