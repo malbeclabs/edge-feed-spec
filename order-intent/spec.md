@@ -385,7 +385,7 @@ Per-host, per-channel, per-port `Sequence Number` gaps are a health signal only;
 
 A publisher operating this feed MUST:
 
-1. **Emit in venue order** on `mktdata` as venue events arrive, exploding each multi-entry signed action into one fixed-size event per entry sharing the action's Action Tag, Nonce, Signer, Vault, and Batch Count (per [Common Event Fields](#common-event-fields)). Pack multiple messages into a frame up to the MTU.
+1. **Emit in arrival order** on `mktdata` as venue events arrive, exploding each multi-entry signed action into one fixed-size event per entry sharing the action's Action Tag, Nonce, Signer, Vault, and Batch Count (per [Common Event Fields](#common-event-fields)). Pack multiple messages into a frame up to the MTU.
 2. **Maintain a monotonic `Sequence Number`** per `(host, channel, port)`, starting at 0 and resetting only on `Reset Count` change.
 3. **Pre-compute the Action Tag and recover the Signer** so the market-data path carries no strings or crypto. All hosts of one venue MUST run identical tag-derivation behavior in steady state.
 4. **Perform first-observation dedup** over a bounded window, using a venue-defined publisher dedupe identity (a full-precision per-venue key, distinct from the truncated wire Action Tag), so a re-observed copy of an action it already published is not re-emitted by the same host. (Cross-host duplicates remain possible and are reconciled by the subscriber.)
