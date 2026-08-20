@@ -4,7 +4,7 @@ The DoubleZero Market-by-Order Feed is a wire format for market-by-order (MBO) b
 
 This is a sibling protocol to the DoubleZero Top-of-Book & Trades Feed and the DoubleZero Midpoint Feed, not a layer on top. Where the top-of-book feed carries two-sided BBO data and trades and the midpoint feed carries a single derived price per instrument, this feed carries the full resting-order population of each instrument, plus a continuous in-band snapshot mechanism that lets subscribers bootstrap and recover from packet loss over multicast alone.
 
-This document specifies version **3.1.0**: the frame header, application message header, the message types sufficient to operate a working publisher and subscriber, and the sequence-number-anchored snapshot/delta recovery model that is the core of the design.
+This document specifies version **3.2.0**: the frame header, application message header, the message types sufficient to operate a working publisher and subscriber, and the sequence-number-anchored snapshot/delta recovery model that is the core of the design.
 
 ---
 
@@ -15,7 +15,7 @@ This document specifies version **3.1.0**: the frame header, application message
 3. **Schema-versioned.** The frame header carries a version byte. New fields append to messages; old decoders ignore trailing bytes. Unknown message types are skipped using the Message Length field.
 4. **Multicast-native.** UDP multicast delivery. One frame per UDP datagram. The protocol defines application messages only; transport, addressing, and group membership are out of scope.
 5. **Instrument-ID based.** Numeric `u32` IDs on the market data path. Human-readable strings only in reference data.
-6. **Source-attributed.** Every price-carrying message carries a `u16` source ID. With a single publisher this is redundant; with many it is essential. `Source ID` distinguishes matching engines, not channel instances; redundant instances of one channel emit the same values and are told apart by transport ([Redundant Channel Instances](#redundant-channel-instances)).
+6. **Source-attributed.** Every price-carrying message carries a `u16` Source ID. With a single publisher this is redundant; with many it is essential. `Source ID` distinguishes matching engines, not channel instances; redundant instances of one channel emit the same values and are told apart by transport ([Redundant Channel Instances](#redundant-channel-instances)).
 7. **Domain-agnostic.** Anything with a two-sided book of resting limit orders — crypto spot, equities, futures, FX, prediction markets — is a valid instrument.
 8. **In-band recovery only.** Subscribers bootstrap and recover from packet loss via a continuous publisher-driven snapshot stream. No TCP replay, no out-of-band snapshot service, no subscriber-initiated requests.
 9. **Recovery blast radius minimised.** A single lost multicast packet invalidates only the specific instruments whose deltas were in the lost frame, not the whole channel. A per-instrument sequence number carried on every delta message lets subscribers localise the loss.
@@ -135,7 +135,7 @@ Only `Sequence Number` keys on the full tuple, because only it is per port role.
 
 ### Channel Sharding
 
-Sharding the active instrument set across multiple publishers — each on its own channel — is supported natively via `Channel ID` in the frame header. Each channel is an independent state machine with its own `Reset Count`, `Sequence Number` series per port, `Manifest Seq`, and snapshot cycle. Grouping criteria (by asset class, by liquidity tier, by source venue) and discovery mechanisms are deployment-level concerns and out of scope for this spec.
+Sharding the published instrument set across multiple publishers — each on its own channel — is supported natively via `Channel ID` in the frame header. Each channel is an independent state machine with its own `Reset Count`, `Sequence Number` series per port, `Manifest Seq`, and snapshot cycle. Grouping criteria (by asset class, by liquidity tier, by venue) and discovery mechanisms are deployment-level concerns and out of scope for this spec.
 
 ---
 
@@ -149,7 +149,7 @@ Sharding the active instrument set across multiple publishers — each on its ow
 | `0x04` | Trade | 52 | mktdata | Venue-level trade summary. **Identical byte-for-byte to the top-of-book feed's Trade**, carried here as a convenience for consumers who want a trade-tape view without re-aggregating from `OrderExecute`. |
 | `0x05` | *(reserved)* | — | — | |
 | `0x06` | EndOfSession | 12 | mktdata | Inherited. No more data for this session. |
-| `0x07` | ManifestSummary | 24 | refdata | Active instrument set summary. Inherited; see the [Reference Data Distribution supplement](../reference-data/spec.md). |
+| `0x07` | ManifestSummary | 24 | refdata | Published instrument set summary. Inherited; see the [Reference Data Distribution supplement](../reference-data/spec.md). |
 | `0x08` | Liquidation | 48 | mktdata | Trade-companion annotation. **Identical byte-for-byte to the top-of-book feed's Liquidation.** Emitted in the same frame as its `Trade`. |
 | `0x10` | OrderAdd | 52 | mktdata | A new resting order entered the book. |
 | `0x11` | OrderCancel | 32 | mktdata | An order left the book without further execution. |
@@ -241,7 +241,7 @@ A future shared supplement is anticipated to factor `Trade` out of both specs an
 |--------|-------|------|-------------|
 | 0 | Header | 4B | Type=`0x04`, Length=52 |
 | 4 | Instrument ID | `u32` | Instrument traded |
-| 8 | Source ID | `u16` | Originating source |
+| 8 | Source ID | `u16` | Originating `source_id`, as assigned by the [Source ID Registry](../sources/spec.md). |
 | 10 | Aggressor Side | `u8` | 1=Buy, 2=Sell, 0=Unknown |
 | 11 | Trade Flags | `u8` | Bit 0: block, bit 1: sweep, bit 2: cross. Set to 0 if not applicable. |
 | 12 | Source Timestamp | `ts_ns` | Venue timestamp of execution |
@@ -261,7 +261,7 @@ Inherited. No more data on this channel for the current session.
 
 ### 0x07 ManifestSummary (24 bytes)
 
-Inherited. Periodic summary of the active instrument set on this channel. Carried on the `refdata` port. Defined in the [Reference Data Distribution supplement](../reference-data/spec.md); reproduced here for convenience.
+Inherited. Periodic summary of the published instrument set on this channel. Carried on the `refdata` port. Defined in the [Reference Data Distribution supplement](../reference-data/spec.md); reproduced here for convenience.
 
 | Offset | Field | Type | Description |
 |--------|-------|------|-------------|
@@ -269,9 +269,9 @@ Inherited. Periodic summary of the active instrument set on this channel. Carrie
 | 4  | Channel ID | `u8` | Redundant with frame header; useful for standalone logging |
 | 5  | Valid | `u8` | `1` when the channel has an established instrument set; `0` when the publisher is uninitialized or the channel is inactive. See supplement. |
 | 6  | Reserved | 2B | Padding |
-| 8  | Manifest Seq | `u16` | Increments every time the active instrument set changes on this channel |
+| 8  | Manifest Seq | `u16` | Increments every time the published instrument set changes on this channel |
 | 10 | Reserved | 2B | Padding |
-| 12 | Instrument Count | `u32` | Number of instruments currently in the active set |
+| 12 | Instrument Count | `u32` | Number of instruments currently in the published set |
 | 16 | Timestamp | `ts_ns` | When the publisher emitted this summary |
 
 ### 0x10 OrderAdd (52 bytes)
@@ -310,7 +310,7 @@ A new resting order entered the book.
 |--------|-------|------|-------------|
 | 0  | Header | 4B | Type=`0x10`, Length=52 |
 | 4  | Instrument ID | `u32` | Instrument this order applies to |
-| 8  | Source ID | `u16` | Originating source. |
+| 8  | Source ID | `u16` | Originating `source_id`, as assigned by the [Source ID Registry](../sources/spec.md). |
 | 10 | Side | `u8` | `0`=Bid/Buy, `1`=Ask/Sell |
 | 11 | Order Flags | `u8` | See Order Flags table. |
 | 12 | Per-Instrument Seq | `u32` | See [Per-Instrument Delta Sequence](#per-instrument-delta-sequence). |
@@ -453,7 +453,7 @@ Subscribers with strict atomicity requirements MAY buffer deltas between boundar
 | Offset | Field | Type | Description |
 |--------|-------|------|-------------|
 | 0 | Header | 4B | Type=`0x13`, Length=16 |
-| 4 | Batch ID | `u32` | Publisher-defined, monotonically increasing within the current `Reset Count` era. For blockchain sources, SHOULD be the block number truncated to `u32`. |
+| 4 | Batch ID | `u32` | Publisher-defined, monotonically increasing within the current `Reset Count` era. For blockchain venues, SHOULD be the block number truncated to `u32`. |
 | 8 | Batch Time | `ts_ns` | Venue time of the batch |
 
 `BatchBoundary` is informational; a subscriber that ignores it MUST still produce a correct book state.
@@ -505,7 +505,9 @@ Opens a per-instrument snapshot group on the `snapshot` port.
 | 24 | Last Instrument Seq | `u32` | The `Per-Instrument Seq` of the last `OrderAdd`/`OrderCancel`/`OrderExecute` that was applied to this instrument at or before `Anchor Seq`. Subscribers MUST initialise their `last_applied_instrument_seq` tracker to this value after applying the snapshot. `0` if no deltas have been applied for this instrument in the current `Reset Count` era. |
 | 28 | Timestamp | `ts_ns` | Publisher wall-clock at capture. |
 
-Publishers MUST NOT interleave two snapshot groups for different instruments on the `snapshot` port. A `SnapshotBegin` for instrument A is always followed by exactly `Total Orders` `SnapshotOrder` messages for A and then a `SnapshotEnd` for A, before any `SnapshotBegin` for a different instrument.
+Publishers MUST NOT interleave two snapshot groups for different instruments **within a channel**. A `SnapshotBegin` for instrument A is always followed by exactly `Total Orders` `SnapshotOrder` messages for A and then a `SnapshotEnd` for A, before any `SnapshotBegin` for a different instrument on that channel.
+
+**Scoped to the channel, not to the port.** A channel is an independent state machine with its own snapshot cycle, and the frame header carries `Channel ID` precisely so a deployment may carry more than one on a `snapshot` port. Two channels whose groups alternate there are each conformant, and a subscriber tracks the open group per `Channel ID` — reading this as a port-wide constraint makes a conformant sharded publisher look like an interleaving one.
 
 An instrument with no resting orders at capture time is represented by `SnapshotBegin(total_orders=0)` immediately followed by `SnapshotEnd` with no intervening `SnapshotOrder` messages.
 
@@ -732,7 +734,7 @@ A typical publisher session proceeds as follows:
 3. Begins emitting `ManifestSummary` with `Valid = 1` on the `refdata` port at the manifest cadence (recommended 1 s).
 4. Begins emitting `SnapshotBegin` / `SnapshotOrder` / `SnapshotEnd` on the `snapshot` port, round-robin across active instruments, at the configured snapshot cycle period.
 5. Begins emitting `OrderAdd`, `OrderCancel`, `OrderExecute`, `Trade`, and (optionally) `BatchBoundary` on the `mktdata` port as venue events arrive. Emits `Heartbeat` on `mktdata` when idle.
-6. When the active instrument set changes → bumps `Manifest Seq`, retags subsequent `InstrumentDefinition` retransmissions, emits an updated `ManifestSummary`, and ensures the next snapshot cycle includes the new set.
+6. When the published instrument set changes → bumps `Manifest Seq`, retags subsequent `InstrumentDefinition` retransmissions, emits an updated `ManifestSummary`, and ensures the next snapshot cycle includes the new set.
 7. On shutdown → emits `EndOfSession` on the `mktdata` port.
 
 The publisher MUST follow the cadence and atomicity rules in the [Reference Data Distribution supplement](../reference-data/spec.md).
@@ -777,29 +779,9 @@ The format is fixed-size and binary; parsing requires no allocation, no string h
 
 ---
 
-## Relationship to Sibling Feeds
-
-The DoubleZero Market-by-Order Feed is a sibling of the [Top-of-Book & Trades Feed](../top-of-book/spec.md) and the [Midpoint Feed](../midpoint/spec.md). Sibling feeds share:
-
-- The 24-byte frame header layout (except for the `Magic` value).
-- The 4-byte application message header.
-- The [Reference Data Distribution supplement](../reference-data/spec.md) conformance, including `InstrumentDefinition` (0x02) and `ManifestSummary` (0x07).
-- The cross-spec message Type IDs `0x01` (Heartbeat), `0x04` (Trade), `0x06` (EndOfSession) byte-for-byte.
-- The session-lifecycle and `Reset Count` patterns.
-- The forward-compatibility rules.
-
-Distinctions of the market-by-order feed:
-- `Magic` is `0x4444` (vs. `0x445A` top-of-book, `0x4D44` midpoint).
-- Three-port channel model (vs. two).
-- Market-by-order-specific payload Type IDs live in `0x10` and above.
-
-A publisher MAY operate any subset of the sibling feeds for the same instruments simultaneously. Subscribers MAY consume any subset independently.
-
----
-
 ## Versioning and Forward Compatibility
 
-This document is version **3.1.0**, versioned independently of the sibling specs. The Schema Version byte in the frame header is `3` and equals this spec's MAJOR version, so it stays `3` for every `3.x.y` release and changes only on a breaking wire change. See the [Versioning Policy](../VERSIONING.md) for the full rule, the change classification, and the tag scheme.
+This document is version **3.2.0**, versioned independently of the sibling specs. The Schema Version byte in the frame header is `3` and equals this spec's MAJOR version, so it stays `3` for every `3.x.y` release and changes only on a breaking wire change. See the [Versioning Policy](../VERSIONING.md) for the full rule, the change classification, and the tag scheme.
 
 Future `3.x` versions of this specification MAY, without a Schema Version bump:
 
@@ -816,6 +798,10 @@ Existing field layouts and semantics will not change within the `3.x` line. The 
 A subscriber MUST reject a frame whose Schema Version it does not implement rather than attempt a best-effort parse.
 
 ### Changes
+
+**3.2.0** — scoped the snapshot non-interleaving rule to the channel rather than the `snapshot` port, adopting the market-by-price wording and matching what the conformance checker has always enforced. This relaxes a publisher constraint and adds a subscriber one: a subscriber MUST now track the open snapshot group per `Channel ID` rather than per port, so a subscriber built to `3.1.0` reports false interleaving against a conformant sharded publisher. It is therefore a `MINOR` release rather than editorial. No wire-layout change; Schema Version remains `3`.
+
+Also editorial in this release: removed the *Relationship to Sibling Feeds* enumeration, qualified the bare uses of "source", and adopted the glossary's "published set".
 
 **3.1.0** — scoped channel and instrument state to the **channel instance** (`(source IP address, Channel ID, destination port)`) rather than to `Channel ID` alone, for deployments running redundant instances of one channel. Adds the [Redundant Channel Instances](#redundant-channel-instances) section and a subscriber MUST to key state by it; a `Channel ID`-keyed subscriber otherwise reads one instance's `Reset Count` bump as a channel reset and discards every instance's state. No wire change: no field layout, message type, `Magic`, or size moves, and no new publisher obligation, so the Schema Version byte stays `3` and a single-instance deployment is unaffected.
 

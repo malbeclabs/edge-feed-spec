@@ -4,7 +4,7 @@ The DoubleZero Midpoint Feed is a wire format for single-value mid prices delive
 
 This is a sibling protocol to the DoubleZero Top-of-Book & Trades Feed, not a layer on top. Where the top-of-book feed carries two-sided BBO data and trades, the midpoint feed carries a single derived price plus the provenance needed to interpret it. A publisher MAY operate both feeds for the same set of instruments; subscribers MAY consume one without the other.
 
-This document specifies version **1.0.0**: the frame header, application message header, and the message types sufficient to operate a working midpoint publisher and subscriber.
+This document specifies version **1.0.1**: the frame header, application message header, and the message types sufficient to operate a working midpoint publisher and subscriber.
 
 ---
 
@@ -15,7 +15,7 @@ This document specifies version **1.0.0**: the frame header, application message
 3. **Schema-versioned.** The frame header carries a version byte. New fields append to messages; old decoders ignore trailing bytes. Unknown message types are skipped using the Message Length field.
 4. **Multicast-native.** UDP multicast delivery. One frame per UDP datagram.
 5. **Instrument-ID based.** Numeric `u32` IDs on the market data path. Human-readable strings only in reference data.
-6. **Source-attributed.** Every price message carries a `u16` source ID identifying the venue whose book the mid was computed from.
+6. **Source-attributed.** Every price message carries a `u16` Source ID identifying the venue whose book the mid was computed from.
 7. **Single-value, not single-sided.** A midpoint message is one price. There is no degenerate "bid = ask" encoding; consumers that want a two-sided book should use the top-of-book feed.
 8. **Derivation-explicit.** Every midpoint declares *how* it was computed and carries the timestamps needed to localize latency. A derived price without provenance is a number without a contract.
 
@@ -103,7 +103,7 @@ Every application message begins with:
 | `0x02` | InstrumentDefinition | 64 | refdata | Reference data for an instrument |
 | `0x03` | Midpoint | 40 | mktdata | Single-value mid price (the core message) |
 | `0x06` | EndOfSession | 12 | mktdata | No more data for this session |
-| `0x07` | ManifestSummary | 24 | refdata | Active instrument set summary (see supplement) |
+| `0x07` | ManifestSummary | 24 | refdata | Published instrument set summary (see supplement) |
 
 Type ID `0x04` is intentionally unused. It is the `Trade` message in the top-of-book feed; leaving the slot vacant in this protocol prevents accidental cross-decoding if a frame is misrouted between feeds. Type IDs `0x08`–`0xFF` are reserved.
 
@@ -244,7 +244,7 @@ No more data on this channel for the current session.
 
 ### 0x07 ManifestSummary (24 bytes)
 
-Periodic summary of the active instrument set on this channel. Carried on the reference data port. Defined in the [Reference Data Distribution supplement](../reference-data/spec.md); the layout is reproduced here for convenience.
+Periodic summary of the published instrument set on this channel. Carried on the reference data port. Defined in the [Reference Data Distribution supplement](../reference-data/spec.md); the layout is reproduced here for convenience.
 
 | Offset | Field | Type | Description |
 |--------|-------|------|-------------|
@@ -252,9 +252,9 @@ Periodic summary of the active instrument set on this channel. Carried on the re
 | 4  | Channel ID | `u8` | Redundant with frame header; useful for standalone logging |
 | 5  | Valid | `u8` | `1` when the channel has an established instrument set; `0` when the publisher is uninitialized or the channel is inactive. See supplement. |
 | 6  | Reserved | 2B | Padding |
-| 8  | Manifest Seq | `u16` | Increments every time the active instrument set changes on this channel |
+| 8  | Manifest Seq | `u16` | Increments every time the published instrument set changes on this channel |
 | 10 | Reserved | 2B | Padding |
-| 12 | Instrument Count | `u32` | Number of instruments currently in the active set |
+| 12 | Instrument Count | `u32` | Number of instruments currently in the published set |
 | 16 | Timestamp | `ts_ns` | When the publisher emitted this summary |
 
 ---
@@ -268,7 +268,7 @@ A typical publisher session proceeds as follows:
 3. Begins emitting **ManifestSummary** with `Valid = 1` on the reference data port at the manifest cadence (recommended 1 s).
 4. Begins sending **Midpoint** messages on the market data port as the underlying books update. Multiple messages MAY be batched into a single frame.
 5. When the market data path is idle → sends **Heartbeat** every N seconds on the market data port.
-6. When the active instrument set changes → bumps `Manifest Seq`, retags subsequent `InstrumentDefinition` retransmissions, and emits an updated `ManifestSummary` within the manifest cadence interval.
+6. When the published instrument set changes → bumps `Manifest Seq`, retags subsequent `InstrumentDefinition` retransmissions, and emits an updated `ManifestSummary` within the manifest cadence interval.
 7. On shutdown → sends **EndOfSession** on the market data port.
 
 The publisher MUST follow the cadence and atomicity rules in the [Reference Data Distribution supplement](../reference-data/spec.md).
@@ -285,7 +285,7 @@ The format is fixed-size and binary, so parsing requires no allocation, no strin
 
 ## Versioning and Forward Compatibility
 
-This document is version **1.0.0**, versioned independently of the sibling specs. The Schema Version byte in the frame header is `1` and equals this spec's MAJOR version, so it stays `1` for every `1.x.y` release and changes only on a breaking wire change. See the [Versioning Policy](../VERSIONING.md) for the full rule, the change classification, and the tag scheme.
+This document is version **1.0.1**, versioned independently of the sibling specs. The Schema Version byte in the frame header is `1` and equals this spec's MAJOR version, so it stays `1` for every `1.x.y` release and changes only on a breaking wire change. See the [Versioning Policy](../VERSIONING.md) for the full rule, the change classification, and the tag scheme.
 
 Future `1.x` versions of this specification MAY, without a Schema Version bump:
 
@@ -297,16 +297,7 @@ Existing field layouts and semantics will not change within the `1.x` line. A ch
 
 ### Changes
 
+**1.0.1** — editorial. Removed the *Relationship to Sibling Feeds* enumeration, relocating its `Magic` distinctness requirement verbatim to the [Versioning Policy](../VERSIONING.md) so it binds every feed rather than only the ones that happened to restate it, and adopted the glossary's "published set". No wire change.
+
 **1.0.0** — first stable release. Promoted from the `0.1.0` draft with no wire change; Schema Version was `1` before and after.
 
----
-
-## Relationship to Sibling Feeds
-
-The DoubleZero Midpoint Feed is one of a family of sibling protocols that share framing conventions but differ in payload:
-
-- The **Top-of-Book & Trades Feed** carries two-sided BBO quotes and trade reports from a venue.
-- The **Midpoint Feed** (this document) carries a single derived mid price per instrument.
-- The **[Market-by-Order Feed](../market-by-order/spec.md)** carries the full resting-order population per instrument as a market-by-order stream of order events, anchored by a continuous in-band snapshot stream for recovery.
-
-Sibling feeds share the data type table, the 24-byte frame header layout, the 4-byte application message header, the session lifecycle, and the forward-compatibility rules. They differ in magic value, message type table, and message payloads. A subscriber MAY consume any subset of these feeds independently. Sibling feeds MUST use distinct Magic values and SHOULD use distinct multicast groups.

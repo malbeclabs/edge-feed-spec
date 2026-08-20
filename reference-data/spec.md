@@ -1,10 +1,10 @@
 # DoubleZero Edge Reference Data Distribution
 
-This supplement defines a continuous in-band mechanism for DoubleZero Edge feeds to advertise their active instrument set. It allows new subscribers to reach a complete reference-data state without an offline file, an out-of-band catalog, or a replay service.
+This supplement defines a continuous in-band mechanism for DoubleZero Edge feeds to advertise their published instrument set. It allows new subscribers to reach a complete reference-data state without an offline file, an out-of-band catalog, or a replay service.
 
 The mechanism is payload-independent. Any feed in the DoubleZero Edge family that uses the shared 24-byte frame header and 4-byte application message header MAY adopt it. All six currently do: the Top-of-Book & Trades, Midpoint, Market-by-Order, Market-by-Price, Order-Intent, and Perp Stats feeds each carry `ManifestSummary` on their `refdata` port and a `Manifest Seq` field in their `InstrumentDefinition`.
 
-This document specifies version **1.0.1**: the two-port transport model, the `ManifestSummary` message, the publisher cadence requirements, and the subscriber algorithm.
+This document specifies version **1.0.2**: the two-port transport model, the `ManifestSummary` message, the publisher cadence requirements, and the subscriber algorithm.
 
 ---
 
@@ -15,7 +15,7 @@ Continuous markets — crypto spot, prediction markets, perpetuals — do not ha
 1. Discover which instruments the publisher considers active.
 2. Receive an `InstrumentDefinition` for each one.
 3. Detect when it has a complete view.
-4. Detect when the active set changes (instruments added or removed).
+4. Detect when the published set changes (instruments added or removed).
 
 Without an in-band mechanism, the alternatives are an offline catalog file (which drifts), a replay service (which adds infrastructure), or a definition retransmission triggered by some out-of-band signal (which doesn't exist in a multicast-only world). This supplement provides the in-band mechanism.
 
@@ -50,9 +50,9 @@ A new application message type, advertised periodically on the reference-data po
 | 4  | Channel ID | `u8` | Redundant with frame header; useful for standalone logging |
 | 5  | Valid | `u8` | `1` when the channel has an established instrument set; `0` when the publisher is uninitialized or the channel is inactive. See Publisher Behavior. |
 | 6  | Reserved | 2B | Padding |
-| 8  | Manifest Seq | `u16` | Increments every time the active instrument set changes on this channel |
+| 8  | Manifest Seq | `u16` | Increments every time the published instrument set changes on this channel |
 | 10 | Reserved | 2B | Padding |
-| 12 | Instrument Count | `u32` | Number of instruments currently in the active set |
+| 12 | Instrument Count | `u32` | Number of instruments currently in the published set |
 | 16 | Timestamp | `ts_ns` | When the publisher emitted this summary |
 
 `ManifestSummary` carries no list of Instrument IDs. The combination of `Manifest Seq` and `Instrument Count`, together with the `Manifest Seq` field on each `InstrumentDefinition` (see below), is sufficient for a subscriber to determine when it has a complete view.
@@ -77,20 +77,20 @@ A publisher operating a channel adopting this supplement MUST:
 
 1. **Retransmit every active `InstrumentDefinition` periodically.** The maximum interval between successive retransmissions of any single definition is the **definition cycle period**. Recommended cycle period: **30 seconds**.
 
-2. **Spread retransmissions across the cycle.** Definitions SHOULD be paced evenly over the cycle period. Publishers MUST NOT emit the entire active set as a single burst. MTU-packed frames evenly spaced over the cycle is the canonical implementation.
+2. **Spread retransmissions across the cycle.** Definitions SHOULD be paced evenly over the cycle period. Publishers MUST NOT emit the entire published set as a single burst. MTU-packed frames evenly spaced over the cycle is the canonical implementation.
 
 3. **Emit `ManifestSummary` periodically on the reference-data port.** The maximum interval between `ManifestSummary` messages is the **manifest cadence**. Recommended cadence: **1 second**. The manifest cadence MUST be shorter than the definition cycle period so that a new subscriber sees a `ManifestSummary` before it has finished collecting definitions.
 
 4. **Set the `Valid` flag to reflect channel state.** A publisher MUST set `Valid = 1` on every `ManifestSummary` once its instrument set is established, and `Valid = 0` when the channel is uninitialized or the publisher is shutting down.
 
-5. **Bump `Manifest Seq` atomically when the active set changes.** When an instrument is added to or removed from the active set, the publisher MUST:
+5. **Bump `Manifest Seq` atomically when the published set changes.** When an instrument is added to or removed from the published set, the publisher MUST:
    - (a) Increment `Manifest Seq` by 1.
    - (b) Tag all subsequent `InstrumentDefinition` retransmissions with the new `Manifest Seq` value.
    - (c) Emit a `ManifestSummary` with `Valid = 1` carrying the new `Manifest Seq` and the new `Instrument Count` no later than the next manifest cadence interval.
 
 6. **Restart the definition cycle on `Manifest Seq` change.** When `Manifest Seq` bumps, the publisher SHOULD begin a fresh cycle of definition retransmissions tagged with the new seq, so that subscribers can collect a complete set under the new seq within one cycle period.
 
-7. **Reset via the frame header.** To reset the channel, the publisher increments `Reset Count` in the frame header and resets `Sequence Number` to 0. The publisher's `Manifest Seq` MAY restart from any value. Subscribers detect the reset by comparing `Reset Count` against their last-seen value and discard all cached state (see below). The reset takes effect at the beginning of the frame: all application messages in a frame carrying a new `Reset Count` belong to the post-reset epoch. A publisher that needs to reset MUST discard any partially constructed frame and start a new frame with the incremented `Reset Count`.
+7. **Reset via the frame header.** To reset the channel, the publisher increments `Reset Count` in the frame header and resets `Sequence Number` to 0. The publisher's `Manifest Seq` MAY restart from any value. Subscribers detect the reset by comparing `Reset Count` against their last-seen value and discard all cached state (see below). The reset takes effect at the beginning of the frame: all application messages in a frame carrying a new `Reset Count` belong to the post-reset era. A publisher that needs to reset MUST discard any partially constructed frame and start a new frame with the incremented `Reset Count`.
 
 ---
 
@@ -186,13 +186,13 @@ worst_case_ready = manifest_cadence + definition_cycle_period
 
 At recommended settings (M=1s, T=30s), this is **~31 seconds**.
 
-The subscriber sees a `ManifestSummary` within `M` seconds (worst case), then waits up to `T` seconds for a full pass of `InstrumentDefinition` retransmissions. Subscribers requiring faster cold-start can negotiate a shorter cycle period with the publisher operator; the spec sets the recommended values, not hard caps.
+The subscriber sees a `ManifestSummary` within `M` seconds (worst case), then waits up to `T` seconds for a full pass of `InstrumentDefinition` retransmissions. Subscribers requiring faster cold-start can negotiate a shorter cycle period with the operator; the spec sets the recommended values, not hard caps.
 
 ---
 
 ## Forward Compatibility
 
-This document is version **1.0.1**. It is a supplement, not a feed: it defines a mechanism that rides on a host feed's frame header and therefore has no `Magic` and no `Schema Version` of its own. Frames carrying it are versioned by the host feed. It is versioned independently of the feed specs that adopt it, because a subscriber and publisher operating under the same version of this supplement interoperate correctly regardless of which feed specs they implement. See the [Versioning Policy](../VERSIONING.md) for the full scheme.
+This document is version **1.0.2**. It is a supplement, not a feed: it defines a mechanism that rides on a host feed's frame header and therefore has no `Magic` and no `Schema Version` of its own. Frames carrying it are versioned by the host feed. It is versioned independently of the feed specs that adopt it, because a subscriber and publisher operating under the same version of this supplement interoperate correctly regardless of which feed specs they implement. See the [Versioning Policy](../VERSIONING.md) for the full scheme.
 
 Future `1.x` versions of this supplement MAY, without a host-feed Schema Version bump:
 
@@ -207,6 +207,8 @@ The following is a known candidate that would be **breaking**, requiring a MAJOR
 The two-port transport model and the subscriber algorithm are stable for the `1.x` line.
 
 ### Changes
+
+**1.0.2** — editorial. Replaced "epoch" with "era" for the post-reset span, dropped the redundant qualifier in "publisher operator", and adopted the glossary's "published set". No wire change.
 
 **1.0.1** — editorial. Refreshed the bandwidth worked example for the 128-byte `InstrumentDefinition` introduced by the feed specs at their `2.0.0` (was 80 bytes), and corrected the `Manifest Seq` width rationale, which described reserved space that the widened layout no longer has. No change to this supplement's own requirements or to `ManifestSummary`.
 

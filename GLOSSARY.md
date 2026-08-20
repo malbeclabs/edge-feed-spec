@@ -70,24 +70,24 @@ Neither half of either pair is redefined here. `receiver` in particular keeps it
 
 | Banned | Use instead | Note |
 |---|---|---|
-| `arm`, `disarm` (every sense) | see the note below | No exceptions |
+| `arm`, `disarm` (every sense) | see the note below | Two external proper nouns aside — see the note below |
 | `bot` (our components) | `book-builder` | |
 | `lane` | `feed` or `path` | |
 | `feed` (upstream vendor) | `upstream <vendor>` | |
-| `stream` (our live traffic) | `feed` | A live feed is a feed; the extra word bought nothing |
+| `stream` (our live traffic) | `feed` | A live feed is a feed; the extra word bought nothing. `snapshot stream` and `delta stream` are the exception: they name the two traffic shapes within one three-port feed, a distinction `feed` cannot carry |
 | `frame` (our own traffic) | `datagram` | |
 | `channel` (port role) | `port role` | |
 | `channel` (venue pub/sub topic) | `venue topic` | |
-| `source` (unqualified) | a qualified form | Never bare — see the note below |
-| `epoch` | `era` | |
+| `source` (unqualified) | a qualified form | Never bare — see the note below. `source of truth` is the exception: a fixed English idiom naming authority, not an origin |
+| `epoch` | `era` | `Unix epoch` is the exception: it is the externally owned name of the 1970-01-01T00:00:00Z origin, not a sense of the word. Use `era` for our own `Reset Count` span |
 | `sibling feed` | `feed` | All feeds are siblings; the word adds nothing |
 | `tee` | `fan-out` | |
-| `sweep` | Name the operation | Currently means three unrelated things |
+| `sweep` | Name the operation | Currently means three unrelated things. `Trade Flags` bit 1 keeps the name: it is the standard term for an order sweeping several levels, externally defined and carried on the wire |
 | `normalization` | `decode` | Reserve `normalization` for cross-feed latency metrics |
 | `venue` (Rust trait over product lines) | `product line` or `adapter` | |
 | `roster`, `active set` | `published set` | |
 
-**`arm` is banned outright**, in every sense and every place: specs, docs, plans, identifiers, CLI flags, config keys, metric names, log fields, and code comments alike. There is no surviving exception. Replace it by sense — a redundant publisher is a `path`, a `match` or `select!` branch is a `branch`, and the Order-Intent dead-man switch is **set** and **cleared** rather than armed and disarmed. That last one costs nothing on the wire: the switch is carried by `ScheduleCancel`'s `Trigger Time`, where a non-zero timestamp sets it and `0` clears it, so `arm` was only ever prose.
+**`arm` is banned outright**, in every sense and every place: specs, docs, plans, identifiers, CLI flags, config keys, metric names, log fields, and code comments alike. The only things that survive are names we do not own — the `ARM64` architecture and the `ARM` vendor — which are proper nouns rather than a sense of the word. Replace it by sense — a redundant publisher is a `path`, a `match` or `select!` branch is a `branch`, and the Order-Intent dead-man switch is **set** and **cleared** rather than armed and disarmed. That last one costs nothing on the wire: the switch is carried by `ScheduleCancel`'s `Trigger Time`, where a non-zero timestamp sets it and `0` clears it, so `arm` was only ever prose.
 
 `path` is deliberately not defined in this glossary. It is used in its ordinary English sense — one of several redundant routes carrying the same data — and needs no house meaning.
 

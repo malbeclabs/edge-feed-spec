@@ -2,7 +2,7 @@
 
 The DoubleZero Perp Stats Feed is a sibling cadence feed carrying per-perpetual derived state — funding, mark price, oracle price, open interest, and premium — relayed from the venue's REST surface. It is not the order-book hot path; data originates from REST polls rather than the matching engine, so it runs on a separate cadence from the top-of-book and market-by-order feeds.
 
-This document specifies version **3.0.0**: the transport, message types, `PerpStats` wire layout, emission model, and instrument scope.
+This document specifies version **3.0.1**: the transport, message types, `PerpStats` wire layout, emission model, and instrument scope.
 
 ---
 
@@ -59,6 +59,14 @@ The `price`, `qty`, and `ts_ns` types are reused from the [Top-of-Book & Trades 
 
 ---
 
+## Identity Model
+
+### Instrument IDs
+
+The unique key for an instrument in this feed is the tuple **`(channel_id, instrument_id)`**. `instrument_id` is a `u32` scoped to its channel; it need not be globally unique across channels. Subscribers consuming multiple channels MUST key their internal instrument map by the tuple.
+
+---
+
 ## Message Types
 
 | Type ID | Name | Size | Port | Description |
@@ -66,7 +74,7 @@ The `price`, `qty`, and `ts_ns` types are reused from the [Top-of-Book & Trades 
 | `0x01` | Heartbeat | 16 | mktdata | Channel liveness signal |
 | `0x02` | InstrumentDefinition | 130 | refdata | Reference data for a perpetual instrument |
 | `0x06` | EndOfSession | 12 | mktdata | No more data for this session |
-| `0x07` | ManifestSummary | 24 | refdata | Active instrument set summary (see supplement) |
+| `0x07` | ManifestSummary | 24 | refdata | Published instrument set summary (see supplement) |
 | `0x30` | PerpStats | 124 | mktdata | Per-perpetual derived state snapshot |
 
 Type IDs `0x03`, `0x04`, `0x05`, and `0x08` are intentionally not carried on this feed. `0x03` (`Quote`), `0x04` (`Trade`), and `0x08` (`Liquidation`) are message types of the top-of-book and market-by-order feeds, and `0x05` is reserved there; leaving them absent here prevents accidental cross-decoding if a frame is misrouted between feeds.
@@ -105,7 +113,7 @@ No more data on this channel for the current session.
 
 ### 0x07 ManifestSummary (24 bytes)
 
-Periodic summary of the active instrument set on this channel. Carried on the reference data port. Defined in the [Reference Data Distribution supplement](../reference-data/spec.md); the layout is reproduced here for convenience.
+Periodic summary of the published instrument set on this channel. Carried on the reference data port. Defined in the [Reference Data Distribution supplement](../reference-data/spec.md); the layout is reproduced here for convenience.
 
 | Offset | Field | Type | Description |
 |--------|-------|------|-------------|
@@ -113,14 +121,14 @@ Periodic summary of the active instrument set on this channel. Carried on the re
 | 4  | Channel ID | `u8` | Redundant with frame header; useful for standalone logging |
 | 5  | Valid | `u8` | `1` when the channel has an established instrument set; `0` when the publisher is uninitialized or the channel is inactive. See supplement. |
 | 6  | Reserved | 2B | Padding |
-| 8  | Manifest Seq | `u16` | Increments every time the active instrument set changes on this channel |
+| 8  | Manifest Seq | `u16` | Increments every time the published instrument set changes on this channel |
 | 10 | Reserved | 2B | Padding |
-| 12 | Instrument Count | `u32` | Number of instruments currently in the active set (perps only) |
+| 12 | Instrument Count | `u32` | Number of instruments currently in the published set (perps only) |
 | 16 | Timestamp | `ts_ns` | When the publisher emitted this summary |
 
 ### 0x30 PerpStats (124 bytes)
 
-A per-perpetual future derived state snapshot, relayed from the venue's REST surface. One message per active perpetual future instrument per poll sweep. Fields whose upstream value is momentarily unavailable encode as `0`.
+A per-perpetual future derived state snapshot, relayed from the venue's REST surface. One message per active perpetual future instrument per poll pass. Fields whose upstream value is momentarily unavailable encode as `0`.
 
 | Offset | Field | Type | Description |
 |--------|-------|------|-------------|
@@ -164,26 +172,26 @@ Funding, mark price, oracle price, open interest, and premium are perpetual-futu
 
 The publisher runs two REST poll loops and merges their results into each `PerpStats` message:
 
-- **`metaAndAssetCtxs`** — the freshness driver (mark price, oracle price, mid price, open interest, premium, impact prices, volume). One request returns all active perps. Default cadence: **1 second**, configurable. This sets the sweep rate.
+- **`metaAndAssetCtxs`** — the freshness driver (mark price, oracle price, mid price, open interest, premium, impact prices, volume). One request returns all active perps. Default cadence: **1 second**, configurable. This sets the pass rate.
 - **`predictedFundings`** — predicted funding rate, next funding time, and funding interval. Funding accrues on an hourly cycle, so this is polled more slowly. Default cadence: **60 seconds**, configurable. The most-recent values are merged into every `PerpStats` message until the next `predictedFundings` poll.
 
 Only the `HlPerp` entry of `predictedFundings` is relayed. CEX entries (Binance, Bybit, etc.) are the venue re-publishing other venues' data and are out of scope.
 
-### Full Sweep Per Poll
+### Full Pass Per Poll
 
-On each `metaAndAssetCtxs` poll, the publisher emits a **full sweep**: one `PerpStats` message per active perpetual, packed into frames up to the 1,232-byte MTU (~28 KB for ~230 perps, ~26 frames per sweep at 9 messages per frame, ~0.2 Mbps at 1 s cadence). The interval between sweeps equals the poll cadence.
+On each `metaAndAssetCtxs` poll, the publisher emits a **full pass**: one `PerpStats` message per active perpetual, packed into frames up to the 1,232-byte MTU (~28 KB for ~230 perps, ~26 frames per pass at 9 messages per frame, ~0.2 Mbps at 1 s cadence). The interval between passes equals the poll cadence.
 
-This is a deliberate departure from the Reference Data Distribution supplement's *cycling* model for `InstrumentDefinition`. That model spreads definitions evenly across a 30-second cycle and MUST NOT burst, because definitions rarely change and the goal is steady-state recovery coverage. `PerpStats` is the opposite: the entire active set genuinely refreshes every poll, so emitting the full sweep promptly per poll is correct, not a retransmission violation.
+This is a deliberate departure from the Reference Data Distribution supplement's *cycling* model for `InstrumentDefinition`. That model spreads definitions evenly across a 30-second cycle and MUST NOT burst, because definitions rarely change and the goal is steady-state recovery coverage. `PerpStats` is the opposite: the entire published set genuinely refreshes every poll, so emitting the full pass promptly per poll is correct, not a retransmission violation.
 
 ### Recovery and Late Joiners
 
-The full sweep **is** the recovery mechanism. There are no deltas; every `PerpStats` message is a complete current snapshot for its instrument. A late-joining subscriber:
+The full pass **is** the recovery mechanism. There are no deltas; every `PerpStats` message is a complete current snapshot for its instrument. A late-joining subscriber:
 
 1. Binds both the `mktdata` and `refdata` ports.
 2. Collects `InstrumentDefinition` messages and a `ManifestSummary` (which carries the expected perp instrument count).
-3. After one full sweep, has a complete, current view of every active perpetual.
+3. After one full pass, has a complete, current view of every active perpetual.
 
-Anchor time is at most one poll interval (~1 s at default cadence). No dedicated snapshot port or sequence-recovery model is needed. `Heartbeat` is still emitted on `mktdata` per convention for liveness during any gap; in practice the 1 s sweep provides continuous traffic.
+Anchor time is at most one poll interval (~1 s at default cadence). No dedicated snapshot port or sequence-recovery model is needed. `Heartbeat` is still emitted on `mktdata` per convention for liveness during any gap; in practice the 1 s pass provides continuous traffic.
 
 ---
 
@@ -194,9 +202,9 @@ A typical publisher session proceeds as follows:
 1. Publisher starts → increments `Reset Count` in the frame header and resets `Sequence Number` to 0.
 2. Begins emitting **InstrumentDefinition** for every active perpetual on the reference data port, paced evenly across the definition cycle period (recommended 30 s). Definitions are retransmitted continuously.
 3. Begins emitting **ManifestSummary** with `Valid = 1` on the reference data port at the manifest cadence (recommended 1 s).
-4. On each `metaAndAssetCtxs` poll, emits a full sweep of **PerpStats** messages on the market data port.
+4. On each `metaAndAssetCtxs` poll, emits a full pass of **PerpStats** messages on the market data port.
 5. When the market data path is idle → sends **Heartbeat** on the market data port.
-6. When the active instrument set changes → bumps `Manifest Seq`, retags subsequent `InstrumentDefinition` retransmissions, and emits an updated `ManifestSummary` within the manifest cadence interval.
+6. When the published instrument set changes → bumps `Manifest Seq`, retags subsequent `InstrumentDefinition` retransmissions, and emits an updated `ManifestSummary` within the manifest cadence interval.
 7. On shutdown → sends **EndOfSession** on the market data port.
 
 The publisher MUST follow the cadence and atomicity rules in the [Reference Data Distribution supplement](../reference-data/spec.md).
@@ -205,7 +213,7 @@ The publisher MUST follow the cadence and atomicity rules in the [Reference Data
 
 ## Versioning and Forward Compatibility
 
-This document is version **3.0.0**, versioned independently of the sibling feed specs. The Schema Version byte in the frame header is `3` and equals this spec's MAJOR version, so it stays `3` for every `3.x.y` release and changes only on a breaking wire change. See the [Versioning Policy](../VERSIONING.md) for the full rule, the change classification, and the tag scheme.
+This document is version **3.0.1**, versioned independently of the sibling feed specs. The Schema Version byte in the frame header is `3` and equals this spec's MAJOR version, so it stays `3` for every `3.x.y` release and changes only on a breaking wire change. See the [Versioning Policy](../VERSIONING.md) for the full rule, the change classification, and the tag scheme.
 
 Because this feed defers the frame header to the top-of-book spec except for `Magic`, a MAJOR release of the top-of-book feed that changes the frame header would also require a MAJOR release here. The two Schema Version bytes are not otherwise coupled: an additive change to either feed leaves the other untouched.
 
@@ -219,23 +227,13 @@ Existing field layouts and semantics will not change within the `3.x` line. A ch
 
 ### Changes
 
+**3.0.1** — editorial. Renamed the per-poll "full sweep" to a **full pass**, added an *Identity Model* section stating that instrument identity is the `(channel_id, instrument_id)` tuple, removed the *Relationship to Sibling Feeds* enumeration (its `Magic` distinctness requirement is relocated verbatim to the [Versioning Policy](../VERSIONING.md)), and adopted the glossary's "published set". No wire change.
+
 **3.0.0** — added `Source ID` (`u16`) after `Instrument ID` in `InstrumentDefinition`. `Symbol` and every later field move two bytes, and the message grows from 128 to 130 bytes. This is a breaking change: the Schema Version byte is now `3`, and a decoder built for `2.x` MUST reject these frames rather than parse them at the old offsets. The midpoint feed remains unchanged at Schema Version `1`.
 
 **2.0.0** — widened the `InstrumentDefinition` `Symbol` field from `char[16]` to `char[64]`. Every field after `Symbol` moves and the message grows from 80 to 128 bytes, so this is a breaking change: the Schema Version byte is now `2`, and a decoder built for `1.x` MUST reject these frames rather than parse them at the old offsets. Nothing else on the wire changed. The midpoint feed keeps its 64-byte variant and stays at Schema Version `1`.
 
 **1.0.0** — first stable release. Promoted from the `0.1.1` draft with no wire change; Schema Version was `1` before and after.
 
-**0.1.1** (draft, never tagged) — registered the frame `Magic` value `0x4450` ("DP") for this feed and added the consumer validation requirement (see [Transport Framing](#transport-framing)). Previously the header was deferred wholesale to the top-of-book spec, leaving the value ambiguous even though the sibling-feed rule already required a distinct one. No wire-layout change; Schema Version remained `1`.
+**0.1.1** (draft, never tagged) — registered the frame `Magic` value `0x4450` ("DP") for this feed and added the consumer validation requirement (see [Transport Framing](#transport-framing)). Previously the header was deferred wholesale to the top-of-book spec, leaving the value ambiguous even though the [Versioning Policy](../VERSIONING.md) already required a distinct one. No wire-layout change; Schema Version remained `1`.
 
----
-
-## Relationship to Sibling Feeds
-
-The DoubleZero Perp Stats Feed is one of a family of sibling protocols sharing framing conventions:
-
-- The **[Top-of-Book & Trades Feed](../top-of-book/spec.md)** carries two-sided BBO quotes and trade reports from a venue, on the matching-engine hot path.
-- The **[Midpoint Feed](../midpoint/spec.md)** carries a single derived mid price per instrument.
-- The **[Market-by-Order Feed](../market-by-order/spec.md)** carries the full resting-order population per instrument.
-- The **Perp Stats Feed** (this document) carries per-perpetual derived state — funding, mark, oracle, OI, premium — relayed from the venue REST surface on a cadence path.
-
-Sibling feeds share the 24-byte frame header, the 4-byte application message header, and the forward-compatibility rules. They differ in magic value, message type table, and payload. Sibling feeds MUST use distinct Magic values and SHOULD use distinct multicast groups. The Perp Stats feed's `Magic` is `0x4450` (vs. `0x445A` top-of-book, `0x4444` market-by-order, `0x4D44` midpoint, `0x494F` order-intent).
