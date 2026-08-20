@@ -39,7 +39,7 @@ The current state of every feed:
 | [Order-Intent](./order-intent/spec.md) | `0x494F` | `3` | 3.0.1 |
 | [Perp Stats](./perp-stats/spec.md) | `0x4450` | `3` | 3.0.1 |
 | [Reference Data Distribution](./reference-data/spec.md) | *(host feed's)* | *(host feed's)* | 1.0.2 |
-| [Source ID Registry](./sources/spec.md) | *(none)* | *(none)* | 1.0.1 |
+| [Source ID Registry](./sources/spec.md) | *(none)* | *(none)* | 1.1.0 |
 | [Glossary](./GLOSSARY.md) | *(none)* | *(none)* | 1.2.0 |
 
 Midpoint sits at `1` while its siblings are at `3` because it was deliberately left on its 64-byte `InstrumentDefinition` variant when the shared layout changed at both `2.0.0` and `3.0.0`. This is the scheme working as intended: the specs are siblings, not a single versioned family, and a decoder reads each feed's byte to know which layout it is holding.
@@ -102,7 +102,7 @@ The conformance tool in [`tools/conformance`](./tools/conformance) is software, 
 Three documents here are not feed specs:
 
 - **[Reference Data Distribution](./reference-data/spec.md)** defines a mechanism that rides on a host feed's frame header. It has no `Magic` and no `Schema Version` of its own; frames carrying it are versioned by the host feed. It is versioned independently because a publisher and subscriber operating under the same version of the supplement interoperate regardless of which feed specs they implement.
-- **[Source ID Registry](./sources/spec.md)** is a registry with no wire format. Its version tracks the assignment set. Assigning a new Source ID is an additive change and therefore a `MINOR` bump. Because assigned IDs are stable and MUST NOT be renumbered, reordered, removed, or reused, the registry has no mechanism by which a `MAJOR` bump could arise.
+- **[Source ID Registry](./sources/spec.md)** is a registry with no wire format. Its version tracks the assignment set. Assigning a new Source ID is an additive change and therefore a `MINOR` bump, as is adding a column to the assignment table. Because assigned IDs are stable and MUST NOT be renumbered, reordered, removed, or reused, the registry has no mechanism by which a `MAJOR` bump could arise.
 - **[Glossary](./GLOSSARY.md)** is the canonical vocabulary and has no wire format. Its version tracks the vocabulary, so that a spec or a repository can name the ruling it was written against. Defining a term, banning a word, or recording an exception is additive and therefore `MINOR`; redefining a term that conforming text already follows is `MAJOR`, because prose and identifiers in several repositories have to be revisited. Its own *Versioning* section states the rule.
 
 ---
