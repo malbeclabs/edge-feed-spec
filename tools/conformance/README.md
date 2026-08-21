@@ -208,7 +208,7 @@ With `--pcap`, the tool replays the capture in order and exits when the file is 
 | `--json-report` | | Write a JSON findings report to this path |
 | `-v` | `false` | Verbose logging (lowers the stderr threshold to INFO, surfacing `Unverifiable` findings; default is WARN) |
 | `--log-throttle` | `1s` | Minimum wall-clock interval between identical `(rule, status)` log lines. `0` disables throttling. Affects log lines only — metrics and the exit code always count every finding. |
-| `--version` | | Print version and exit |
+| `--version` | | Print `<version>+<commit>` and exit (e.g. `v0.2.0+85fd9b6d40cf`, `dev+none` unstamped) |
 
 **Port note.** At least one port flag must be non-zero or the tool exits with code 2. Rule behavior when a port is omitted is rule-specific — some rules are effectively unreachable with no traffic on that port, while others may still fire from related activity on a bound port. Omitting `--snapshot-port` on an MBO or MBP feed is called out explicitly at startup, because those rules would otherwise vanish from the output entirely: see [Rules an unbound port starves](#rules-an-unbound-port-starves).
 
@@ -253,7 +253,9 @@ time=... level=ERROR msg=finding
 
 ### JSON report
 
-Pass `--json-report path` to write a machine-readable summary at the end of the run. The report is a JSON object with a `rules` array; each entry has a `rule_id` and a `counts` map of status name → count (e.g. `{"rule_id": "FRAME.MAGIC_MISMATCH", "counts": {"violation": 1}}`). A rule with `unverifiable` findings also carries `unverifiable_by_reason`, breaking that count down by cause — this is the only place a `--pcap` CI run reports it, since a one-shot replay has no Prometheus to scrape. See [Coverage vs. silence](#coverage-vs-silence) for how to read the two together.
+Pass `--json-report path` to write a machine-readable summary at the end of the run. The report is a JSON object with top-level `version`, `commit` and `strict`, plus a `rules` array; each entry has a `rule_id`, its `severity` and a `counts` map of status name → count (e.g. `{"rule_id": "FRAME.MAGIC_MISMATCH", "severity": "must", "counts": {"violation": 1}}`). A rule with `unverifiable` findings also carries `unverifiable_by_reason`, breaking that count down by cause — this is the only place a `--pcap` CI run reports it, since a one-shot replay has no Prometheus to scrape. See [Coverage vs. silence](#coverage-vs-silence) for how to read the two together.
+
+`version` and `commit` are the build labels (the same ones `build_info` carries), so a stored report can be attributed to the binary that produced it. `severity` and `strict` together are what make the [exit code](#exit-codes) recomputable from the report alone: only `must` and `should` violations move it, and a `should` violation resolves to `0` or `1` depending on `--strict`, which the counts do not record.
 
 ### Prometheus metrics
 
@@ -286,10 +288,10 @@ Cardinality is bounded: `rule_id` is a fixed enum (from `core/registry.go`), `po
 go build -o dz-conformance .
 ```
 
-With version info:
+With build info (this is what `--version`, `build_info` and the JSON report show):
 
 ```bash
-go build -ldflags "-X main.version=0.1.0" -o dz-conformance .
+go build -ldflags "-X main.version=v0.1.0 -X main.commit=$(git rev-parse --short=12 HEAD)" -o dz-conformance .
 ```
 
 ## Testing
@@ -379,3 +381,10 @@ annotated tag `conformance/<version>`, and publishes a GitHub Release with:
 
 Versions containing `-` are marked as prereleases. The deploy side
 (`malbeclabs/infra`, role `dz_conformance`) consumes these assets by name.
+
+**`--version` output is part of that contract.** The role runs the installed binary,
+trims a leading `v`, and requires `^[0-9]+\.[0-9]+\.[0-9]+([-+].*)?$` to decide whether
+to re-download; build metadata after a `+` is ignored in the semver comparison, but a
+space, a parenthesis or a second line is not accepted and makes every Ansible run
+re-download the binary and restart every instance. `main_test.go` asserts the shape,
+including the `vX.Y.Z-rc.N+<commit>` prerelease form.
