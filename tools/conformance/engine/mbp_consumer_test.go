@@ -122,7 +122,7 @@ func (tp *mbpTape) violated(t *testing.T, ruleID string) bool {
 		}
 		first = false
 		f, sf := wire.Decode(s.raw, wire.MagicMBP)
-		e.Process(f, s.port, sf)
+		e.Process(srcA, f, s.port, sf)
 		last = s.port
 	}
 	e.Flush()

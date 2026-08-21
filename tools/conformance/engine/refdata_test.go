@@ -625,7 +625,7 @@ func processRefdata(t *testing.T, feed core.Feed, magic uint16, frames [][]byte)
 		f, sf := wire.Decode(raw, magic)
 		// Assign distinct sequence numbers.
 		f.Header.Sequence = uint64(i + 1)
-		e.Process(f, core.PortRefData, sf)
+		e.Process(srcA, f, core.PortRefData, sf)
 	}
 	e.Flush()
 	return ac.findings

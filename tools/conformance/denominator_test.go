@@ -141,7 +141,7 @@ func replayEntriesInto(t *testing.T, gc *goldenCapture, feed core.Feed, magic ui
 			continue
 		}
 		f, sf := wire.Decode(e.payload, magic)
-		eng.Process(f, port, sf)
+		eng.Process(testSrc, f, port, sf)
 	}
 	eng.Flush()
 	eng.EndRun()
@@ -163,7 +163,7 @@ func replayPcapInto(t *testing.T, gc *goldenCapture, feed core.Feed, magic uint1
 			break
 		}
 		f, sf := wire.Decode(dg.Raw, magic)
-		eng.Process(f, dg.Port, sf)
+		eng.Process(dg.Src, f, dg.Port, sf)
 	}
 	eng.Flush()
 	eng.EndRun()

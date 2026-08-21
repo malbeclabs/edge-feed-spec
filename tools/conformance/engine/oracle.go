@@ -141,7 +141,7 @@ func (e *Engine) runOracleForGroup(ch uint8, snap *openSnapshot, snapPortSeq uin
 			fmt.Sprintf("instrument %d: a late or duplicate delta mutated the book without advancing its seq", instrID))
 		return
 	}
-	if !e.gateDetector() {
+	if !e.gateDetector(ch) {
 		e.unverifiable(key, snapPortSeq, core.ReasonLoss, "the mktdata port has a sequence gap this era")
 		return
 	}

@@ -66,7 +66,7 @@ func TestSeqNoGap(t *testing.T) {
 	port := core.PortMktData
 	for seq := uint64(0); seq < 3; seq++ {
 		f := makeHB(wire.MagicTOB, 1, seq, 0, seq+1000)
-		eng.Process(f, port, nil)
+		eng.Process(srcA, f, port, nil)
 	}
 	eng.Flush()
 
@@ -86,8 +86,8 @@ func TestSeqGapIsTransportLoss(t *testing.T) {
 
 	port := core.PortMktData
 	// Send seq 0 then seq 2 (gap at 1).
-	eng.Process(makeHB(wire.MagicTOB, 1, 0, 0, 1000), port, nil)
-	eng.Process(makeHB(wire.MagicTOB, 1, 2, 0, 1002), port, nil)
+	eng.Process(srcA, makeHB(wire.MagicTOB, 1, 0, 0, 1000), port, nil)
+	eng.Process(srcA, makeHB(wire.MagicTOB, 1, 2, 0, 1002), port, nil)
 	eng.Flush()
 
 	// A forward gap is transport loss, NOT a FRAME.SEQ_RESET_GAP violation.
@@ -120,9 +120,9 @@ func TestSeqResetGapViolation(t *testing.T) {
 	eng := New(Config{Feed: core.FeedTOB, ReorderWindow: 1}, cap)
 	port := core.PortMktData
 
-	eng.Process(makeHB(wire.MagicTOB, 1, 10, 0, 1010), port, nil)
-	eng.Process(makeHB(wire.MagicTOB, 1, 20, 0, 1020), port, nil)
-	eng.Process(makeHB(wire.MagicTOB, 1, 5, 0, 1005), port, nil)
+	eng.Process(srcA, makeHB(wire.MagicTOB, 1, 10, 0, 1010), port, nil)
+	eng.Process(srcA, makeHB(wire.MagicTOB, 1, 20, 0, 1020), port, nil)
+	eng.Process(srcA, makeHB(wire.MagicTOB, 1, 5, 0, 1005), port, nil)
 	eng.Flush()
 
 	if n := cap.violationsFor("FRAME.SEQ_RESET_GAP"); n == 0 {
@@ -138,11 +138,11 @@ func TestResetEraAdvance(t *testing.T) {
 
 	port := core.PortMktData
 	// Era 0: seqs 10, 11.
-	eng.Process(makeHB(wire.MagicTOB, 1, 10, 0, 1010), port, nil)
-	eng.Process(makeHB(wire.MagicTOB, 1, 11, 0, 1011), port, nil)
+	eng.Process(srcA, makeHB(wire.MagicTOB, 1, 10, 0, 1010), port, nil)
+	eng.Process(srcA, makeHB(wire.MagicTOB, 1, 11, 0, 1011), port, nil)
 	// Era 1: seq restarts at 0. Must NOT be treated as backward motion.
-	eng.Process(makeHB(wire.MagicTOB, 1, 0, 1, 2000), port, nil)
-	eng.Process(makeHB(wire.MagicTOB, 1, 1, 1, 2001), port, nil)
+	eng.Process(srcA, makeHB(wire.MagicTOB, 1, 0, 1, 2000), port, nil)
+	eng.Process(srcA, makeHB(wire.MagicTOB, 1, 1, 1, 2001), port, nil)
 	eng.Flush()
 
 	if n := cap.violationsFor("FRAME.SEQ_RESET_GAP"); n != 0 {
@@ -159,10 +159,10 @@ func TestOlderEraStraggler(t *testing.T) {
 
 	port := core.PortMktData
 	// Establish era 2.
-	eng.Process(makeHB(wire.MagicTOB, 1, 0, 2, 3000), port, nil)
-	eng.Process(makeHB(wire.MagicTOB, 1, 1, 2, 3001), port, nil)
+	eng.Process(srcA, makeHB(wire.MagicTOB, 1, 0, 2, 3000), port, nil)
+	eng.Process(srcA, makeHB(wire.MagicTOB, 1, 1, 2, 3001), port, nil)
 	// Straggler from era 0 (older, d=254 → Older).
-	eng.Process(makeHB(wire.MagicTOB, 1, 5, 0, 1005), port, nil)
+	eng.Process(srcA, makeHB(wire.MagicTOB, 1, 5, 0, 1005), port, nil)
 	eng.Flush()
 
 	// The straggler should be dropped (transport loss), not a publisher violation.
@@ -191,11 +191,11 @@ func TestDupIdentical(t *testing.T) {
 	f0 := makeHB(wire.MagicTOB, 1, 0, 0, 1000)
 	f1 := makeHB(wire.MagicTOB, 1, 1, 0, 1001)
 
-	eng.Process(f0, port, nil)
-	eng.Process(f1, port, nil)
+	eng.Process(srcA, f0, port, nil)
+	eng.Process(srcA, f1, port, nil)
 	// Replay the exact same frames.
-	eng.Process(f0, port, nil)
-	eng.Process(f1, port, nil)
+	eng.Process(srcA, f0, port, nil)
+	eng.Process(srcA, f1, port, nil)
 	eng.Flush()
 
 	// No SEQ_DUP_DIVERGENT findings for identical duplicates.
@@ -216,10 +216,10 @@ func TestDupDivergent(t *testing.T) {
 
 	port := core.PortMktData
 	// Send seq 0 and 1.
-	eng.Process(makeHB(wire.MagicTOB, 1, 0, 0, 1000), port, nil)
-	eng.Process(makeHB(wire.MagicTOB, 1, 1, 0, 1001), port, nil)
+	eng.Process(srcA, makeHB(wire.MagicTOB, 1, 0, 0, 1000), port, nil)
+	eng.Process(srcA, makeHB(wire.MagicTOB, 1, 1, 0, 1001), port, nil)
 	// Now send seq 1 again but with different sendTS → different bytes.
-	eng.Process(makeHB(wire.MagicTOB, 1, 1, 0, 9999), port, nil)
+	eng.Process(srcA, makeHB(wire.MagicTOB, 1, 1, 0, 9999), port, nil)
 	eng.Flush()
 
 	dups := cap.findingsFor("FRAME.SEQ_DUP_DIVERGENT")
@@ -276,11 +276,11 @@ func TestSharedRulesOnTOB(t *testing.T) {
 
 	port := core.PortMktData
 	// seq 0,1,2,4 → gap at 3, then seq 3 late (reorder within window).
-	eng.Process(makeHB(wire.MagicTOB, 1, 0, 0, 1000), port, nil)
-	eng.Process(makeHB(wire.MagicTOB, 1, 1, 0, 1001), port, nil)
-	eng.Process(makeHB(wire.MagicTOB, 1, 2, 0, 1002), port, nil)
-	eng.Process(makeHB(wire.MagicTOB, 1, 4, 0, 1004), port, nil)
-	eng.Process(makeHB(wire.MagicTOB, 1, 3, 0, 1003), port, nil) // late arrival within window
+	eng.Process(srcA, makeHB(wire.MagicTOB, 1, 0, 0, 1000), port, nil)
+	eng.Process(srcA, makeHB(wire.MagicTOB, 1, 1, 0, 1001), port, nil)
+	eng.Process(srcA, makeHB(wire.MagicTOB, 1, 2, 0, 1002), port, nil)
+	eng.Process(srcA, makeHB(wire.MagicTOB, 1, 4, 0, 1004), port, nil)
+	eng.Process(srcA, makeHB(wire.MagicTOB, 1, 3, 0, 1003), port, nil) // late arrival within window
 	eng.Flush()
 
 	// No gap should have been declared for seq 3 because it arrived within the window.
@@ -300,9 +300,9 @@ func TestSendTSMonotonic(t *testing.T) {
 	eng := New(cfg, cap)
 
 	port := core.PortMktData
-	eng.Process(makeHB(wire.MagicTOB, 1, 0, 0, 1000), port, nil)
-	eng.Process(makeHB(wire.MagicTOB, 1, 1, 0, 999), port, nil) // SendTS went backward
-	eng.Process(makeHB(wire.MagicTOB, 1, 2, 0, 1001), port, nil)
+	eng.Process(srcA, makeHB(wire.MagicTOB, 1, 0, 0, 1000), port, nil)
+	eng.Process(srcA, makeHB(wire.MagicTOB, 1, 1, 0, 999), port, nil) // SendTS went backward
+	eng.Process(srcA, makeHB(wire.MagicTOB, 1, 2, 0, 1001), port, nil)
 	eng.Flush()
 
 	findings := cap.findingsFor("FRAME.SEND_TS_MONOTONIC")
@@ -369,7 +369,7 @@ func TestSnapshotPortLeadsResetNoFalseMonotonic(t *testing.T) {
 		withResetSeq(buildSnapEndFull(ch, instrID, 100, 5), 0, 1),
 	} {
 		f, sf := wire.Decode(raw, wire.MagicMBO)
-		e.Process(f, core.PortSnapshot, sf)
+		e.Process(srcA, f, core.PortSnapshot, sf)
 	}
 	e.Flush()
 
@@ -380,7 +380,7 @@ func TestSnapshotPortLeadsResetNoFalseMonotonic(t *testing.T) {
 		withResetSeq(buildSnapEndFull(ch, instrID, 1, 1), 1, 1),
 	} {
 		f, sf := wire.Decode(raw, wire.MagicMBO)
-		e.Process(f, core.PortSnapshot, sf)
+		e.Process(srcA, f, core.PortSnapshot, sf)
 	}
 	e.Flush()
 
@@ -418,7 +418,7 @@ func TestMktdataLeadsResetSnapshotStragglerNotViolation(t *testing.T) {
 
 	proc := func(raw []byte, port core.Port) {
 		f, sf := wire.Decode(raw, wire.MagicMBO)
-		e.Process(f, port, sf)
+		e.Process(srcA, f, port, sf)
 		e.Flush()
 	}
 
@@ -488,13 +488,13 @@ func TestFlushDeterministicPortOrder(t *testing.T) {
 	mktRaw := buildOrderAddFrame(ch, instrID, 1)
 	mktF, mktSF := wire.Decode(mktRaw, wire.MagicMBO)
 	mktF.Header.Sequence = 0
-	e.Process(mktF, core.PortMktData, mktSF)
+	e.Process(srcA, mktF, core.PortMktData, mktSF)
 
 	// Buffer a snapshot frame at seq=0 — also stays in window.
 	snapRaw := buildSnapBeginFull(ch, instrID, 0, 0, 99, 0)
 	snapF, snapSF := wire.Decode(snapRaw, wire.MagicMBO)
 	snapF.Header.Sequence = 0
-	e.Process(snapF, core.PortSnapshot, snapSF)
+	e.Process(srcA, snapF, core.PortSnapshot, snapSF)
 
 	// Both ports have portTrackers. Flush must not panic and must complete.
 	// The deterministic order ensures mktdata state is established before
@@ -510,7 +510,7 @@ func TestFlushDrainsInOrder(t *testing.T) {
 	port := core.PortMktData
 	// Send 5 frames in reverse seq order — all arrive within the window.
 	for seq := uint64(4); seq != ^uint64(0); seq-- {
-		eng.Process(makeHB(wire.MagicTOB, 1, seq, 0, 1000+seq), port, nil)
+		eng.Process(srcA, makeHB(wire.MagicTOB, 1, seq, 0, 1000+seq), port, nil)
 	}
 	eng.Flush()
 

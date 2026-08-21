@@ -201,7 +201,7 @@ func feedTwoInstrRefdata(e *Engine, ch uint8, instrA, instrB uint32, startSeq ui
 	processRefFrame := func(raw []byte) {
 		f, sf := wire.Decode(raw, wire.MagicMBO)
 		f.Header.Sequence = seq
-		e.Process(f, core.PortRefData, sf)
+		e.Process(srcA, f, core.PortRefData, sf)
 		seq++
 	}
 
