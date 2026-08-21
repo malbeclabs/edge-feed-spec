@@ -2,9 +2,9 @@
 
 The DoubleZero Order-Intent Feed is a wire format for normalized, pre-consensus order-intent events delivered over the DoubleZero Edge service. It defines a fixed-size, multicast-native binary protocol for publishing the order, cancel, and modify *submissions* observed in a venue's mempool (or equivalent pre-consensus layer) — attributed to the signing account when signature recovery succeeds, otherwise carried as an unauthenticated, zero-signer observation — typically before the venue's consensus commits them.
 
-This is a sibling protocol to the DoubleZero [Top-of-Book & Trades Feed](../top-of-book/spec.md), the [Market-by-Order Feed](../market-by-order/spec.md), and the [Midpoint Feed](../midpoint/spec.md), not a layer on top. Where those feeds carry accepted book state — quotes, resting orders, mid prices — this feed carries *intent*: every successfully normalized supported submission, plus dead-man-switch arm/disarm, as a fixed-size binary message.
+This is a sibling protocol to the DoubleZero [Top-of-Book & Trades Feed](../top-of-book/spec.md), the [Market-by-Order Feed](../market-by-order/spec.md), and the [Midpoint Feed](../midpoint/spec.md), not a layer on top. Where those feeds carry accepted book state — quotes, resting orders, mid prices — this feed carries *intent*: every successfully normalized supported submission, plus dead-man-switch set/clear, as a fixed-size binary message.
 
-This document specifies version **3.0.0**: the frame header, application message header, and the message types that define the wire format. The wire format is venue-generic; the per-venue derivations it deliberately does not fix (account-id encoding, Action Tag rule, source-message mapping) are defined out of band by each venue's publisher and are not part of this specification. The [Source ID Registry](../sources/spec.md) only assigns the Source ID → venue mapping.
+This document specifies version **3.0.1**: the frame header, application message header, and the message types that define the wire format. The wire format is venue-generic; the per-venue derivations it deliberately does not fix (account-id encoding, Action Tag rule, venue-message mapping) are defined out of band by each venue's publisher and are not part of this specification. The [Source ID Registry](../sources/spec.md) only assigns the Source ID → venue mapping.
 
 **Trust semantics (normative).** Events are *observed signed submissions*, not accepted orders. An event may reference an invalid order, a replay, an action the venue later rejects, or intent that never executes. The publisher performs no venue-level validation: it *attempts* signature recovery to attribute the event, but recovery is **not a gate on publication** — when recovery fails or is skipped, the event is still published with a zeroed Signer and the `signer unverified` flag (an unauthenticated observation; see [Common Event Fields](#common-event-fields)). Subscribers MUST treat the feed as intent, never as fills or book state. The boundary is syntactic, not semantic: values that parse and convert exactly are published as-is even if venue-invalid (zero quantity, a past schedule-cancel time, an order id that never existed). "Successfully normalized" means malformed, unmappable, or precision-violating entries are dropped; the feed does not promise every observed submission.
 
@@ -111,13 +111,13 @@ Every application message begins with:
 | `0x03` | *(reserved)* | — | — | Quote in the top-of-book feed, Midpoint in the midpoint feed. Intentionally unused here to prevent accidental cross-decoding if a frame is misrouted. |
 | `0x04` | *(reserved)* | — | — | Trade in the top-of-book and market-by-order feeds. This feed carries intent, not executions; intentionally unused. |
 | `0x05` | *(reserved)* | — | — | |
-| `0x06` | *(reserved)* | — | — | EndOfSession in sibling feeds. This is a real-time intent stream with no session boundary — a publisher going away is signaled by a `Reset Count` change on its return, not a session-end message — so it is intentionally unused here. |
-| `0x07` | ManifestSummary | 24 | refdata | Active instrument set summary. Inherited; see the [Reference Data Distribution supplement](../reference-data/spec.md). |
+| `0x06` | *(reserved)* | — | — | EndOfSession in sibling feeds. This is a real-time intent feed with no session boundary — a publisher going away is signaled by a `Reset Count` change on its return, not a session-end message — so it is intentionally unused here. |
+| `0x07` | ManifestSummary | 24 | refdata | Published instrument set summary. Inherited; see the [Reference Data Distribution supplement](../reference-data/spec.md). |
 | `0x30` | OrderNew | 124 | mktdata | A new order was submitted. |
 | `0x31` | OrderCancel | 88 | mktdata | Cancel request by venue order id. |
 | `0x32` | OrderCancelByClientId | 96 | mktdata | Cancel request by client order id. |
 | `0x33` | OrderModify | 148 | mktdata | Modify request (cancel-replace semantics). |
-| `0x34` | ScheduleCancel | 88 | mktdata | Dead-man-switch arm/disarm (account-wide). |
+| `0x34` | ScheduleCancel | 88 | mktdata | Dead-man-switch set/clear (account-wide). |
 
 A decoder encountering an unknown type MUST skip the message using its `Message Length` field and continue parsing the frame.
 
@@ -174,31 +174,31 @@ Publishers SHOULD use the most accurate Asset Class / Market Model value availab
 
 #### 0x07 ManifestSummary (24 bytes)
 
-Inherited. Periodic summary of the active instrument set on this channel. Carried on the `refdata` port. Defined in the [Reference Data Distribution supplement](../reference-data/spec.md); reproduced here for convenience.
+Inherited. Periodic summary of the published instrument set on this channel. Carried on the `refdata` port. Defined in the [Reference Data Distribution supplement](../reference-data/spec.md); reproduced here for convenience.
 
 | Offset | Field | Type | Description |
 |--------|-------|------|-------------|
 | 0  | Header | 4B | Type=`0x07`, Length=24 |
 | 4  | Channel ID | `u8` | Redundant with frame header; useful for standalone logging |
-| 5  | Valid | `u8` | `1` when the channel has an established instrument set; `0` when the publisher is uninitialized or the channel is inactive. See supplement. Asserts that the channel's instrument set is established — **not** that the source is producing flow. |
+| 5  | Valid | `u8` | `1` when the channel has an established instrument set; `0` when the publisher is uninitialized or the channel is inactive. See supplement. Asserts that the channel's instrument set is established — **not** that the upstream source is producing flow. |
 | 6  | Reserved | 2B | Padding |
-| 8  | Manifest Seq | `u16` | Increments every time the active instrument set changes on this channel |
+| 8  | Manifest Seq | `u16` | Increments every time the published instrument set changes on this channel |
 | 10 | Reserved | 2B | Padding |
-| 12 | Instrument Count | `u32` | Number of instruments currently in the active set |
+| 12 | Instrument Count | `u32` | Number of instruments currently in the published set |
 | 16 | Timestamp | `ts_ns` | When the publisher emitted this summary |
 
 ### Common Event Fields
 
 Every event message (`0x30`–`0x34`) carries the following core fields. Field offsets differ per message; the semantics are shared.
 
-- **Instrument ID** `u32` — publisher instrument id, mapped from the venue-native asset id and described on the `refdata` port. Account-wide scope is a property of the **message type** (`ScheduleCancel`), not of a sentinel value: a real venue may have an instrument with id 0, so 0 cannot mean "none". Account-wide messages set the field to `0xFFFFFFFF` (reserved "no instrument") and receivers identify scope by type. Instrument identity is the **`(Channel ID, Instrument ID)`** tuple, matching the sibling feeds: an Instrument ID is unique only within its channel, so a sharded deployment (Channel ID ≠ 0) MUST key instrument state on the pair. In v1 — a single channel (ID 0) — the channel component is constant and the two are equivalent.
+- **Instrument ID** `u32` — publisher instrument id, mapped from the venue-native instrument id and described on the `refdata` port. Account-wide scope is a property of the **message type** (`ScheduleCancel`), not of a sentinel value: a real venue may have an instrument with id 0, so 0 cannot mean "none". Account-wide messages set the field to `0xFFFFFFFF` (reserved "no instrument") and receivers identify scope by type. Instrument identity is the **`(Channel ID, Instrument ID)`** tuple, matching the sibling feeds: an Instrument ID is unique only within its channel, so a sharded deployment (Channel ID ≠ 0) MUST key instrument state on the pair. In v1 — a single channel (ID 0) — the channel component is constant and the two are equivalent.
 - **Source ID** `u16` — identifies the **venue** whose flow this event was derived from, per the canonical [Source ID Registry](../sources/spec.md): one stable id per venue, never reused. **Every publisher host of a venue emits the same Source ID**, and hosts are distinguished by the port they send on (a deployment-defined per-host port offset, out of scope for this spec), not by Source ID. The account-id encoding and Action Tag derivation are properties of the venue, defined out of band by that venue's publisher; the registry itself only maps the Source ID to a venue. A subscriber receiving a Source ID absent from its pinned registry SHOULD drop those events and surface a counter prompting a registry update; it MUST NOT fail the channel.
 - **Action Tag** `u64` — a per-action correlation handle, pre-computed by the publisher and identical for every event exploded from one action. Its derivation is a **per-venue property defined out of band by the venue's publisher**, not a wire-format constant; the wire carries only the resulting `u64`. The **fallback action tag** flag (Event Flags bit 5) marks a venue-defined fallback derivation. Because cross-host dedupe depends on tag agreement, all publisher hosts of one venue MUST run identical tag-derivation behavior in steady state; the sole tolerated exception is transient version skew during a rolling deploy, whose duplicates subscribers absorb under the at-least-once model. The tag is a **correlation aid, not a globally unique id**: 64 bits make collisions negligible within any realistic correlation window, but consumers MUST NOT assume global uniqueness over long horizons.
 - **Nonce** `u64` — the client's nonce, the order *intent* time as the client recorded it (commonly a client-side **millisecond** timestamp — note the unit contrast with the nanosecond `Source Timestamp`). A per-signer replay/ordering value, not an identity and not a venue-global sequence.
 - **Source Timestamp** `ts_ns` — the source node's recorded observation time for the batch, nanoseconds since the Unix epoch, passed through **verbatim from the source node**. Its exact provenance is a property of the source node, not of this feed. A batch whose source timestamp cannot be parsed is skipped and counted in a metric.
 - **Signer** `byte[20]` — the recovered signing address. **Zeroed** with the `signer unverified` flag (Event Flags bit 3) set when recovery fails or was not attempted. An all-zero signer is never a real account; consumers MUST NOT join zero-signer events into account-level analytics. An event with bit 3 set is an **unauthenticated observation** — not attributable to any account. A recovered address asserts only *cryptographic consistency* of the observed signature with the observed action — venue-level validity (nonce freshness, account existence) is not checked.
 - **Vault** `byte[20]` — the vault/subaccount the action targets; **zeroed** when absent. The **vault present** flag (Event Flags bit 4) distinguishes "no vault" from a pathological all-zero vault address.
-- **Batch Index / Batch Count** `u16` × 2 — position within the exploded signed action (0-based index; count ≥ 1). The batch is the **whole signed action**: index/count span every event emitted from it regardless of message kind — a single action producing a mix of `OrderNew` and `OrderModify` shares one index space. Indexes are assigned from the source entry positions and Count is the source entry count: if an entry is withheld (malformed shape, unsupported shape, unmappable asset, or a precision-violating price/size), the remaining events keep their original indexes and Count, so an **index gap with full Count** tells the subscriber an entry was withheld. The whole signed action is skipped (producing no events) only when the action-level schema itself fails. Actions exploding to more than 65,535 entries are dropped whole and counted in a metric.
+- **Batch Index / Batch Count** `u16` × 2 — position within the exploded signed action (0-based index; count ≥ 1). The batch is the **whole signed action**: index/count span every event emitted from it regardless of message kind — a single action producing a mix of `OrderNew` and `OrderModify` shares one index space. Indexes are assigned from the signed action's entry positions and Count is its entry count: if an entry is withheld (malformed shape, unsupported shape, unmappable asset, or a precision-violating price/size), the remaining events keep their original indexes and Count, so an **index gap with full Count** tells the subscriber an entry was withheld. The whole signed action is skipped (producing no events) only when the action-level schema itself fails. Actions exploding to more than 65,535 entries are dropped whole and counted in a metric.
 
 #### Account Identifier Encoding (venue-defined)
 
@@ -225,7 +225,7 @@ The encoding of the Signer and Vault fields is a property of the **venue**, defi
 | 6 | target-by-client-id | `OrderModify` only: the modify targets the Target Client Order ID, not the Target Order ID. When set, the 16-byte Target Client Order ID is mandatory and valid; there is no separate presence flag for it |
 | 7 | client order id present | Governs the message's *primary* client-order-id field: Client Order ID in `OrderNew`, New Client Order ID in `OrderModify`. Distinguishes absent from a literal all-zero id. The *target* client id in `OrderModify` is governed by bit 6; the client id in `OrderCancelByClientId` is always present by construction |
 
-Bits 1 and 2 (`trigger-is-tp` / `trigger-is-sl`) are **mutually exclusive**: at most one is set. Both clear means the take-profit/stop-loss role is unspecified — the normal state for a non-trigger order, and also valid for a trigger order whose source carried no tp/sl designation. Both set is invalid; receivers MUST treat it as unspecified (neither). These bits are only meaningful when Order Type is trigger-market/trigger-limit; on a non-trigger order they are zeroed per the Unused-Field Rule.
+Bits 1 and 2 (`trigger-is-tp` / `trigger-is-sl`) are **mutually exclusive**: at most one is set. Both clear means the take-profit/stop-loss role is unspecified — the normal state for a non-trigger order, and also valid for a trigger order whose upstream source carried no tp/sl designation. Both set is invalid; receivers MUST treat it as unspecified (neither). These bits are only meaningful when Order Type is trigger-market/trigger-limit; on a non-trigger order they are zeroed per the Unused-Field Rule.
 
 These are the order-intent feed's **`Event Flags`**, a distinct field from the [Market-by-Order Feed](../market-by-order/spec.md)'s `Order Flags`; bit positions are **not** shared across feeds (for example `reduce-only` is bit 0 here but bit 1 in market-by-order). A cross-feed reader MUST apply each feed's own bit definitions and not reuse flag masks across feeds.
 
@@ -255,13 +255,13 @@ A new order was submitted.
 | 12 | TIF | `u8` | See TIF |
 | 13 | Event Flags | `u8` | See Event Flags |
 | 14 | Batch Index | `u16` | Position within the exploded signed action (0-based) |
-| 16 | Batch Count | `u16` | Source entry count of the signed action (≥ 1) |
+| 16 | Batch Count | `u16` | Entry count of the signed action (≥ 1) |
 | 18 | Grouping | `u8` | See Grouping |
 | 19 | Reserved | `u8` | Padding; zeroed |
 | 20 | Action Tag | `u64` | Per-action correlation handle |
 | 28 | Nonce | `u64` | Client nonce (intent time) |
 | 36 | Source Timestamp | `ts_ns` | Node observation time |
-| 44 | Price | `price` | The order's submitted price as the venue provides it: the limit price for a limit order; for a trigger order, the post-trigger limit or slippage-bound price the venue carried (a trigger-market order whose source supplies no such price is zeroed). Uses instrument's Price Exponent |
+| 44 | Price | `price` | The order's submitted price as the venue provides it: the limit price for a limit order; for a trigger order, the post-trigger limit or slippage-bound price the venue carried (a trigger-market order whose upstream source supplies no such price is zeroed). Uses instrument's Price Exponent |
 | 52 | Trigger Price | `price` | The price level at which the trigger fires. Meaningful only when Order Type is trigger-market/trigger-limit (Order Type, not a zero sentinel, is the discriminator); zeroed otherwise |
 | 60 | Quantity | `qty` | Order size. Uses instrument's Qty Exponent |
 | 68 | Client Order ID | `byte[16]` | Valid only when Event Flags bit 7 (client order id present) is set; zeroed otherwise |
@@ -339,7 +339,7 @@ Modify request (cancel-replace semantics). Carries both target-id fields at fixe
 
 ### 0x34 ScheduleCancel (88 bytes)
 
-Dead-man-switch arm/disarm (account-wide). Identical layout to `OrderCancel`, with the Order ID field replaced by **Trigger Time**.
+Dead-man-switch set/clear (account-wide). Identical layout to `OrderCancel`, with the Order ID field replaced by **Trigger Time**.
 
 | Offset | Field | Type | Description |
 |--------|-------|------|-------------|
@@ -353,13 +353,13 @@ Dead-man-switch arm/disarm (account-wide). Identical layout to `OrderCancel`, wi
 | 16 | Action Tag | `u64` | |
 | 24 | Nonce | `u64` | |
 | 32 | Source Timestamp | `ts_ns` | |
-| 40 | Trigger Time | `u64` | Milliseconds since the Unix epoch at which the dead-man switch fires — a `u64` **ms** value, **not** `ts_ns` (the venue's verbatim unit; contrast the nanosecond `Source Timestamp`); **`0` = disarm** |
+| 40 | Trigger Time | `u64` | Milliseconds since the Unix epoch at which the dead-man switch fires — a `u64` **ms** value, **not** `ts_ns` (the venue's verbatim unit; contrast the nanosecond `Source Timestamp`); **`0` = clear** |
 | 48 | Signer | `byte[20]` | |
 | 68 | Vault | `byte[20]` | |
 
-`Batch Index 0 / Count 1` is not a special rule but the general one: a schedule-cancel action contains no entry array, so it is single-entry by construction. `ScheduleCancel` is account-wide because an armed dead-man switch signals imminent mass cancellation — high-value intent — even though it is not tied to one instrument.
+`Batch Index 0 / Count 1` is not a special rule but the general one: a schedule-cancel action contains no entry array, so it is single-entry by construction. `ScheduleCancel` is account-wide because a set dead-man switch signals imminent mass cancellation — high-value intent — even though it is not tied to one instrument.
 
-Venue-specific mapping of source actions to these messages is defined out of band by each venue's publisher and is not part of this specification.
+The mapping from a venue's own actions to these messages is defined out of band by that venue's publisher and is not part of this specification.
 
 ---
 
@@ -374,7 +374,7 @@ A subscriber consuming this feed MUST:
 5. **Re-latch on a `Reset Count` change.** `Reset Count` is tracked per `(host, channel)` — it is shared across the channel's two ports. When it changes: reset the expected `Sequence Number` for **both ports** of that `(host, channel)`, and **invalidate that channel's reference-data state**, rebuilding readiness from the refetched `InstrumentDefinition`/`ManifestSummary` cycle (a reset may have changed the instrument set; stale definitions MUST NOT survive it). Treat the change as a feed restart, **not** packet loss — gap events spanning the reset are unrecoverable by design (see [Reset and Recovery Semantics](#reset-and-recovery-semantics)). Compare `Reset Count` for inequality, not ordering: it is a `u8` and any change (including the wrap from `255` to `0`) is a reset.
 6. **Never attribute a zero-signer event.** An event with Event Flags bit 3 (`signer unverified`) set carries an all-zero Signer and is an unauthenticated observation; it MUST NOT be joined into account-level analytics.
 7. **Treat an unknown Source ID gracefully.** A subscriber receiving a Source ID absent from its pinned registry SHOULD drop those events (it cannot resolve the venue, and so cannot obtain that venue's publisher-documented account-id encoding or Action Tag rule) and surface a counter; it MUST NOT fail the channel.
-8. **Do not infer source liveness from the protocol.** Heartbeats and `ManifestSummary.Valid` assert channel/refdata liveness only, not that the source is producing flow; a subscriber needing source liveness MUST monitor event recency itself.
+8. **Do not infer upstream-source liveness from the protocol.** Heartbeats and `ManifestSummary.Valid` assert channel/refdata liveness only, not that the upstream source is producing flow; a subscriber needing upstream-source liveness MUST monitor event recency itself.
 9. **Tolerate pre-definition events.** A subscriber MAY receive events for an instrument before that instrument's `InstrumentDefinition` has arrived on `refdata` (the publisher has the entry, the subscriber's refdata has not cycled). It MUST tolerate this — buffer until refdata arrives or drop — the same cold-start tolerance as the sibling feeds.
 
 Per-host, per-channel, per-port `Sequence Number` gaps are a health signal only; they never gate delivery (late or duplicate frames still flow through dedupe).
@@ -385,23 +385,23 @@ Per-host, per-channel, per-port `Sequence Number` gaps are a health signal only;
 
 A publisher operating this feed MUST:
 
-1. **Emit in source order** on `mktdata` as venue events arrive, exploding each multi-entry signed action into one fixed-size event per entry sharing the action's Action Tag, Nonce, Signer, Vault, and Batch Count (per [Common Event Fields](#common-event-fields)). Pack multiple messages into a frame up to the MTU.
+1. **Emit in arrival order** on `mktdata` as venue events arrive, exploding each multi-entry signed action into one fixed-size event per entry sharing the action's Action Tag, Nonce, Signer, Vault, and Batch Count (per [Common Event Fields](#common-event-fields)). Pack multiple messages into a frame up to the MTU.
 2. **Maintain a monotonic `Sequence Number`** per `(host, channel, port)`, starting at 0 and resetting only on `Reset Count` change.
 3. **Pre-compute the Action Tag and recover the Signer** so the market-data path carries no strings or crypto. All hosts of one venue MUST run identical tag-derivation behavior in steady state.
 4. **Perform first-observation dedup** over a bounded window, using a venue-defined publisher dedupe identity (a full-precision per-venue key, distinct from the truncated wire Action Tag), so a re-observed copy of an action it already published is not re-emitted by the same host. (Cross-host duplicates remain possible and are reconciled by the subscriber.)
 5. **Retransmit `InstrumentDefinition` and `ManifestSummary`** on `refdata` per the [Reference Data Distribution supplement](../reference-data/spec.md) (recommended 30 s definition cycle, 1 s manifest cadence). Drive the `ManifestSummary.Valid` flag per the supplement: `Valid = 0` while the instrument set is not yet established (cold start), transitioning to `Valid = 1` once it is.
 6. **Emit `Heartbeat`** on `mktdata` every N seconds when otherwise idle (recommended 1 s).
-7. **Bump `Reset Count`** and reset per-port `Sequence Number` to 0 on restart, resuming at the live edge of the source. Events that occurred during downtime are intentionally never published.
+7. **Bump `Reset Count`** and reset per-port `Sequence Number` to 0 on restart, resuming at the live edge of the upstream source. Events that occurred during downtime are intentionally never published.
 
 ---
 
 ## Reset and Recovery Semantics
 
-This feed has **no snapshot or replay mechanism** — it is a real-time intent stream, and late events are worse than absent ones. Recovery semantics are therefore deliberately minimal:
+This feed has **no snapshot or replay mechanism** — it is a real-time intent feed, and late events are worse than absent ones. Recovery semantics are therefore deliberately minimal:
 
-- **Publisher restart** bumps `Reset Count`, resets per-port `Sequence Number` to 0, and resumes at the live edge of the source. Events that occurred during publisher downtime are **intentionally never published**.
+- **Publisher restart** bumps `Reset Count`, resets per-port `Sequence Number` to 0, and resumes at the live edge of the upstream source. Events that occurred during publisher downtime are **intentionally never published**.
 - A `Reset Count` change is a **feed restart**, not recoverable packet loss; subscribers re-latch that `(host, channel)`'s sequence tracking on **both ports**, **invalidate and rebuild that channel's reference-data state** (the instrument set may have changed across the reset; stale definitions MUST NOT survive), and accept that gap events are unrecoverable. `Reset Count` is a `u8`, shared across the channel's two ports; compare it for inequality (any change, including the `255`→`0` wrap, is a reset), never for ordering.
-- **At-most-once by the source reread:** a batch partially read, or normalized but not yet framed, at crash time is never re-emitted by the reread itself — events can be lost across a crash but are never duplicated by it. (Cross-host re-observation after a restart is still possible and is covered by the at-least-once cross-host model and the subscriber dedupe key.)
+- **At-most-once by the upstream-source reread:** a batch partially read, or normalized but not yet framed, at crash time is never re-emitted by the reread itself — events can be lost across a crash but are never duplicated by it. (Cross-host re-observation after a restart is still possible and is covered by the at-least-once cross-host model and the subscriber dedupe key.)
 - Per-host, per-channel, per-port `Sequence Number` gaps (see the [frame-header rule](#frame-header-24-bytes)) are genuine multicast path loss and a **health signal only**; they never gate delivery.
 - Subscribers MUST tolerate receiving events for an instrument whose `InstrumentDefinition` has not yet arrived on `refdata` — the same cold-start tolerance as the sibling feeds.
 
@@ -423,39 +423,15 @@ The format is fixed-size and binary, so parsing requires no allocation, no strin
 
 ---
 
-## Venue Genericity and the Source Registry
+## Venue Genericity and the Source ID Registry
 
-The wire format above is venue-generic. The [Source ID Registry](../sources/spec.md) assigns the Source ID → venue mapping — and nothing more. Three further things vary per venue and are defined **out of band by each venue's publisher**, not by this spec or the registry: the account-id encoding of Signer/Vault (see [Account Identifier Encoding](#account-identifier-encoding-venue-defined)), the Action Tag derivation rule (see [Common Event Fields](#common-event-fields)), and the mapping from the venue's source actions to these messages. The wire layouts do not change per venue; a venue's publisher is responsible for emitting conformant frames and for documenting and testing its own derivations.
-
----
-
-## Relationship to Sibling Feeds
-
-The DoubleZero Order-Intent Feed is a sibling of the [Top-of-Book & Trades Feed](../top-of-book/spec.md), the [Market-by-Order Feed](../market-by-order/spec.md), and the [Midpoint Feed](../midpoint/spec.md). Sibling feeds share:
-
-- The 24-byte frame header layout (except for the `Magic` value).
-- The 4-byte application message header.
-- The [Reference Data Distribution supplement](../reference-data/spec.md) conformance, including `InstrumentDefinition` (`0x02`) and `ManifestSummary` (`0x07`).
-- The cross-spec message Type IDs `0x01` (Heartbeat) and `0x07` (ManifestSummary) byte-for-byte.
-- The `Reset Count` reset pattern.
-- The forward-compatibility rules.
-
-Distinctions of the order-intent feed:
-
-- `Magic` is `0x494F` (vs. `0x445A` top-of-book, `0x4444` market-by-order, `0x4D44` midpoint).
-- It has **no session-boundary message** — the siblings end a session with `EndOfSession` (`0x06`); this real-time intent stream has no session concept (a publisher restart is signaled by a `Reset Count` change), so `0x06` is reserved and unused.
-- It carries **pre-consensus intent**, not accepted book state — events are observed submissions, never fills (see [Trust semantics](#doublezero-order-intent-feed)).
-- It does **not** carry `Trade` (`0x04`) or any quote/book payload; those Type IDs are not used here.
-- It has **no snapshot/recovery mechanism** — there is no canonical state to snapshot.
-- Order-intent-specific payload Type IDs live in `0x30`–`0x3F`.
-
-A publisher MAY operate any subset of the sibling feeds for the same instruments simultaneously. Subscribers MAY consume any subset independently.
+The wire format above is venue-generic. The [Source ID Registry](../sources/spec.md) assigns the Source ID → venue mapping — and nothing more. Three further things vary per venue and are defined **out of band by each venue's publisher**, not by this spec or the registry: the account-id encoding of Signer/Vault (see [Account Identifier Encoding](#account-identifier-encoding-venue-defined)), the Action Tag derivation rule (see [Common Event Fields](#common-event-fields)), and the mapping from the venue's own actions to these messages. The wire layouts do not change per venue; a venue's publisher is responsible for emitting conformant frames and for documenting and testing its own derivations.
 
 ---
 
 ## Versioning and Forward Compatibility
 
-This document is version **3.0.0**, versioned independently of the sibling specs. The Schema Version byte in the frame header is `3` and equals this spec's MAJOR version, so it stays `3` for every `3.x.y` release and changes only on a breaking wire change. See the [Versioning Policy](../VERSIONING.md) for the full rule, the change classification, and the tag scheme.
+This document is version **3.0.1**, versioned independently of the sibling specs. The Schema Version byte in the frame header is `3` and equals this spec's MAJOR version, so it stays `3` for every `3.x.y` release and changes only on a breaking wire change. See the [Versioning Policy](../VERSIONING.md) for the full rule, the change classification, and the tag scheme.
 
 Future `3.x` versions of this specification MAY, without a Schema Version bump:
 
@@ -466,9 +442,11 @@ Future `3.x` versions of this specification MAY, without a Schema Version bump:
 
 Existing field layouts and semantics will not change within the `3.x` line. A change that moves or resizes a field, alters a message length, or redefines existing semantics requires a MAJOR release and a Schema Version bump, which old decoders MUST reject rather than parse.
 
-Note that the per-venue derivations this spec deliberately leaves out of band (account-id encoding, Action Tag rule, source-message mapping) are not part of the wire format and are therefore outside this versioning scheme. A venue changing its Action Tag derivation does not bump this spec's version, and the wire carries no signal of it. That is a property of the design, not an oversight: see [Common Event Fields](#common-event-fields).
+Note that the per-venue derivations this spec deliberately leaves out of band (account-id encoding, Action Tag rule, venue-message mapping) are not part of the wire format and are therefore outside this versioning scheme. A venue changing its Action Tag derivation does not bump this spec's version, and the wire carries no signal of it. That is a property of the design, not an oversight: see [Common Event Fields](#common-event-fields).
 
 ### Changes
+
+**3.0.1** — editorial. The dead-man switch is now **set** and **cleared** rather than armed and disarmed, matching what `Trigger Time` already encodes as non-zero versus `0`. Qualified the bare uses of "source", renamed "venue-native asset id" to "venue-native instrument id", replaced "intent stream" with "intent feed", and removed the *Relationship to Sibling Feeds* enumeration. No wire change.
 
 **3.0.0** — added `Source ID` (`u16`) after `Instrument ID` in `InstrumentDefinition`. `Symbol` and every later field move two bytes, and the message grows from 128 to 130 bytes. This is a breaking change: the Schema Version byte is now `3`, and a decoder built for `2.x` MUST reject these frames rather than parse them at the old offsets. The midpoint feed remains unchanged at Schema Version `1`.
 
