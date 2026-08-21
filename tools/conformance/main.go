@@ -58,7 +58,11 @@ func main() {
 	_ = fs.Parse(os.Args[1:])
 
 	if *showVersion {
-		fmt.Println(version)
+		// `version+commit`, one line, `+` separator: malbeclabs/infra's dz_conformance
+		// role parses this output and requires `^[0-9]+\.[0-9]+\.[0-9]+([-+].*)?$` after
+		// trimming a leading `v`, so a space or a parenthesis makes it re-download the
+		// binary and restart every instance on every run.
+		fmt.Println(version + "+" + commit)
 		os.Exit(0)
 	}
 
