@@ -5,6 +5,9 @@
 blocking prerequisite found in that review and gates the whole rollout; §4.2/§4.3 narrow the alert
 exemptions from a stream prefix to named streams; §4.4, §2.1 and §7 correct claims the review
 falsified.
+**Correction 2026-08-21, not yet re-reviewed:** §1.3's state key is the **channel instance** —
+`(source IP address, Channel ID, destination port)` — and not `(port, channel_id)`. That is a change of
+normative unit, it post-dates the review above, and it has not been re-reviewed.
 **Branch:** `specs/kalshi-conformance-deploy`
 **Plan:** `docs/superpowers/plans/2026-08-19-kalshi-conformance-deploy.md`
 
@@ -46,9 +49,10 @@ downstream is meaningful until it does.
 - **No `sports-tob` (`233.84.178.17`).** No host receives it, so it is a new join and a separate
   decision.
 - **No fix for the pre-existing HL alert noise** (§4.1).
-- **No `--channel` filter and no per-arm instances.** The two publishers on each port are separated by
-  keying the checker's frame state per `(port, channel_id)`, not by running one validator per arm
-  (§1.3, rejected alternative).
+- **No `--channel` filter, no source-IP filter and no per-arm instances.** The two publishers on each
+  port are separated by keying the checker's frame state per **channel instance** — `(source IP
+  address, Channel ID, destination port)` — which carries the arm in the key, so there is nothing left
+  to filter and one validator per stream grades both arms (§1.3, rejected alternatives).
 
 ---
 
@@ -150,21 +154,31 @@ the print, because the constraint lives in another repository.
 **This is the blocking prerequisite, and it is a checker change rather than a config one.**
 
 Every stream in §3.1 is published by *two* processes to the same multicast group and the same port,
-separable only by the frame header's `Channel ID`:
+told apart by the **source address**: each arm binds its egress to a distinct address, so the
+discriminator rides in the IP header of every datagram
+(`malbeclabs/kalshi:docs/superpowers/specs/2026-07-31-multicast-channel-topology-design.md` §3.1 —
+`source_ip` names "the **publisher instance** — the arm", `channel_id` names "the **instrument set**,
+one meaning everywhere"). The two arms also carry different channel ids today, and that is incidental
+— see the correction below:
 
-| stream | mktdata port | arms | channel ids |
+| stream | mktdata port | arms | channel ids today |
 | --- | --- | --- | --- |
 | perps TOB | 31000 | `aws-cmh-kl-perps1`, `aws-cmh-kl-perps2` | 1, 101 |
 | perps MBP | 32000 | the same pair, both folding the same book | 1, 101 |
 | sports NFL MBP | 34010 | `aws-cmh-kl-sports1`, `aws-cmh-kl-sports2` | 10, 110 |
 
-Sources: `malbeclabs/infra:ansible/inventory/mainnet-beta/group_vars/kalshi_feed_capture_cmh.yml:117-132`
-("separable only by `channel_id` (prod1 = 1, prod2 = 2) ... Measured after that deploy: 451 packets/5 s
-from prod1 and 1,660 from prod2 on 233.84.178.4") and `:259-261` for sports. The publisher's own
-contract says the same thing:
-`malbeclabs/kalshi:app/publisher/crates/kalshi-publisher/src/publisher/transport.rs:174` — "Per-port
-stream counters. Each port is an independent sequence series" — per *process* — and `:99` requires
-"a subscriber keyed on `(channel_id, reset_count)`".
+Sources for the ids: `malbeclabs/kalshi:infra/ansible/inventory/host_vars/aws-cmh-kl-perps1/main.yml:14`
+(`kalshi_publisher_channel_id: 1`) and `aws-cmh-kl-perps2/main.yml:20` (`101`), sports via
+`kalshi_publisher_channel_id_offset: 100` on `aws-cmh-kl-sports2` (`:48`). The capture config still
+records the older framing —
+`malbeclabs/infra:ansible/inventory/mainnet-beta/group_vars/kalshi_feed_capture_cmh.yml:117-132`,
+"separable only by `channel_id` (prod1 = 1, prod2 = 2) ... Measured after that deploy: 451 packets/5 s
+from prod1 and 1,660 from prod2 on 233.84.178.4", and `:259-261` for sports — and its measurement
+stands even though the discriminator it names does not. The publisher's counters are per *process*:
+`malbeclabs/kalshi:app/publisher/crates/kalshi-publisher/src/publisher/transport.rs:204` — "Per-port
+stream counters. Each port is an independent sequence series" — and `:112` describes "a subscriber
+keyed on `(channel_id, reset_count)`", which `malbeclabs/kalshi` issue **#85** records as the wrong
+key for exactly the reason below.
 
 **This is the structural difference from Hyperliquid, and it is why the HL deployment proves nothing
 about this one.** Eleven HL publishers share group `233.84.178.15`, but each owns a distinct port pair
@@ -173,11 +187,9 @@ conformance genuinely does see one publisher per port. Kalshi is one port, two s
 
 The checker is not keyed that way, at either layer:
 
-- **Socket.** `tools/conformance/input/multicast.go:146` reads `n, _, err := conn.ReadFromUDP(buf)` —
-  the sender address is discarded, and no source-IP flag exists in the flag set
-  (`tools/conformance/main.go:24-56`). The capture service *does* filter, dropping non-matching senders
-  at `sources/edge.rs:135` with `udp_drops{reason="unknown_source"}`. The validator has no equivalent,
-  so it cannot separate the arms the way the recorder does.
+- **Input.** `tools/conformance/input/multicast.go:146` reads `n, _, err := conn.ReadFromUDP(buf)` —
+  the sender address is discarded before the engine can see it — and `input/pcap.go` never reads the IP
+  header either, so a replay cannot recover what the live path threw away.
 - **Engine.** `tools/conformance/engine/engine.go:28` — "per-port reorder buffers and seq trackers
   (keyed by `core.Port`)". `lastHbSendTS` (`:33-36`) is likewise a single field for the whole mktdata
   port.
@@ -201,19 +213,72 @@ Tier-1 rules, so `dz_conformance_checks_total{result="pass"}` keeps advancing wh
 is dead — which defeats the §7 limit-1 guard *and* reproduces exactly the failure §2.1 exists to
 prevent: a healthy process validating nothing.
 
-**The fix is to key the frame-level state per `(port, channel_id)` rather than per port**, and it
-lands in `edge-feed-spec` before the tag, because the tag is what gets deployed. This is a real engine
-change, not a widening: `Engine.ports`, `portTracker` (seq, reorder buffer, dedup ring, era,
-`dirtyWindow`), `lastHbSendTS`, and the `gateDetector`/`gateDetectorSnap` lookups all have to take the
-channel. The per-channel machinery already exists beside it and is the precedent — `mbpState.open` is
-"keyed by channel" for this exact reason (`engine/mbp.go:136-143`: "a deployment may shard instruments
-across channels and carry more than one of them on a port"), and the refdata state machine is per
-channel (`engine/refdata.go:154`). Frame sequence is the piece that was left per-port.
+**The fix is to key the frame-level state per channel instance — `(source IP address, Channel ID,
+destination port)` — rather than per port**, and it lands in `edge-feed-spec` before the tag, because
+the tag is what gets deployed. That unit is defined, and keying on it is a subscriber MUST.
+`GLOSSARY.md:37` defines a **channel instance** as "One path's view of one channel, keyed `(source IP
+address, Channel ID, destination port)`. The unit that owns a sequence series, a `Reset Count`, and a
+snapshot cycle", and `:43` requires it: "**Sequencing keys on the channel instance, never the
+channel.** ... a subscriber binding more than one sees an independent series per instance and MUST key
+gap detection and recovery state on `(source IP address, Channel ID, destination port)`."
+`market-by-price/spec.md` says the same on the wire as of **3.1.0** (PR #25): the datagram header's
+`Sequence Number` is "Monotonically increasing **per channel instance** — per source IP address, per
+channel, per destination port" (`:87`); the *Redundant Channel Instances* section mints every
+identifier per instance in a table and notes that "Only `Sequence Number` keys on the full tuple,
+because only it is per port role"; and `Source ID` "cannot serve: it names the matching engine, so
+redundant instances of one channel emit the same values".
 
-Rejected alternative: a `--channel=<id>` filter with one instance per (stream, arm). Much smaller, but
-it doubles the process count (12 validator instances on cmh rather than 6), needs a second metrics
-port per stream, and leaves the merged-series bug in place for anyone who omits the flag. The keying
-fix is correct for both fleets and is a no-op on Hyperliquid, which is single-channel per port.
+**Correction, 2026-08-21: the key is the channel instance, not `(port, channel_id)`.** An earlier
+revision of this section specified `(port, channel_id)`, and §3.1 and the plan's Task 1b were
+written against it. `Channel ID` names the instrument set, not the arm, so under that key two arms
+of one channel are one series, and the merge described above survives the fix meant to remove it.
+The mistake was invisible because today's arms happen to differ by id — 1 and 101 on perps, 10 and
+110 on sports — so `(port, channel_id)` separates them by accident, and every check against the live
+feed would have passed. Three things end that. `malbeclabs/kalshi` issue **#86** records that the
+perps collapse from `channel_id` 1 and 2 to a single `id` 0 is settled and only its timing is open
+(topology gate G8), so the day it lands a `(port, channel_id)` key silently re-merges the two arms —
+the failure this section exists to prevent, arriving with no code change and no diff to review. On
+the sports plane `channel_id` names the league and, per the same issue, "was never available as an
+arm discriminator". And issue **#85** files the publisher's own per-port claim as wrong for the same
+reason, against the topology design's normative statement
+(`malbeclabs/kalshi:docs/superpowers/specs/2026-07-31-multicast-channel-topology-design.md` §3.1):
+"**Sequence and reset counters are scoped to `(source_ip, group, port)`, and that is normative.**"
+
+This is a real engine change, not a widening: `Engine.ports`, `portTracker` (seq, reorder buffer, dedup
+ring, era, `dirtyWindow`), the heartbeat baseline, and the `gateDetector`/`gateDetectorSnap` lookups
+all have to take the instance — and the source address has to be carried from **both** inputs, the
+socket live and the IP header on replay, or an offline replay keys instances differently from the live
+instance it exists to reproduce. The per-channel machinery already exists beside it and is the
+precedent — `mbpState.open` is "keyed by channel" for this exact reason (`engine/mbp.go:136-143`: "a
+deployment may shard instruments across channels and carry more than one of them on a port"), and the
+refdata state machine is per channel (`engine/refdata.go:154`). Frame sequence is the piece that was
+left per-port, and the source address is the piece that was never read at all.
+
+**One boundary is deliberately not crossed.** Per-instrument sequencing, the reconstructed books, the
+snapshot groups and the reference-data state machine stay keyed by channel, so the spec's "A subscriber
+consuming more than one instance of a channel MUST key all channel and instrument state by `(source IP
+address, Channel ID, …)`" is not met there. That is conservative rather than wrong: the verifiability
+gate on those rules becomes the **OR** across the channel's instances, so any instance's loss
+downgrades them to Unverifiable instead of blaming the publisher for an anomaly the loss could explain.
+`HEARTBEAT.CADENCE` is the deliberate exception and gates on its own instance's window, because its
+baseline is per instance — one baseline per port is exactly what let one arm's heartbeats cover the
+other arm's total outage.
+
+Rejected alternatives, both for a stronger reason than the earlier draft gave. A `--channel=<id>`
+filter with one instance per (stream, arm) is much smaller, but it doubles the process count (12
+validator instances on cmh rather than 6), needs a second metrics port per stream, leaves the
+merged-series bug in place for anyone who omits the flag, and filters on the field that stops
+discriminating arms when #86 lands. A source-IP filter would discriminate, but it is unnecessary: the
+key carries the source, so one instance grades both arms as separate series and there is nothing left
+to filter. The keying fix is correct for both fleets and is a no-op on Hyperliquid, which runs one
+publisher per port.
+
+**Two follow-ups this surfaces, both out of scope here.** `top-of-book/spec.md:76` and
+`midpoint/spec.md:78` still define `Sequence Number` as "Monotonically increasing per channel" — PR #25
+updated market-by-price and market-by-order only — and the perps TOB stream in §3.1 is a two-arm TOB
+feed, so if the channel-instance language should extend to them that is a separate spec PR, not this
+deployment. Rescoping the deeper per-instrument, book, snapshot and refdata state to the instance is
+materially larger than the frame-state change and belongs in its own task.
 
 ---
 
@@ -310,10 +375,10 @@ channels), while was and dub receive only the two perps sources. **No stream is 
 does not already join.**
 
 **Each of these three streams carries two publishers on the one port (§1.3), so the instance count is
-one per stream and not one per arm.** That is only correct once the frame state is keyed per
-`(port, channel_id)`; until then a single instance merges the two arms' sequence series and grades
-nothing. The count of *processes* is therefore a consequence of the §1.3 fix, not an independent
-decision.
+one per stream and not one per arm.** That is only correct once the frame state is keyed per channel
+instance — `(source IP address, Channel ID, destination port)`; until then a single instance merges the
+two arms' sequence series and grades nothing. The count of *processes* is therefore a consequence of
+the §1.3 fix, not an independent decision.
 
 Metrics ports 9120-9122 are unused anywhere in the repo (grepped), and clear of the reservations
 already documented: 9090 `multicast_recorder`, 9102, 9108 `hyperliquid-feed-capture`, 9109 gossip
@@ -707,9 +772,10 @@ Read-only checks against Grafana Cloud Prometheus and the two repositories.
 | All three alerts already firing | Grafana rules API | all three `firing` on HL |
 | Only chi runs the validator | `dz_conformance_build_info` | 2 series, both chi |
 | Metrics ports 9120-9122 free | repo-wide grep (both repos) | free |
-| Two publishers per Kalshi port | `kalshi_feed_capture_cmh.yml:117-132`, `:259-261`; `transport.rs:99,174` | confirmed, all three streams |
-| Checker cannot separate them | `input/multicast.go:146` discards the sender; no source-IP flag in `main.go:24-56` | confirmed |
+| Two publishers per Kalshi port | `kalshi_feed_capture_cmh.yml:117-132`, `:259-261`; `transport.rs:112,204` | confirmed, all three streams |
+| Checker discards the arm discriminator | `input/multicast.go:146` discards the sender; `input/pcap.go` never reads the IP header | confirmed; the fix carries the source in the key rather than filtering on it (§1.3) |
 | Seq/reorder state is per port | `engine/engine.go:28`; `dirtyWindow` cleared only in `state.go:227-241` | confirmed (§1.3) |
+| The unit is the channel instance, not `(port, channel_id)` | `GLOSSARY.md:37,43`; `market-by-price/spec.md` 3.1.0 *Redundant Channel Instances*; topology design §3.1; `malbeclabs/kalshi` #85, #86 | §1.3 corrected 2026-08-21 |
 | `emit_control_both` is TOB-only | `tob/venue.rs:1297`; MBP test `mbp/feed.rs:4255` asserts mktdata-only | confirmed |
 | `BookClear` is graded, `ClearReason` is not | `ruledoc.go:86,88`; `mbp.go:285`; grep for `ClearReason` | §7 corrected |
 | Exit code depends on `--strict` | `run.go:241` `agg.ExitCode(opts.Cfg.Strict)` | report must record it (§1.2) |

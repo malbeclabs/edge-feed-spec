@@ -5,23 +5,31 @@ TOB, perps MBP, sports NFL MBP) on the recorders that already receive those mult
 by Alloy and observed in Grafana — the same machinery that validates the Hyperliquid mainnet2
 publisher today.
 
-**Architecture:** Key the checker's frame-level state per `(port, channel_id)` so it stops merging the
-two publishers that share every Kalshi port; cut a `conformance/v0.2.0` release that carries that fix,
-reads schema 3 and speaks `-feed mbp`; widen the `dz_conformance` role's feed assert to accept `mbp`;
-push `dz_conformance_feeds` down from the parent group onto the two child groups so the HL and Kalshi
+**Architecture:** Key the checker's frame-level state per **channel instance** — `(source IP
+address, Channel ID, destination port)` — so it stops merging the two publishers that share every
+Kalshi port; cut a `conformance/v0.2.0` release that carries that fix, reads schema 3 and speaks
+`-feed mbp`; widen the `dz_conformance` role's feed assert to accept `mbp`; push
+`dz_conformance_feeds` down from the parent group onto the two child groups so the HL and Kalshi
 fleets carry different streams and different version pins; scope the two known Kalshi deviations out
 of the paging path, per stream and not per prefix; sync the scoped alerts *before* anything emits;
 canary on dub.
 
-**The `(port, channel_id)` keying is the gate on everything else.** Each Kalshi stream is published by
-two processes to one group and one port, separable only by the frame header's `Channel ID`
-(spec §1.3). The checker discards the datagram sender (`tools/conformance/input/multicast.go:146`) and
-keys its sequence tracker on `core.Port` alone (`tools/conformance/engine/engine.go:28`), so it merges
-the two arms' independent sequence series: `FRAME.SEQ_RESET_GAP` (`Must`) and
+**The channel-instance keying is the gate on everything else.** Each Kalshi stream is published by two
+processes to one group and one port, told apart by the **source address** — each arm binds a distinct
+egress address, and `GLOSSARY.md:43` makes keying gap detection on `(source IP address, Channel ID,
+destination port)` a subscriber MUST (spec §1.3). The checker discards the datagram sender
+(`tools/conformance/input/multicast.go:146`) and keys its sequence tracker on `core.Port` alone
+(`tools/conformance/engine/engine.go:28`), so it merges the two arms' independent sequence series, and
+the merge is loud in one direction and silent in the other. Loud: `FRAME.SEQ_RESET_GAP` (`Must`) and
 `transport_loss_total` fire continuously, and `dirtyWindow` latches — cleared only on a publisher reset
 (`engine/state.go:227-241`) — so every gated detector reports Unverifiable for the process lifetime
-while `checks_total{result="pass"}` keeps advancing. Deploying without this fix produces a validator
-that pages constantly and grades nothing.
+while `checks_total{result="pass"}` keeps advancing. Silent: one `lastHbSendTS` for two arms lets one
+arm's heartbeats cover the other's total outage, so `HEARTBEAT.CADENCE` cannot fire. Deploying without
+this fix produces a validator that pages constantly and grades nothing.
+
+**An earlier draft of this plan keyed on `(port, channel_id)`, which is the wrong unit** — `Channel ID`
+names the instrument set, not the arm — and it read as correct only because today's arms happen to
+carry different ids. Task 1b carries the correction and why the error was invisible.
 
 **Tech Stack:** Go 1.25 (`tools/conformance`), Ansible (production `ansible-lint` profile),
 ansible-vault, systemd, Grafana Cloud alert JSON, GitHub Actions.
@@ -66,12 +74,18 @@ from `tools/conformance`.
 | **`malbeclabs/edge-feed-spec`** (this repo) | | |
 | `tools/conformance/main.go` | Modify | `--version` prints `vX.Y.Z+<commit>` |
 | `tools/conformance/main_test.go` | Create | Regression test on the `--version` output shape |
-| `tools/conformance/run.go` | Modify | Plumb `version`/`commit`/`strict` into the report writer |
+| `tools/conformance/run.go` | Modify | Plumb `version`/`commit`/`strict` into the report writer; pass the source address into `Engine.Process` |
 | `tools/conformance/report/json.go` | Modify | Top-level `version`/`commit`/`strict`, per-rule `severity` |
-| `tools/conformance/engine/state.go` | Modify | `portTracker` keyed per `(port, channel)` |
-| `tools/conformance/engine/engine.go` | Modify | `Engine.ports` key, `lastHbSendTS` per channel |
+| `tools/conformance/input/source.go` | Modify | `Datagram.Src` — the sending address |
+| `tools/conformance/input/multicast.go` | Modify | `ReadFromUDPAddrPort` instead of discarding the sender |
+| `tools/conformance/input/pcap.go` | Modify | `srcAddr` from the IP header, so replay keys as live does |
+| `tools/conformance/engine/state.go` | Modify | `instanceKey`; the heartbeat baseline moves onto `portTracker` |
+| `tools/conformance/engine/engine.go` | Modify | `Engine.ports` keyed by instance; `instanceTrack`, eviction, `dirtyOn` |
 | `tools/conformance/engine/gate.go` | Modify | `gateDetector`/`gateDetectorSnap` take the channel |
-| `tools/conformance/engine/*_test.go` | Modify/Create | Two-channel-on-one-port regression tests |
+| `tools/conformance/engine/mbp.go` | Modify | `mbpObserveEra` takes the instance; the snapshot-group gate takes the channel |
+| `tools/conformance/engine/oracle.go` | Modify | `gateDetector(ch)` at the oracle gate |
+| `tools/conformance/engine/channel_instance_test.go` | Create | Two instances on one channel, two channels on one port, and their converses |
+| `tools/conformance/engine/*_test.go`, `golden_test.go`, `denominator_test.go` | Modify | Mechanical `Process` signature update |
 | `tools/conformance/README.md` | Modify | Document all three |
 | **`malbeclabs/infra`** (paths below relative to that checkout) | | |
 | `ansible/playbooks/roles/dz_conformance/tasks/main.yml` | Modify | Allow `mbp`; `snapshot_port` for `mbo` and `mbp` |
@@ -191,74 +205,143 @@ violations" criterion and the decision not to set `dz_conformance_source_registr
 - [ ] **Step 6: PR to `malbeclabs/edge-feed-spec`**, `Summary of Changes` / `Testing Verification`,
   commit style `conformance: <lowercase description>`. Merge before Task 1c.
 
-### Task 1b: key frame state per `(port, channel_id)`
+### Task 1b: key frame state per channel instance — **built on `conformance/per-channel-frame-state`, unmerged**
 
 **Files:**
+- Modify: `tools/conformance/input/source.go`
+- Modify: `tools/conformance/input/multicast.go`
+- Modify: `tools/conformance/input/pcap.go`
+- Modify: `tools/conformance/run.go`
 - Modify: `tools/conformance/engine/state.go`
 - Modify: `tools/conformance/engine/engine.go`
 - Modify: `tools/conformance/engine/gate.go`
-- Modify/Create: `tools/conformance/engine/*_test.go`
+- Modify: `tools/conformance/engine/mbp.go`
+- Modify: `tools/conformance/engine/oracle.go`
+- Create: `tools/conformance/engine/channel_instance_test.go`
+- Modify: the existing `engine/*_test.go`, `golden_test.go` and `denominator_test.go` — mechanical
+  `Process` signature update
+- Modify: `tools/conformance/README.md`
 
-**Why this is in the release and not a follow-up.** Every Kalshi stream carries two publisher
-processes on one group and one port, separable only by the frame header's `Channel ID` — perps TOB and
-perps MBP from `aws-cmh-kl-perps1`/`2` (channels 1 and 101,
-`malbeclabs/infra:ansible/inventory/mainnet-beta/group_vars/kalshi_feed_capture_cmh.yml:117-132`), sports NFL from
-`aws-cmh-kl-sports1`/`2` (channels 10 and 110, `:259-261`). The publisher's contract is explicit:
-`malbeclabs/kalshi:app/publisher/crates/kalshi-publisher/src/publisher/transport.rs:174` — "Per-port
-stream counters. Each port is an independent sequence series" — per *process* — and `:99` requires "a
-subscriber keyed on `(channel_id, reset_count)`". This is the opposite of Hyperliquid, where eleven
-publishers share one group but each owns a distinct port pair, which is why the HL deployment does not
-exercise this path.
+**Why this is in the release and not a follow-up.** Every Kalshi stream carries two publisher processes
+on one group and one port — perps TOB and perps MBP from `aws-cmh-kl-perps1`/`2`, sports NFL from
+`aws-cmh-kl-sports1`/`2` — told apart by the source address, because each arm binds a distinct egress
+address. Sequencing keys on the **channel instance** and never on the channel: `GLOSSARY.md:37` defines
+the instance as `(source IP address, Channel ID, destination port)`, "the unit that owns a sequence
+series, a `Reset Count`, and a snapshot cycle", and `:43` makes keying gap detection and recovery state
+on it a subscriber MUST. `market-by-price/spec.md` carries the same on the wire as of **3.1.0** (PR #25):
+`Sequence Number` is "per channel instance — per source IP address, per channel, per destination port"
+(`:87`), and its *Redundant Channel Instances* section mints every identifier per instance. This is the
+opposite of Hyperliquid, where eleven publishers share one group but each owns a distinct port pair,
+which is why the HL deployment does not exercise this path.
 
-- [ ] **Step 1: key `Engine.ports` per `(port, channel)`**
+**Correction, 2026-08-21 — the key is not `(port, channel_id)`.** An earlier draft of this task keyed on
+`portKey{port, ch}` and asserted the two arms were "separable only by the frame header's `Channel ID`".
+They are not: `channel_id` names the instrument set, the arm is the source address, and the topology
+design is normative on it
+(`malbeclabs/kalshi:docs/superpowers/specs/2026-07-31-multicast-channel-topology-design.md` §3.1 —
+"Sequence and reset counters are scoped to `(source_ip, group, port)`, and that is normative"). The
+mistake was invisible because the deployed ids differ *today* — perps 1 and 101
+(`malbeclabs/kalshi:infra/ansible/inventory/host_vars/aws-cmh-kl-perps1/main.yml:14` and
+`aws-cmh-kl-perps2/main.yml:20`), sports 10 and 110 via `kalshi_publisher_channel_id_offset: 100` — so a
+`(port, channel_id)` key separates them by accident and every check against today's feed passes.
+`malbeclabs/kalshi` issue **#86** ends that: the perps collapse from `channel_id` 1 and 2 to a single
+`id` 0 is settled and only its timing is open (topology gate G8), so that key silently re-merges the two
+arms the day it lands, with no code change and no diff to review. On the sports plane `channel_id` names
+the league and, per the same issue, "was never available as an arm discriminator". Issue **#85** files
+the publisher's own per-port comment as wrong for the same reason.
 
-`tools/conformance/engine/engine.go:28-29` is `ports map[core.Port]*portTracker` — "per-port reorder
-buffers and seq trackers (keyed by `core.Port`)". Introduce a `portKey{port core.Port, ch uint8}` and
-key on it. `ChannelID` is in the frame header, so it is available at intake with no new plumbing.
+- [x] **Step 1: carry the source address, from both inputs**
 
-- [ ] **Step 2: everything `portTracker` owns follows the key**
+`input/source.go` gains `Datagram.Src netip.Addr`. `input/multicast.go` reads `ReadFromUDPAddrPort` and
+keeps `from.Addr().Unmap()` instead of discarding the sender; `input/pcap.go` reads it off the IPv4/IPv6
+layer. Equal fidelity on both paths is the point: a replay that could not see the source would key
+instances differently from the live instance it exists to reproduce. **One gap, documented in the
+README:** a capture whose link type carries no network layer yields the zero address, and every datagram
+in it then reads as one instance.
+
+- [x] **Step 2: key `Engine.ports` per instance**
+
+`instanceKey{src netip.Addr, port core.Port, ch uint8}` replaces `core.Port` as the map key, and
+`Engine.Process` takes the source address. `ChannelID` was already in the frame header; the address is
+the only new plumbing.
+
+- [x] **Step 3: everything `portTracker` owns follows the key**
 
 `tools/conformance/engine/state.go`: `lastSeq`, `lastSendTS`, `era`, the dedup ring, the reorder buffer
-and `dirtyWindow` are all per-stream state and all currently per-port. `advanceEra` (`state.go:227-241`)
-is the only place `dirtyWindow` is cleared, so with two arms merged the first alternation latches it and
-`gateDetector` returns false for the process lifetime.
+and `dirtyWindow` were all per-port and are now per instance. `advanceEra` (`state.go:227-241`) is the
+only place `dirtyWindow` is cleared, which is why one merged alternation latched it for the process
+lifetime.
 
-- [ ] **Step 3: `lastHbSendTS` becomes per channel**
+- [x] **Step 4: the heartbeat baseline moves onto the tracker**
 
-`engine.go:33-36` is one field for the whole mktdata port. Two arms heartbeating on it interleave into
-gaps that never exceed `--expect-heartbeat`, so `HEARTBEAT.CADENCE` cannot fire — a total heartbeat
-outage on one arm is masked by the other. That is a false negative rather than a false positive, which
-is why it has to be fixed in the same change as the loud half.
+`lastHbSendTS`/`lastHbSendTSSet` were single `Engine` fields for the whole mktdata port and are now
+`portTracker` fields — per instance, not merely per channel, which is the point: two arms heartbeating
+into one baseline interleave into gaps that never exceed `--expect-heartbeat`, so a total heartbeat
+outage on one arm is masked by the other and `HEARTBEAT.CADENCE` cannot fire. That is a false negative
+rather than a false positive, which is why it lands with the loud half. Deliberately not cleared on an
+era advance: the cadence expectation spans a publisher reset.
 
-- [ ] **Step 4: `gateDetector` / `gateDetectorSnap` take the channel**
+- [x] **Step 5: the gates take the channel, and the map is bounded**
 
-`tools/conformance/engine/gate.go:365-381` look up `e.ports[core.PortMktData]` and
-`e.ports[core.PortSnapshot]`. Both need the channel of the frame being graded.
+`gateDetector`, `gateDetectorSnap`, `mktdataPending` and `snapPortDirty` take the channel and consult
+`Engine.dirtyOn` — the OR across that channel's instances. `snapPortBound` stays port-level on purpose:
+an unobserved port is a property of the capture, not of a channel. The map is capped at
+`maxChannelInstances = 4096` and evicts the least-recently-seen instance, because the source address is
+part of the key and nothing authorises it — an any-source join accepts datagrams from any sender.
+Anything still buffered for an evicted instance is counted as transport loss rather than dropped
+quietly. A source address seen for the first time opens a **fresh series, silently**: no gap, no
+transport loss, no latched window, which is what makes a DoubleZero address-lease reassignment under a
+live host a non-event rather than a page.
 
-- [ ] **Step 5: regression tests for two channels on one port**
+- [x] **Step 6: regression tests for two instances on one port**
 
-Two independent sequence series on one port, interleaved: assert **no** `FRAME.SEQ_RESET_GAP`, **no**
-`transport_loss_total`, and that a gated detector still grades (does not return Unverifiable). Then the
-converse, so the tests are not vacuous: a real gap *within* one channel must still produce both. The
-precedent for the shape is `engine/mbp.go:136-143`, where `mbpState.open` is already "keyed by
-channel" for exactly this reason — "a deployment may shard instruments across channels and carry more
-than one of them on a port. A single slot made two conformant channels sharing a snapshot port look
-like an interleaving publisher" — and the refdata state machine is already per channel
-(`engine/refdata.go:154`). Frame sequence is the piece that was left per-port.
+`engine/channel_instance_test.go` pins both axes and both directions: two publishers on one port **and
+one `Channel ID`**, told apart only by source address — the post-#86 shape — and two channels on one
+port; then the converses, so the tests are not vacuous. A real gap *within* one instance still produces
+`FRAME.SEQ_RESET_GAP` and transport loss, an unseen source opens a series rather than breaking one, and
+the cap evicts. The precedent for the shape is `engine/mbp.go:136-143`, where `mbpState.open` is already
+"keyed by channel" for the sibling reason — "a deployment may shard instruments across channels and
+carry more than one of them on a port. A single slot made two conformant channels sharing a snapshot
+port look like an interleaving publisher" — and the refdata state machine is already per channel
+(`engine/refdata.go:154`). Frame sequence was the piece left per-port; the source address was never read
+at all.
 
-**Scope note.** This is an engine change, not a widening, and it is a no-op on Hyperliquid, which is
-single-channel per port. Do not substitute a `--channel` filter: it is smaller but doubles the process
-count (12 validator instances on cmh instead of 6), needs a second metrics port per stream, and leaves
-the merged-series bug in place for anyone who omits the flag.
+**Scope note.** This is an engine change, not a widening, and it is a no-op on Hyperliquid, which runs
+one publisher per port. Do not substitute a `--channel` filter: it is smaller but doubles the process
+count (12 validator instances on cmh instead of 6), needs a second metrics port per stream, leaves the
+merged-series bug in place for anyone who omits the flag, and filters on the field that stops
+discriminating arms when #86 lands. A source-IP filter is not needed either — the key carries the
+source, so one instance grades both arms as separate series.
 
-- [ ] **Verify:** `go test ./... && golangci-lint run`. Then replay a real capture that contains both
-  arms — `mbp_edge_kalshi_perps` on `233.84.178.4` carries both (measured 451 packets/5 s from prod1 and
-  1,660 from prod2) — and confirm `FRAME.SEQ_RESET_GAP` and `transport_loss_total` are **zero** and the
-  gated MBP rules report graded results rather than Unverifiable. Confirm the HL golden pcaps produce a
-  byte-identical report to the pre-change build.
+**The boundary this task does not cross.** Per-instrument sequencing, the reconstructed books, the
+snapshot groups and the reference-data state machine stay keyed by channel, so
+`market-by-price/spec.md`'s "MUST key all channel and instrument state by `(source IP address, Channel
+ID, …)`" is not met there. It is conservative rather than wrong: the gate on those rules is the OR
+across the channel's instances, so any instance's loss downgrades them to Unverifiable instead of
+blaming the publisher for an anomaly the loss could explain. `HEARTBEAT.CADENCE` is the deliberate
+exception and gates on its own instance. Rescoping the rest is materially larger than this task and is
+Out of scope below.
 
-- [ ] **Step 6: PR to `malbeclabs/edge-feed-spec`**, commit style `conformance: <lowercase
-  description>`. Merge before Task 1c.
+- [x] **Verify (run 2026-08-21):** `go test ./... && golangci-lint run` clean. All four committed golden
+  pcaps (`testdata/conformant_{tob,midpoint,mbo}.pcap`, `nonconformant_mbp.pcap`) report
+  **byte-identical** to the pre-change build — they are single-source and single-channel, so
+  the change is a no-op on them, which is also the Hyperliquid no-op check. A synthetic post-collapse
+  capture (one group, one port, one `Channel ID`, two arms separated only by source address) goes from
+  **19,991 `FRAME.SEQ_RESET_GAP` violations with a 3 s outage unreported** on `origin/main` to zero false
+  violations and the outage graded as one `HEARTBEAT.CADENCE` violation. A lease-reassignment capture
+  goes from "no findings", with half the datagrams silently quarantined, to the new instance verifiable
+  from its first datagram. Four mutation checks — drop the source from the key, drop the channel, one
+  heartbeat baseline per port, remove the cap — each fail with a message naming the mechanism.
+
+- [ ] **Verify, still owed: replay a real capture carrying both arms.** `mbp_edge_kalshi_perps` on
+  `233.84.178.4` carries both (measured 451 packets/5 s from prod1 and 1,660 from prod2); confirm
+  `FRAME.SEQ_RESET_GAP` and `transport_loss_total` are **zero** and the gated MBP rules report graded
+  results rather than Unverifiable. Not run — no local pcap. The dub canary (Task 5) asserts the same
+  thing against the live feed, so this is the cheaper place to fail first, not a duplicate.
+
+- [ ] **Step 7: PR to `malbeclabs/edge-feed-spec`**, commit style `conformance: <lowercase
+  description>`. Merge before Task 1c. Built as `913011f` (engine) and `7fbc494` (README) on
+  `conformance/per-channel-frame-state`; unmerged, so Task 1c's gate is still shut.
 
 ### Task 1c: cut `conformance/v0.2.0`
 
@@ -273,15 +356,15 @@ gh workflow run conformance-release.yml --repo malbeclabs/edge-feed-spec \
 `golangci-lint` and `go test -v ./...`, and stamps `-X main.version` / `-X main.commit`.
 
 **Do not cut this tag until Tasks 1a and 1b are both merged.** The tag is what the fleet installs, so a
-release without the `(port, channel_id)` keying deploys a validator that pages constantly and grades
-nothing.
+release without the channel-instance keying deploys a validator that pages constantly and grades
+nothing. Task 1b is built but unmerged, so this task is not open yet.
 
 - [ ] **Verify:** the release carries **exactly**
   `dz-conformance_0.2.0_linux_amd64.tar.gz` and `dz-conformance_0.2.0_linux_amd64.tar.gz.sha256` —
   the role's `dz_conformance_asset_name` assert
   (`malbeclabs/infra:ansible/playbooks/roles/dz_conformance/tasks/main.yml:102-121`) depends on that shape. Download it and confirm:
   `--version` prints `v0.2.0+<12 hex>`; `-feed mbp` is accepted (v0.1.0 exits 2); `--help` lists
-  `mbp` in the `-feed` description; and the Task 1b two-channel replay above still reports zero
+  `mbp` in the `-feed` description; and the Task 1b two-instance replay above still reports zero
   `FRAME.SEQ_RESET_GAP` when run from the released binary rather than a local build.
 
 **Nothing downstream can proceed without this task.**
@@ -642,7 +725,7 @@ Two deviations will fire once the instances start (spec §4.2): `MSG.WRONG_PORT_
 the **TOB stream only**, on every session end, and permanent coverage loss on the two MBP streams
 (26,341 unverifiable, `pending` 18,559 + `cold_start` 7,782, against a threshold of 5 per 5 min).
 
-**Task 1b is a prerequisite for this task, not a parallel one.** Without the `(port, channel_id)`
+**Task 1b is a prerequisite for this task, not a parallel one.** Without the channel-instance
 keying, the merged sequence series add `FRAME.SEQ_RESET_GAP` (`Must`) plus continuous
 `transport_loss_total` plus a latched `dirtyWindow` that pushes *every* gated rule into
 `unverifiable_total`. No per-pair exclusion can keep either rule readable against that, and the
@@ -865,9 +948,10 @@ Acceptance:
 - `/healthz` answers on 9120 and 9121
 - `dz_conformance_build_info{version="v0.2.0",commit="<12 hex>"}` present **on both instances**
 - **`FRAME.SEQ_RESET_GAP` absent and `dz_conformance_transport_loss_total` at 0 on both instances.**
-  This is the Task 1b acceptance test in production: both streams carry two publishers on one port, so
-  a non-zero value here means the `(port, channel_id)` keying is not in the deployed binary or does not
-  work, and the rollout stops. Do not reinterpret it as host or path loss until this reads 0 once.
+  This is the Task 1b acceptance test in production, and the first time it runs against two real arms:
+  both streams carry two publishers on one port, so a non-zero value here means the channel-instance
+  keying is not in the deployed binary or does not work, and the rollout stops. Do not reinterpret it as
+  host or path loss until this reads 0 once.
 - **no source-ID rule violations — and know how little that proves.** `source_id: 3` is inside the
   embedded registry's accepted ranges (`engine/source_ids.json`, `[[1,1023]]`), so
   `dz_conformance_source_registry_path` stays empty. If source-ID rules do fire, that is the documented
@@ -978,11 +1062,11 @@ It already allow-lists exactly `MSG.WRONG_PORT_PLACEMENT` and already fails when
 counter-control does not produce `FRAME.MAGIC_MISMATCH` on **every** frame.
 
 **Know what this gate cannot see.** It replays `cargo run --example tob_golden_replay`, a single
-process, so every frame carries one `Channel ID` and one sequence series. That is why the two-publisher
-merge in Task 1b was invisible to it, and it stays invisible: this job is a wire-contract gate against
-the golden scenarios, not a topology test. Task 1b's own regression tests are what cover two channels on
-one port, and they belong in `edge-feed-spec` beside the engine. That counter-control is
-not optional: Tier-1 rules are silent on success, so a clean report with no counter-control is
+process, so every frame carries one source address, one `Channel ID` and one sequence series. That is why
+the two-publisher merge in Task 1b was invisible to it, and it stays invisible: this job is a
+wire-contract gate against the golden scenarios, not a topology test. Task 1b's own regression tests are
+what cover two instances on one port, and they belong in `edge-feed-spec` beside the engine. That
+counter-control is not optional: Tier-1 rules are silent on success, so a clean report with no counter-control is
 indistinguishable from a checker that never inspected anything. Needs `cargo run --example
 tob_golden_replay` and `python3`, both available on `ubuntu-latest`.
 
@@ -1001,8 +1085,16 @@ tob_golden_replay` and `python3`, both available on `ubuntu-latest`.
 - `TobFeed::emit_control_both` is not modified — allow-listed for the TOB stream only and filed
   upstream (spec §6.1). The MBP feed is not allow-listed: it already emits `EndOfSession` on mktdata
   only, with a test asserting it (Task 4 Step 1).
-- No `--channel` filter and no per-arm instances. The two publishers per port are separated by keying
-  the checker's frame state per `(port, channel_id)` (Task 1b), which keeps one instance per stream.
+- No `--channel` filter, no source-IP filter and no per-arm instances. The two publishers per port are
+  separated by keying the checker's frame state per channel instance — `(source IP address, Channel ID,
+  destination port)`, Task 1b — which keeps one validator per stream and nothing to filter.
+- No rescoping of the deeper state. Per-instrument sequencing, the books, the snapshot groups and the
+  refdata state machine stay keyed by channel (Task 1b's boundary); moving them onto the instance is
+  materially larger than Task 1b and belongs in its own task.
+- No change to `top-of-book/spec.md` or `midpoint/spec.md`, which still say `Sequence Number` is "per
+  channel" (`:76` and `:78`) because PR #25 updated market-by-price and market-by-order only. The perps
+  TOB stream is a two-arm TOB feed, so extending the channel-instance language to them is a separate
+  spec PR.
 - No `kalshi_publisher_version` or other publisher pin bump; read-only w.r.t. the publisher.
 - No HL pin bump (schema 1 vs 3, spec §2.2).
 - No 31-channel sports fan-out; no `sports-tob` (`233.84.178.17`), which no host receives.
