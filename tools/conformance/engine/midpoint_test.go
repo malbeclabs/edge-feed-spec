@@ -71,7 +71,7 @@ func reachedReadyMid(e *Engine, ch uint8, instrID uint32, defaultMethod, priceBo
 		Bytes()
 	fMf, sfMf := wire.Decode(rawMf, wire.MagicMid)
 	fMf.Header.Sequence = seq
-	e.Process(fMf, core.PortRefData, sfMf)
+	e.Process(srcA, fMf, core.PortRefData, sfMf)
 	seq++
 
 	// InstrumentDefinition with metadata.
@@ -81,7 +81,7 @@ func reachedReadyMid(e *Engine, ch uint8, instrID uint32, defaultMethod, priceBo
 		Bytes()
 	fDef, sfDef := wire.Decode(rawDef, wire.MagicMid)
 	fDef.Header.Sequence = seq
-	e.Process(fDef, core.PortRefData, sfDef)
+	e.Process(srcA, fDef, core.PortRefData, sfDef)
 	seq++
 
 	// Second ManifestSummary to close the cycle.
@@ -91,7 +91,7 @@ func reachedReadyMid(e *Engine, ch uint8, instrID uint32, defaultMethod, priceBo
 		Bytes()
 	fMf2, sfMf2 := wire.Decode(rawMf2, wire.MagicMid)
 	fMf2.Header.Sequence = seq
-	e.Process(fMf2, core.PortRefData, sfMf2)
+	e.Process(srcA, fMf2, core.PortRefData, sfMf2)
 	seq++
 
 	return seq
@@ -129,7 +129,7 @@ func TestMidMethod0RequiresDefaultBeforeReady(t *testing.T) {
 	raw := buildMidpointFrame(ch, instrID, 0, 500)
 	f, sf := wire.Decode(raw, wire.MagicMid)
 	f.Header.Sequence = 1
-	e.Process(f, core.PortMktData, sf)
+	e.Process(srcA, f, core.PortMktData, sf)
 	e.Flush()
 
 	for _, fn := range findingsFor(ac, "MID.METHOD0_REQUIRES_DEFAULT") {
@@ -157,7 +157,7 @@ func TestMidMethod0RequiresDefaultFires(t *testing.T) {
 	raw := buildMidpointFrame(ch, instrID, 0 /*method=0*/, 500)
 	f, sf := wire.Decode(raw, wire.MagicMid)
 	f.Header.Sequence = 1
-	e.Process(f, core.PortMktData, sf)
+	e.Process(srcA, f, core.PortMktData, sf)
 	e.Flush()
 
 	if !hasViolation(ac, "MID.METHOD0_REQUIRES_DEFAULT") {
@@ -179,7 +179,7 @@ func TestMidMethod0RequiresDefaultSilentWhenDefaultSet(t *testing.T) {
 	raw := buildMidpointFrame(ch, instrID, 0 /*method=0: use instrument default*/, 500)
 	f, sf := wire.Decode(raw, wire.MagicMid)
 	f.Header.Sequence = 1
-	e.Process(f, core.PortMktData, sf)
+	e.Process(srcA, f, core.PortMktData, sf)
 	e.Flush()
 
 	for _, fn := range findingsFor(ac, "MID.METHOD0_REQUIRES_DEFAULT") {
@@ -203,7 +203,7 @@ func TestMidMethod0RequiresDefaultNotApplicableNonZeroMethod(t *testing.T) {
 	raw := buildMidpointFrame(ch, instrID, 1 /*method=1: not 0*/, 500)
 	f, sf := wire.Decode(raw, wire.MagicMid)
 	f.Header.Sequence = 1
-	e.Process(f, core.PortMktData, sf)
+	e.Process(srcA, f, core.PortMktData, sf)
 	e.Flush()
 
 	for _, fn := range findingsFor(ac, "MID.METHOD0_REQUIRES_DEFAULT") {
@@ -230,7 +230,7 @@ func TestMidPriceBound1NegativePrice(t *testing.T) {
 	raw := buildMidpointFrame(ch, instrID, 1 /*method=1*/, -1 /*midPrice negative*/)
 	f, sf := wire.Decode(raw, wire.MagicMid)
 	f.Header.Sequence = 1
-	e.Process(f, core.PortMktData, sf)
+	e.Process(srcA, f, core.PortMktData, sf)
 	e.Flush()
 
 	if !hasViolation(ac, "MID.PRICE_BOUND") {
@@ -251,7 +251,7 @@ func TestMidPriceBound1NonNegativePrice(t *testing.T) {
 	raw := buildMidpointFrame(ch, instrID, 1, 500)
 	f, sf := wire.Decode(raw, wire.MagicMid)
 	f.Header.Sequence = 1
-	e.Process(f, core.PortMktData, sf)
+	e.Process(srcA, f, core.PortMktData, sf)
 	e.Flush()
 
 	for _, fn := range findingsFor(ac, "MID.PRICE_BOUND") {
@@ -273,7 +273,7 @@ func TestMidPriceBound2NegativePrice(t *testing.T) {
 	raw := buildMidpointFrame(ch, instrID, 1, -999)
 	f, sf := wire.Decode(raw, wire.MagicMid)
 	f.Header.Sequence = 1
-	e.Process(f, core.PortMktData, sf)
+	e.Process(srcA, f, core.PortMktData, sf)
 	e.Flush()
 
 	if !hasViolation(ac, "MID.PRICE_BOUND") {
@@ -293,7 +293,7 @@ func TestMidPriceBound2PositivePrice(t *testing.T) {
 	raw := buildMidpointFrame(ch, instrID, 1, 12345)
 	f, sf := wire.Decode(raw, wire.MagicMid)
 	f.Header.Sequence = 1
-	e.Process(f, core.PortMktData, sf)
+	e.Process(srcA, f, core.PortMktData, sf)
 	e.Flush()
 
 	for _, fn := range findingsFor(ac, "MID.PRICE_BOUND") {
@@ -315,7 +315,7 @@ func TestMidPriceBound0NoCheck(t *testing.T) {
 	raw := buildMidpointFrame(ch, instrID, 1, -9999)
 	f, sf := wire.Decode(raw, wire.MagicMid)
 	f.Header.Sequence = 1
-	e.Process(f, core.PortMktData, sf)
+	e.Process(srcA, f, core.PortMktData, sf)
 	e.Flush()
 
 	for _, fn := range findingsFor(ac, "MID.PRICE_BOUND") {
@@ -335,7 +335,7 @@ func TestMidPriceBoundBeforeReady(t *testing.T) {
 	raw := buildMidpointFrame(ch, instrID, 0, -1)
 	f, sf := wire.Decode(raw, wire.MagicMid)
 	f.Header.Sequence = 1
-	e.Process(f, core.PortMktData, sf)
+	e.Process(srcA, f, core.PortMktData, sf)
 	e.Flush()
 
 	for _, fn := range findingsFor(ac, "MID.PRICE_BOUND") {
@@ -375,7 +375,7 @@ func TestMidNoTier1Duplication(t *testing.T) {
 		Bytes()
 	f, sf := wire.Decode(raw, wire.MagicMid)
 	f.Header.Sequence = 1
-	e.Process(f, core.PortMktData, sf)
+	e.Process(srcA, f, core.PortMktData, sf)
 	e.Flush()
 
 	// MID.QUALITY_FLAGS must have been emitted by Tier-1, not duplicated by checkMidpoint.

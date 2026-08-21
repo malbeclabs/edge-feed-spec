@@ -42,7 +42,7 @@ func TestNonconformantMBPCapture(t *testing.T) {
 			break
 		}
 		f, sf := wire.Decode(dg.Raw, wire.MagicMBP)
-		e.Process(f, dg.Port, sf)
+		e.Process(dg.Src, f, dg.Port, sf)
 	}
 	e.Flush()
 	e.EndRun()

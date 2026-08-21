@@ -352,44 +352,41 @@ func (s *mboState) onInstrumentReset(ch uint8, instrID uint32, newAnchorSeq uint
 
 // --- Engine integration ---
 
-// gateDetector returns true when the mktdata port's channel-seq series was
+// gateDetector returns true when the channel's mktdata frame-seq series was
 // contiguous across the relevant window (no forward gaps observed). When it
 // returns false, a per-instrument anomaly should be reported as Unverifiable
 // rather than Violation, because the missing frames could have carried the
 // missing deltas.
 //
-// We consult the mktdata port's portTracker.dirtyWindow flag. This flag is set
-// in engine.go classify() whenever a forward gap is declared (res.gapBefore).
-// It is cleared on era advance (advanceEra), so it reflects only gaps within
-// the current era.
-func (e *Engine) gateDetector() bool {
-	pt, ok := e.ports[core.PortMktData]
-	if !ok {
-		return true // no mktdata seen yet — treat as clean
-	}
-	return !pt.dirtyWindow
+// We consult the dirtyWindow flag of the channel's mktdata instances. The flag is
+// set in engine.go classify() whenever a forward gap is declared (res.gapBefore)
+// and cleared on era advance (advanceEra), so it reflects only gaps within the
+// current era. See Engine.dirtyOn for why any instance of the channel gates it.
+func (e *Engine) gateDetector(ch uint8) bool {
+	return !e.dirtyOn(core.PortMktData, ch)
 }
 
-// gateDetectorSnap returns true when the snapshot port's channel-seq series was
+// gateDetectorSnap returns true when the channel's snapshot frame-seq series was
 // contiguous (no forward gaps). Snapshot-counter rules are gated on snapshot-port
 // seq contiguity.
-func (e *Engine) gateDetectorSnap() bool {
-	pt, ok := e.ports[core.PortSnapshot]
-	if !ok {
-		return true // no snapshot seen yet — treat as clean
-	}
-	return !pt.dirtyWindow
+func (e *Engine) gateDetectorSnap(ch uint8) bool {
+	return !e.dirtyOn(core.PortSnapshot, ch)
 }
 
 // snapPortBound returns true when at least one snapshot-port frame has been
-// observed (the snapshot portTracker has been lazily created). Rules that
+// observed, on any channel. Port-level on purpose: an unobserved port is a
+// property of the capture, not of a channel. Rules that
 // depend on cross-port snapshot state must downgrade to NA when this returns
 // false — the subscriber simply has not seen the snapshot port yet (cold start
 // or the port is not part of the capture), and firing a Violation or even
 // Unverifiable would be a false positive.
 func (e *Engine) snapPortBound() bool {
-	_, ok := e.ports[core.PortSnapshot]
-	return ok
+	for k := range e.ports {
+		if k.port == core.PortSnapshot {
+			return true
+		}
+	}
+	return false
 }
 
 // gateConsumer returns true when referential-integrity checks (REF.*, TRADE.*)
@@ -431,7 +428,7 @@ func (e *Engine) gateConsumer(ch uint8, instrID uint32, perInstrSeq uint32) bool
 		return false
 	}
 	// Condition 4: mktdata channel gapless.
-	return e.gateDetector()
+	return e.gateDetector(ch)
 }
 
 // ensureMBO lazily initialises e.mbo.
@@ -508,7 +505,7 @@ func (e *Engine) checkMBO(f *wire.Frame, ch uint8) {
 			// Trade body has no per-instrument seq (Body[8:16] = SourceTimestamp).
 			// Gate on mktdata channel gapless + refdata ready + bookTrusted.
 			gatedTrade := false
-			if e.gateDetector() && e.refdata != nil {
+			if e.gateDetector(ch) && e.refdata != nil {
 				if _, ok := e.refdata.defInfoFor(ch, instrID); ok {
 					t := e.mbo.tracker(ch, instrID)
 					gatedTrade = t.bookTrusted
@@ -544,7 +541,7 @@ func (e *Engine) checkBatchIDMonotonic(ch uint8, frameSeq uint64, m wire.Message
 		last := e.mbo.lastBatchID[ch]
 		if batchID < last {
 			st := core.Violation
-			if !e.gateDetector() {
+			if !e.gateDetector(ch) {
 				st = core.Unverifiable
 			}
 			e.Emit("BATCH.ID_MONOTONIC", st, core.PortMktData, frameSeq, ch, 0,
@@ -573,7 +570,7 @@ func (e *Engine) checkBatchAtomicityConsistency(ch uint8) {
 	if e.mbo == nil || e.mbo.book == nil {
 		return
 	}
-	gated := e.gateDetector()
+	gated := e.gateDetector(ch)
 	for key, bk := range e.mbo.book.books {
 		if key.channelID != ch {
 			continue
@@ -594,7 +591,7 @@ func (e *Engine) checkBatchAtomicityConsistency(ch uint8) {
 // findings as appropriate. frameSeq is the mktdata frame's Sequence Number.
 func (e *Engine) applyDeltaSeq(ch uint8, instrID uint32, perSeq uint32, frameSeq uint64, m wire.Message) {
 	t := e.mbo.tracker(ch, instrID)
-	gapless := e.gateDetector()
+	gapless := e.gateDetector(ch)
 	h := perDeltaPayloadHash(m)
 
 	// Task 22: RESET.SNAPSHOT_FOLLOWS — premature delta resumption.
@@ -609,7 +606,7 @@ func (e *Engine) applyDeltaSeq(ch uint8, instrID uint32, perSeq uint32, frameSeq
 		if !e.snapPortBound() {
 			st = core.NA
 		} else {
-			gaplessSnap := e.gateDetectorSnap()
+			gaplessSnap := e.gateDetectorSnap(ch)
 			st = core.Violation
 			if !gapless || !gaplessSnap {
 				st = core.Unverifiable
@@ -848,8 +845,8 @@ func (e *Engine) handleSnapBegin(m wire.Message, ch uint8, snapPortSeq uint64) {
 	lastInstrSeq := snapshotBeginLastInstrumentSeq(m)
 	totalOrders := snapshotBeginTotalOrders(m)
 
-	gapless := e.gateDetectorSnap()
-	gaplessMkt := e.gateDetector()
+	gapless := e.gateDetectorSnap(ch)
+	gaplessMkt := e.gateDetector(ch)
 
 	// SNAP.ANCHOR_IS_MKTDATA_SEQ: anchor must be drawn from the mktdata
 	// series (≤ the highest mktdata seq observed), never exceed it.
@@ -860,7 +857,7 @@ func (e *Engine) handleSnapBegin(m wire.Message, ch uint8, snapPortSeq uint64) {
 		// either a mktdata gap, OR the mktdata reorder buffer still holds frames
 		// that could carry seq==anchor (cross-port reorder, F3). Only a Violation
 		// when the mktdata stream is gapless AND fully classified past the anchor.
-		if !gaplessMkt || e.mktdataPending() {
+		if !gaplessMkt || e.mktdataPending(ch) {
 			st = core.Unverifiable
 			reason = core.ReasonReorder
 		}
@@ -918,7 +915,7 @@ func (e *Engine) handleSnapOrder(m wire.Message, ch uint8, snapPortSeq uint64) {
 	// SNAP.BEGIN_ORDER_END_GROUPING: order arrived without a preceding Begin.
 	if open == nil {
 		st := core.Violation
-		if !e.gateDetectorSnap() {
+		if !e.gateDetectorSnap(ch) {
 			st = core.Unverifiable
 		}
 		e.Emit("SNAP.BEGIN_ORDER_END_GROUPING", st, core.PortSnapshot, snapPortSeq, ch, 0,
@@ -1027,7 +1024,7 @@ func (e *Engine) handleSnapEnd(m wire.Message, ch uint8, snapPortSeq uint64) {
 	// SNAP.BEGIN_ORDER_END_GROUPING: End arrived without a preceding Begin.
 	if open == nil {
 		st := core.Violation
-		if !e.gateDetectorSnap() {
+		if !e.gateDetectorSnap(ch) {
 			st = core.Unverifiable
 		}
 		e.Emit("SNAP.BEGIN_ORDER_END_GROUPING", st, core.PortSnapshot, snapPortSeq, ch, endInstrID,
@@ -1064,13 +1061,13 @@ func (e *Engine) handleSnapEnd(m wire.Message, ch uint8, snapPortSeq uint64) {
 			// Under-count: Unverifiable if the snapshot port had a gap OR transport
 			// corruption during this era (loss/truncation could have dropped the
 			// missing SnapshotOrder frames); else Violation. `open.dirty` catches an
-			// intra-group snapshot-seq gap; `e.snapPortDirty()` catches transport
-			// corruption on the snapshot port (whose truncated frame header may not
-			// even decode a channel, so it can't reliably taint the group directly).
+			// intra-group snapshot-seq gap; `e.snapPortDirty(ch)` catches transport
+			// corruption anywhere in this channel's snapshot series this era (a
+			// truncated frame cannot reliably taint the group directly).
 			// Either way, mark group structurally invalid for the oracle.
 			st := core.Violation
 			reason := ""
-			if open.dirty || e.snapPortDirty() {
+			if open.dirty || e.snapPortDirty(ch) {
 				st = core.Unverifiable
 				reason = core.ReasonLoss
 			}
@@ -1114,7 +1111,7 @@ func (e *Engine) onSnapGroupComplete(ch uint8, instrID uint32, anchorSeq uint64,
 	// Gate: requires BOTH the snapshot port to be gapless (dirty==false) AND the
 	// mktdata port to be gapless (gateDetector). If either has a gap → Unverifiable.
 	if dt.awaitingRecovery {
-		gapless := !dirty && e.gateDetector()
+		gapless := !dirty && e.gateDetector(ch)
 		// RESET.SNAPSHOT_FOLLOWS passes here, and here is the only place it can: a
 		// recovery snapshot arrived after the reset, which is the whole requirement —
 		// whether its anchor is right is the *other* rule's business, so this passes
@@ -1235,8 +1232,6 @@ func (e *Engine) checkResetSnapshotFollows() {
 	// Violation or Unverifiable — the subscriber simply has not observed the
 	// snapshot port (cold start or not part of the capture).
 	snapBound := e.snapPortBound()
-	gaplessMkt := e.gateDetector()
-	gaplessSnap := e.gateDetectorSnap()
 	for key, dt := range e.mbo.trackers {
 		if !dt.awaitingRecovery {
 			continue
@@ -1246,7 +1241,7 @@ func (e *Engine) checkResetSnapshotFollows() {
 			st = core.NA
 		} else {
 			st = core.Violation
-			if !gaplessMkt || !gaplessSnap {
+			if !e.gateDetector(key.channelID) || !e.gateDetectorSnap(key.channelID) {
 				st = core.Unverifiable
 			}
 		}
@@ -1281,7 +1276,6 @@ func (e *Engine) checkRoundRobinCoversManifest() {
 		// there are no opportunities to account for — not one skipped opportunity.
 		return
 	}
-	gaplessSnap := e.gateDetectorSnap()
 	// Fewer than 2 clean cycles observed — conservative, this rule does not judge. The
 	// instruments are still enumerated below and reported, because a capture too short
 	// to hold two cycles must not read as one where every instrument was covered.
@@ -1315,7 +1309,7 @@ func (e *Engine) checkRoundRobinCoversManifest() {
 			}
 			// Instrument is in the manifest but has never been snapshotted.
 			status, reason := core.Violation, ""
-			if !gaplessSnap {
+			if !e.gateDetectorSnap(ch) {
 				status, reason = core.Unverifiable, core.ReasonLoss
 			}
 			e.Emit("SNAP.ROUND_ROBIN_COVERS_MANIFEST", status, core.PortSnapshot, 0, ch, instrID,
@@ -1329,7 +1323,7 @@ func (e *Engine) checkRoundRobinCoversManifest() {
 // SNAP rules for a single SnapshotBegin message.
 func (e *Engine) snapTrack(ch uint8, instrID uint32, anchorSeq uint64, snapID uint32, lastInstrSeqK uint32, snapPortSeq uint64, gapless bool) {
 	st := e.mbo.snapTrack(ch, instrID)
-	gaplessMkt := e.gateDetector()
+	gaplessMkt := e.gateDetector(ch)
 
 	// SNAP.ANCHOR_MONOTONIC_PER_INSTRUMENT: successive snapshots for the same
 	// instrument must have non-decreasing Anchor Seq.
@@ -1403,7 +1397,7 @@ func (e *Engine) snapTrack(ch uint8, instrID uint32, anchorSeq uint64, snapID ui
 		// truly never arrived. If the mktdata channel has a gap, or its reorder
 		// buffer still holds unclassified frames (the deltas up to K may simply be
 		// buffered, not missing — cross-port reorder), downgrade to Unverifiable (F3).
-		if !gaplessMkt || !gapless || e.mktdataPending() {
+		if !gaplessMkt || !gapless || e.mktdataPending(ch) {
 			status = core.Unverifiable
 			reason = core.ReasonReorder
 		}
