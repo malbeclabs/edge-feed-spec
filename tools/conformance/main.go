@@ -106,6 +106,8 @@ func main() {
 		JSONReport:     *jsonReport,
 		Verbose:        *verbose,
 		LogThrottle:    *logThrottle,
+		Version:        version,
+		Commit:         commit,
 	}
 
 	code := Run(opts)
@@ -129,4 +131,8 @@ type RunOpts struct {
 	// LogThrottle is the minimum interval between identical (rule,status) log
 	// lines; 0 disables throttling. Does not affect metrics or exit code.
 	LogThrottle time.Duration
+	// Version and Commit are the build stamp, carried here so the JSON report and
+	// build_info label the same build (they are package-main vars, invisible to report).
+	Version string
+	Commit  string
 }

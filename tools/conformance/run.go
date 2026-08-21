@@ -141,7 +141,7 @@ func Run(opts RunOpts) int {
 	var promReporter *report.Prom
 	if opts.MetricsAddr != "" {
 		reg := prometheus.NewRegistry()
-		promReporter = report.NewProm(reg, version, commit, opts.Cfg.Feed)
+		promReporter = report.NewProm(reg, opts.Version, opts.Commit, opts.Cfg.Feed)
 		rep = report.Multi{agg, logSink, promReporter}
 
 		// Bind the metrics listener synchronously and fail fast. The metrics
@@ -229,7 +229,8 @@ func Run(opts RunOpts) int {
 	// --- JSON report ---
 	var reportErr error
 	if opts.JSONReport != "" {
-		if err := report.JSONReport(agg, opts.JSONReport); err != nil {
+		meta := report.Meta{Version: opts.Version, Commit: opts.Commit, Strict: opts.Cfg.Strict}
+		if err := report.JSONReport(agg, opts.JSONReport, meta); err != nil {
 			fmt.Fprintf(os.Stderr, "dz-conformance: json report: %v\n", err)
 			reportErr = err
 		}

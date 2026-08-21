@@ -1,17 +1,25 @@
 package main
 
-// main_test.go — the `--version` output shape.
+// main_test.go — the `--version` output shape, and the build metadata a report is
+// attributed with.
 //
-// It is a cross-repo coupling rather than an internal invariant, which is why it gets
-// a test: malbeclabs/infra's `dz_conformance` role parses this output to decide whether
-// to re-download the binary.
+// Both are cross-repo couplings rather than internal invariants, which is why they
+// get a test: malbeclabs/infra's `dz_conformance` role parses `--version` to decide
+// whether to re-download the binary, and a JSON report with no build stamp and no
+// `strict` cannot be traced to a build or resolved to an exit code.
 
 import (
+	"encoding/json"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/malbeclabs/edge-feed-spec/tools/conformance/core"
+	"github.com/malbeclabs/edge-feed-spec/tools/conformance/engine"
+	"github.com/malbeclabs/edge-feed-spec/tools/conformance/report"
 )
 
 // The release form and the unstamped default are different strings, so they are
@@ -78,5 +86,123 @@ func TestVersionFlagShape(t *testing.T) {
 					"run re-downloads the binary and restarts every instance", got, trimmed, roleVersionRe)
 			}
 		})
+	}
+}
+
+// jsonReport is the report's top-level shape, as a reader sees it.
+type jsonReport struct {
+	Version string `json:"version"`
+	Commit  string `json:"commit"`
+	Strict  bool   `json:"strict"`
+	Rules   []struct {
+		RuleID   string         `json:"rule_id"`
+		Severity string         `json:"severity"`
+		Counts   map[string]int `json:"counts"`
+	} `json:"rules"`
+}
+
+func readJSONReport(t *testing.T, path string) jsonReport {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read report: %v", err)
+	}
+	var rep jsonReport
+	if err := json.Unmarshal(data, &rep); err != nil {
+		t.Fatalf("unmarshal report: %v", err)
+	}
+	return rep
+}
+
+// TestJSONReportCarriesBuildAndStrict replays the committed market-by-price capture,
+// which violates rules, and checks the report says which build produced it and which
+// exit-code policy it ran under.
+func TestJSONReportCarriesBuildAndStrict(t *testing.T) {
+	for _, strict := range []bool{false, true} {
+		name := "lenient"
+		if strict {
+			name = "strict"
+		}
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "report.json")
+			code := Run(RunOpts{
+				Cfg: engine.Config{Feed: core.FeedMBP, Strict: strict, OracleConfirmCycles: 2, ReorderWindow: 1},
+				// Ports of the committed capture (see engine/mbp_fixture_test.go).
+				PcapPath:     filepath.Join("testdata", "nonconformant_mbp.pcap"),
+				MktDataPort:  31000,
+				RefDataPort:  41000,
+				SnapshotPort: 51000,
+				JSONReport:   path,
+				Version:      "v0.0.0-test",
+				Commit:       "abc123def456",
+			})
+			rep := readJSONReport(t, path)
+			if rep.Version != "v0.0.0-test" || rep.Commit != "abc123def456" {
+				t.Errorf("report says version=%q commit=%q, want the build stamp it ran with: "+
+					"an unattributable report is findings 8.2", rep.Version, rep.Commit)
+			}
+			if rep.Strict != strict {
+				t.Errorf("report says strict=%v, ran with %v: without the effective setting a "+
+					"should-violation resolves to either exit code", rep.Strict, strict)
+			}
+			if len(rep.Rules) == 0 {
+				t.Fatal("no rules in the report; the capture is non-conformant and must produce some")
+			}
+			for _, r := range rep.Rules {
+				if r.Severity == "" {
+					t.Errorf("rule %s has no severity, so a reader cannot tell whether its "+
+						"violations move the exit code", r.RuleID)
+				}
+			}
+			// This capture violates must rules, so the code is 1 either way; the flag
+			// only changes what the report records here. TestJSONReportDeterminesExitCode
+			// covers the case where it changes the code.
+			if code != 1 {
+				t.Errorf("Run returned %d, want 1 on a capture with must-violations", code)
+			}
+		})
+	}
+}
+
+// TestJSONReportDeterminesExitCode is the findings 8.1 assertion: with severity per
+// rule and strict at the top level, a reader reconstructs the exit code from the
+// report alone. It uses a should-violation and no must-violation, the one case where
+// the two modes disagree — no committed capture produces that shape.
+func TestJSONReportDeterminesExitCode(t *testing.T) {
+	const shouldRule = "HEARTBEAT.CHANNEL_ID_MATCH"
+	if meta, ok := core.Lookup(shouldRule); !ok || meta.Severity != core.Should {
+		t.Fatalf("%s is no longer a should rule; pick another for this test", shouldRule)
+	}
+	for _, strict := range []bool{false, true} {
+		agg := &report.Aggregator{}
+		agg.Record(core.Finding{RuleID: shouldRule, Severity: core.Should, Status: core.Violation})
+		agg.Record(core.Finding{RuleID: "FRAME.MAGIC_MISMATCH", Severity: core.Must, Status: core.Pass})
+
+		path := filepath.Join(t.TempDir(), "report.json")
+		if err := report.JSONReport(agg, path, report.Meta{Version: "v1.2.3", Commit: "deadbeef1234", Strict: strict}); err != nil {
+			t.Fatalf("JSONReport: %v", err)
+		}
+		rep := readJSONReport(t, path)
+
+		// Reconstruct the exit code the way a JSON reader has to: must-violations
+		// always fail, should-violations fail only under strict.
+		var must, should int
+		for _, r := range rep.Rules {
+			switch r.Severity {
+			case "must":
+				must += r.Counts["violation"]
+			case "should":
+				should += r.Counts["violation"]
+			}
+		}
+		reconstructed := 0
+		if must > 0 || (rep.Strict && should > 0) {
+			reconstructed = 1
+		}
+		if want := agg.ExitCode(strict); reconstructed != want {
+			t.Errorf("strict=%v: report reconstructs exit code %d, binary exits %d "+
+				"(must=%d should=%d strict recorded as %v)",
+				strict, reconstructed, want, must, should, rep.Strict)
+		}
 	}
 }
