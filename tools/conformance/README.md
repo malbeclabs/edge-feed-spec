@@ -222,7 +222,7 @@ With `--pcap`, the tool replays the capture in order and exits when the file is 
 |------|---------|
 | `0` | No violations (or only `should` violations without `--strict`) |
 | `1` | At least one `must` violation; or at least one `should` violation with `--strict` |
-| `2` | Startup/runtime error (bad flags, I/O failure, could not write JSON report) |
+| `2` | Startup/runtime error (bad flags, I/O failure, could not write JSON report). An error that ends a run mid-input is also recorded as `read_error` in the [JSON report](#json-report), so a stored report is never mistaken for a clean pass |
 
 Oracle mismatches on the first occurrence are scored as `mismatch_suspected` in `snapshot_audits_total` and do **not** emit a finding or fail CI. After `--oracle-confirm-cycles` consecutive mismatches with the same signature, a confirmed `Violation` finding is emitted.
 
@@ -253,9 +253,14 @@ time=... level=ERROR msg=finding
 
 ### JSON report
 
-Pass `--json-report path` to write a machine-readable summary at the end of the run. The report is a JSON object with top-level `version`, `commit` and `strict`, plus a `rules` array; each entry has a `rule_id`, its `severity` and a `counts` map of status name → count (e.g. `{"rule_id": "FRAME.MAGIC_MISMATCH", "severity": "must", "counts": {"violation": 1}}`). A rule with `unverifiable` findings also carries `unverifiable_by_reason`, breaking that count down by cause — this is the only place a `--pcap` CI run reports it, since a one-shot replay has no Prometheus to scrape. See [Coverage vs. silence](#coverage-vs-silence) for how to read the two together.
+Pass `--json-report path` to write a machine-readable summary at the end of the run. The report is a JSON object with top-level `version`, `commit`, `strict` and `read_error`, plus a `rules` array; each entry has a `rule_id`, its `severity` and a `counts` map of status name → count (e.g. `{"rule_id": "FRAME.MAGIC_MISMATCH", "severity": "must", "counts": {"violation": 1}}`). A rule with `unverifiable` findings also carries `unverifiable_by_reason`, breaking that count down by cause — this is the only place a `--pcap` CI run reports it, since a one-shot replay has no Prometheus to scrape. See [Coverage vs. silence](#coverage-vs-silence) for how to read the two together.
 
-`version` and `commit` are the build labels (the same ones `build_info` carries), so a stored report can be attributed to the binary that produced it. `severity` and `strict` together are what make the [exit code](#exit-codes) recomputable from the report alone: only `must` and `should` violations move it, and a `should` violation resolves to `0` or `1` depending on `--strict`, which the counts do not record.
+`version` and `commit` are the build labels (the same ones `build_info` carries), so a stored report can be attributed to the binary that produced it. `severity`, `strict` and `read_error` together are what make the [exit code](#exit-codes) recomputable from the report alone:
+
+- `read_error` non-empty → **2**. The run ended early on an input error (a truncated pcap, a dead socket), so the counts cover only the frames read before it. It is always present and empty on a run that consumed its input to the end, so a reader can tell a completed run from a binary that never recorded whether it completed.
+- otherwise **0** or **1** from the counts: only `must` and `should` violations move the code, and a `should` violation resolves to `0` or `1` depending on `--strict`, which the counts do not record.
+
+The remaining exit-2 paths — bad flags, an unbound `--metrics-addr`, no ports configured, an unreadable `--source-registry`, or a failure writing the report itself — abort before or during the write, so they leave no parseable report to misread.
 
 ### Prometheus metrics
 

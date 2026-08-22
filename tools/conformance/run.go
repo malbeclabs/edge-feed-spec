@@ -124,7 +124,8 @@ func reportStarvedRules(rep report.Reporter, opts RunOpts) {
 	}
 }
 
-// Run wires the full pipeline and returns an OS exit code (0 = pass, 1 = violation).
+// Run wires the full pipeline and returns an OS exit code (0 = pass, 1 = violation,
+// 2 = the run errored; see the read-error note on report.Meta).
 func Run(opts RunOpts) int {
 	magic := magicFor(opts.Cfg.Feed)
 
@@ -229,7 +230,7 @@ func Run(opts RunOpts) int {
 	// --- JSON report ---
 	var reportErr error
 	if opts.JSONReport != "" {
-		meta := report.Meta{Version: opts.Version, Commit: opts.Commit, Strict: opts.Cfg.Strict}
+		meta := report.Meta{Version: opts.Version, Commit: opts.Commit, Strict: opts.Cfg.Strict, ReadErr: readErr}
 		if err := report.JSONReport(agg, opts.JSONReport, meta); err != nil {
 			fmt.Fprintf(os.Stderr, "dz-conformance: json report: %v\n", err)
 			reportErr = err

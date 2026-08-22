@@ -91,10 +91,11 @@ func TestVersionFlagShape(t *testing.T) {
 
 // jsonReport is the report's top-level shape, as a reader sees it.
 type jsonReport struct {
-	Version string `json:"version"`
-	Commit  string `json:"commit"`
-	Strict  bool   `json:"strict"`
-	Rules   []struct {
+	Version   string `json:"version"`
+	Commit    string `json:"commit"`
+	Strict    bool   `json:"strict"`
+	ReadError string `json:"read_error"`
+	Rules     []struct {
 		RuleID   string         `json:"rule_id"`
 		Severity string         `json:"severity"`
 		Counts   map[string]int `json:"counts"`
@@ -112,6 +113,28 @@ func readJSONReport(t *testing.T, path string) jsonReport {
 		t.Fatalf("unmarshal report: %v", err)
 	}
 	return rep
+}
+
+// reconstructExitCode applies the rule the README documents for a reader of a stored
+// report: a read error means the run errored, otherwise must-violations always fail and
+// should-violations fail only under strict.
+func reconstructExitCode(rep jsonReport) int {
+	if rep.ReadError != "" {
+		return 2
+	}
+	var must, should int
+	for _, r := range rep.Rules {
+		switch r.Severity {
+		case "must":
+			must += r.Counts["violation"]
+		case "should":
+			should += r.Counts["violation"]
+		}
+	}
+	if must > 0 || (rep.Strict && should > 0) {
+		return 1
+	}
+	return 0
 }
 
 // TestJSONReportCarriesBuildAndStrict replays the committed market-by-price capture,
@@ -154,6 +177,10 @@ func TestJSONReportCarriesBuildAndStrict(t *testing.T) {
 						"violations move the exit code", r.RuleID)
 				}
 			}
+			if rep.ReadError != "" {
+				t.Errorf("report says read_error=%q, but the replay consumed the whole capture; "+
+					"a spurious read error makes a complete run reconstruct as exit 2", rep.ReadError)
+			}
 			// This capture violates must rules, so the code is 1 either way; the flag
 			// only changes what the report records here. TestJSONReportDeterminesExitCode
 			// covers the case where it changes the code.
@@ -184,25 +211,55 @@ func TestJSONReportDeterminesExitCode(t *testing.T) {
 		}
 		rep := readJSONReport(t, path)
 
-		// Reconstruct the exit code the way a JSON reader has to: must-violations
-		// always fail, should-violations fail only under strict.
-		var must, should int
-		for _, r := range rep.Rules {
-			switch r.Severity {
-			case "must":
-				must += r.Counts["violation"]
-			case "should":
-				should += r.Counts["violation"]
-			}
-		}
-		reconstructed := 0
-		if must > 0 || (rep.Strict && should > 0) {
-			reconstructed = 1
-		}
+		reconstructed := reconstructExitCode(rep)
 		if want := agg.ExitCode(strict); reconstructed != want {
 			t.Errorf("strict=%v: report reconstructs exit code %d, binary exits %d "+
-				"(must=%d should=%d strict recorded as %v)",
-				strict, reconstructed, want, must, should, rep.Strict)
+				"(strict recorded as %v, read_error=%q)",
+				strict, reconstructed, want, rep.Strict, rep.ReadError)
 		}
+	}
+}
+
+// TestJSONReportRecordsReadError closes the exit-2 hole in that reconstruction. A read
+// error writes the report and then returns 2, so with the counts as the only evidence a
+// run that died on a truncated capture reconstructs as 0 — a clean pass, which is the
+// failure this tool exists to catch. The Ansible/Alloy wrapper reads the JSON and not
+// the exit code, so the report has to carry it.
+func TestJSONReportRecordsReadError(t *testing.T) {
+	dir := t.TempDir()
+	pcapPath := writeMBOPcap(t, dir)
+
+	// Truncate inside the packet record: the pcap file header still parses, so the
+	// source opens and the run fails mid-read rather than at startup.
+	st, err := os.Stat(pcapPath)
+	if err != nil {
+		t.Fatalf("stat pcap: %v", err)
+	}
+	if err := os.Truncate(pcapPath, st.Size()-8); err != nil {
+		t.Fatalf("truncate pcap: %v", err)
+	}
+
+	reportPath := filepath.Join(dir, "report.json")
+	code := Run(RunOpts{
+		Cfg:         engine.Config{Feed: core.FeedMBO, ReorderWindow: 8},
+		MktDataPort: testMktDataUDPPort,
+		PcapPath:    pcapPath,
+		JSONReport:  reportPath,
+		Version:     "v0.0.0-test",
+		Commit:      "abc123def456",
+	})
+	if code != 2 {
+		t.Fatalf("Run returned %d on a truncated capture, want 2", code)
+	}
+
+	rep := readJSONReport(t, reportPath)
+	if rep.ReadError == "" {
+		t.Errorf("the run died mid-capture and exited 2, but the report records no read_error, "+
+			"so a reader reconstructs %d and reads the truncated run as a pass",
+			reconstructExitCode(rep))
+	}
+	if got := reconstructExitCode(rep); got != code {
+		t.Errorf("report reconstructs exit code %d, binary exits %d (read_error=%q)",
+			got, code, rep.ReadError)
 	}
 }
