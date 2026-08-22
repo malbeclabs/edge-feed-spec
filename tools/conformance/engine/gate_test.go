@@ -66,7 +66,7 @@ func buildOrderAddFrame(ch uint8, instrID uint32, perInstrSeq uint32) []byte {
 func processSeq(e *Engine, raw []byte, magic uint16, seq uint64) {
 	f, sf := wire.Decode(raw, magic)
 	f.Header.Sequence = seq
-	e.Process(f, core.PortMktData, sf)
+	e.Process(srcA, f, core.PortMktData, sf)
 }
 
 // --- Test 1: Dense run — no DELTA.PERINSTR_DENSITY violation ---

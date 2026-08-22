@@ -16,7 +16,7 @@ func fires(t *testing.T, feed core.Feed, magic uint16, raw []byte, port core.Por
 	f, sf := wire.Decode(raw, magic)
 	ac := &allCapture{}
 	e := New(Config{Feed: feed, SourceRegistry: stubRegistry{}}, ac)
-	e.Process(f, port, sf)
+	e.Process(srcA, f, port, sf)
 	e.Flush() // drain reorder buffer before inspecting findings
 	meta, ok := core.Lookup(ruleID)
 	if !ok {

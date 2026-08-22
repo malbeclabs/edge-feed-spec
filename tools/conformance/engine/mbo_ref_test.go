@@ -160,7 +160,7 @@ func reachedReadyMBO(e *Engine, ch uint8, instrID uint32, priceBound uint8, star
 		Bytes()
 	fMf, sfMf := wire.Decode(rawMf, wire.MagicMBO)
 	fMf.Header.Sequence = seq
-	e.Process(fMf, core.PortRefData, sfMf)
+	e.Process(srcA, fMf, core.PortRefData, sfMf)
 	seq++
 
 	// InstrumentDefinition (130-byte MBO): priceBound at body[123].
@@ -177,7 +177,7 @@ func reachedReadyMBO(e *Engine, ch uint8, instrID uint32, priceBound uint8, star
 		Bytes()
 	fDef, sfDef := wire.Decode(rawDef, wire.MagicMBO)
 	fDef.Header.Sequence = seq
-	e.Process(fDef, core.PortRefData, sfDef)
+	e.Process(srcA, fDef, core.PortRefData, sfDef)
 	seq++
 
 	// Second ManifestSummary to close cycle.
@@ -187,7 +187,7 @@ func reachedReadyMBO(e *Engine, ch uint8, instrID uint32, priceBound uint8, star
 		Bytes()
 	fMf2, sfMf2 := wire.Decode(rawMf2, wire.MagicMBO)
 	fMf2.Header.Sequence = seq
-	e.Process(fMf2, core.PortRefData, sfMf2)
+	e.Process(srcA, fMf2, core.PortRefData, sfMf2)
 	seq++
 	return seq
 }
@@ -196,7 +196,7 @@ func reachedReadyMBO(e *Engine, ch uint8, instrID uint32, priceBound uint8, star
 func runMktdataSeq(e *Engine, raw []byte, seq uint64) {
 	f, sf := wire.Decode(raw, wire.MagicMBO)
 	f.Header.Sequence = seq
-	e.Process(f, core.PortMktData, sf)
+	e.Process(srcA, f, core.PortMktData, sf)
 }
 
 // seedGaplessHistory feeds a series of OrderAdd frames (perInstrSeq 1..n) to

@@ -2,6 +2,7 @@ package input
 
 import (
 	"io"
+	"net/netip"
 	"os"
 
 	"github.com/google/gopacket"
@@ -63,10 +64,27 @@ func (s *PcapSource) Next() (Datagram, bool, error) {
 
 		return Datagram{
 			Port:   port,
+			Src:    srcAddr(pkt),
 			Raw:    raw,
 			RecvTS: ci.Timestamp,
 		}, true, nil
 	}
+}
+
+// srcAddr returns the packet's source address, so a replay keys channel
+// instances exactly as a live capture does. A capture whose link type carries no
+// network layer yields the zero Addr — every datagram then reads as one instance,
+// which is what a pre-instance capture is.
+func srcAddr(pkt gopacket.Packet) netip.Addr {
+	switch ip := pkt.NetworkLayer().(type) {
+	case *layers.IPv4:
+		a, _ := netip.AddrFromSlice(ip.SrcIP)
+		return a.Unmap()
+	case *layers.IPv6:
+		a, _ := netip.AddrFromSlice(ip.SrcIP)
+		return a.Unmap()
+	}
+	return netip.Addr{}
 }
 
 // Close releases the underlying file.
