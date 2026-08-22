@@ -216,6 +216,28 @@ func (e *Engine) dirtyOn(port core.Port, ch uint8) bool {
 	return false
 }
 
+// taintPortWide marks every instance on a port unverifiable for the rest of its
+// era. It is what a transport finding calls for, because a transport finding is
+// the one case where the channel the datagram belonged to is unknowable:
+// wire.Decode returns an all-zero header for a datagram shorter than the frame
+// header (wire/decode.go), so the frame carrying the finding names channel 0 and
+// in truth names no channel at all. Tainting that frame's own instance writes the
+// taint on a phantom instance while dirtyOn — which ORs across the real channel —
+// stays clean, and the truncated snapshot that dropped trailing SnapshotOrders is
+// then graded as a publisher Violation on two Must rules (F1).
+//
+// Port-wide is what the one-tracker-per-port state did before frame state was
+// keyed per instance, and it is the safe direction: the cost of tainting an
+// instance the corruption did not touch is a rule that grades Unverifiable
+// instead of pass, never a violation the publisher did not commit.
+func (e *Engine) taintPortWide(port core.Port) {
+	for k, pt := range e.ports {
+		if k.port == port {
+			pt.dirtyWindow = true
+		}
+	}
+}
+
 // mktdataPending reports whether any mktdata reorder buffer on this channel still
 // holds unclassified frames. Cross-port snapshot checks that compare a snapshot against
 // mktdata-derived state (SNAP.ANCHOR_IS_MKTDATA_SEQ, SNAP.LAST_INSTRUMENT_SEQ_
@@ -393,7 +415,11 @@ func (e *Engine) classify(item *bufferItem, pt *portTracker) {
 			// (e.g. order counts) may be untrustworthy, so the snapshot port is
 			// treated the same as a gap — dirtyWindow = true prevents false-positive
 			// Violations from snapshot under-count and related rules.
-			pt.dirtyWindow = true
+			//
+			// Port-wide and not this instance: a truncated datagram has no
+			// trustworthy Channel ID, so the instance it was keyed under may not
+			// exist on the wire at all. See taintPortWide (F1).
+			e.taintPortWide(port)
 			// The SNAP.TOTAL_ORDERS_COUNT_MATCH under-count check gates on the
 			// in-flight group's own dirty flag, not the port flag, so also taint the
 			// currently-open snapshot group for this channel (if any). A truncated
