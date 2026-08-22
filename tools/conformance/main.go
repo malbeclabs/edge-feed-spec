@@ -11,7 +11,8 @@ import (
 )
 
 // version and commit are set at build time via -ldflags
-// (-X main.version=… -X main.commit=…). They label the build_info metric.
+// (-X main.version=… -X main.commit=…). They label the build_info metric, print at
+// --version, and attribute the JSON report to the build that wrote it.
 var (
 	version = "dev"
 	commit  = "none"
@@ -58,7 +59,11 @@ func main() {
 	_ = fs.Parse(os.Args[1:])
 
 	if *showVersion {
-		fmt.Println(version)
+		// `version+commit`, one line, `+` separator: malbeclabs/infra's dz_conformance
+		// role parses this output and requires `^[0-9]+\.[0-9]+\.[0-9]+([-+].*)?$` after
+		// trimming a leading `v`, so a space or a parenthesis makes it re-download the
+		// binary and restart every instance on every run.
+		fmt.Println(version + "+" + commit)
 		os.Exit(0)
 	}
 
@@ -102,6 +107,8 @@ func main() {
 		JSONReport:     *jsonReport,
 		Verbose:        *verbose,
 		LogThrottle:    *logThrottle,
+		Version:        version,
+		Commit:         commit,
 	}
 
 	code := Run(opts)
@@ -125,4 +132,8 @@ type RunOpts struct {
 	// LogThrottle is the minimum interval between identical (rule,status) log
 	// lines; 0 disables throttling. Does not affect metrics or exit code.
 	LogThrottle time.Duration
+	// Version and Commit are the build stamp, carried here so the JSON report and
+	// build_info label the same build (they are package-main vars, invisible to report).
+	Version string
+	Commit  string
 }
