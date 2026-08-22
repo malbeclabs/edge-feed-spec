@@ -13,9 +13,9 @@ import (
 // Status values are rendered as their string names for readability.
 type ruleStatusCounts struct {
 	RuleID string `json:"rule_id"`
-	// Severity is the rule's registry severity, empty for a rule id the registry does
-	// not know. Only must and should move the exit code, so a reader needs it (with the
-	// report's `strict`) to reconstruct that code from the counts.
+	// Severity is the rule's registry severity. Only must and should move the exit
+	// code, so a reader needs it (with the report's `strict`) to reconstruct that code
+	// from the counts.
 	Severity string         `json:"severity"`
 	Counts   map[string]int `json:"counts"`
 	// Unverifiable is the `unverifiable` count broken down by cause, omitted when

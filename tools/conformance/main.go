@@ -11,7 +11,8 @@ import (
 )
 
 // version and commit are set at build time via -ldflags
-// (-X main.version=… -X main.commit=…). They label the build_info metric.
+// (-X main.version=… -X main.commit=…). They label the build_info metric, print at
+// --version, and attribute the JSON report to the build that wrote it.
 var (
 	version = "dev"
 	commit  = "none"
