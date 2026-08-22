@@ -135,6 +135,17 @@ func (e *Engine) Emit(ruleID string, st core.Status, port core.Port, seq uint64,
 // under a live host. The cap is far above any real deployment (two arms × three
 // ports × the 256 channels a u8 allows is 1,536) so only a pathological sender
 // reaches it.
+//
+// Reaching it is not free. dirtyOn scans the map and gateDetector consults it
+// several times per message, so a sender that fills the map makes every message
+// pay a handful of 4,096-entry scans and every new instance one eviction scan:
+// throughput degrades linearly with the flood, while no result changes. A dirty
+// count keyed (port, channel) would keep the scans flat and is deliberately not
+// here — it denormalises the one flag whose bookkeeping both false-Must bugs above
+// came from, and a stale count is either a stuck gate (everything Unverifiable) or
+// a cleared one (a Must the publisher never earned). Worth building when a real
+// deployment approaches the cap, with the count as the state itself rather than a
+// cache of it.
 const maxChannelInstances = 4096
 
 // instanceTrack returns (or lazily creates) the tracker for one channel instance.
