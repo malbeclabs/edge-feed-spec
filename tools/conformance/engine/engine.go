@@ -216,6 +216,22 @@ func (e *Engine) dirtyOn(port core.Port, ch uint8) bool {
 	return false
 }
 
+// taintOn marks every instance of one channel on one port unverifiable for the
+// rest of its era. It is the write counterpart of dirtyOn and has to match it:
+// every reader ORs across the channel's instances, so a taint written under one
+// exact source address is a taint no reader is looking for when the channel's
+// series sits under another one — and nothing about a channel keeps its ports on
+// one address. The lease this keying exists for is enough on its own: the mktdata
+// series moves to a reassigned address while the lower-rate snapshot series is
+// still keyed under the old one (F2).
+func (e *Engine) taintOn(port core.Port, ch uint8) {
+	for k, pt := range e.ports {
+		if k.port == port && k.ch == ch {
+			pt.dirtyWindow = true
+		}
+	}
+}
+
 // taintPortWide marks every instance on a port unverifiable for the rest of its
 // era. It is what a transport finding calls for, because a transport finding is
 // the one case where the channel the datagram belonged to is unknowable:
@@ -268,7 +284,7 @@ func (e *Engine) snapPortDirty(ch uint8) bool {
 // buffer in seq order.
 func (e *Engine) Process(src netip.Addr, f *wire.Frame, port core.Port, sf []wire.StructFinding) {
 	pt := e.instanceTrack(src, port, f.Header.ChannelID)
-	tuple := intakeTuple{frame: f, src: src, port: port, structFindings: sf}
+	tuple := intakeTuple{frame: f, port: port, structFindings: sf}
 
 	res := pt.enqueue(tuple, e.cfg.ReorderWindow)
 	if res.quarantine {
@@ -309,9 +325,7 @@ func (e *Engine) Process(src netip.Addr, f *wire.Frame, port core.Port, sf []wir
 			// already advanced its own era, so the `port != PortSnapshot` guard avoids
 			// re-tainting it (which would wrongly mark its clean new-era groups). (F4)
 			if wiped && port != core.PortSnapshot {
-				if snapPT, ok := e.ports[instanceKey{src, core.PortSnapshot, f.Header.ChannelID}]; ok {
-					snapPT.dirtyWindow = true
-				}
+				e.taintOn(core.PortSnapshot, f.Header.ChannelID)
 			}
 			// FRAME.MKTDATA_SEQ_START: on a Reset Count change, the mktdata-port
 			// Sequence Number must restart at 0 (this is a mktdata-port rule only).
@@ -376,7 +390,7 @@ func (e *Engine) classify(item *bufferItem, pt *portTracker) {
 
 	// Channel-wide reset bookkeeping for MBP, driven by every accepted frame on any
 	// port rather than by the per-series era advance in Process.
-	e.mbpObserveEra(item.tuple.src, port, f.Header.ChannelID, item.era)
+	e.mbpObserveEra(port, f.Header.ChannelID, item.era)
 
 	// FRAME.SEQ_RESET_GAP: backward seq motion without a reset-count change is
 	// a publisher violation. A plain forward gap is transport loss (not a violation).
