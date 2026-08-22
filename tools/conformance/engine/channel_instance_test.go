@@ -259,3 +259,37 @@ func TestInstanceMapIsBounded(t *testing.T) {
 		t.Errorf("tracker map holds %d instances, want at most %d", got, maxChannelInstances)
 	}
 }
+
+// The tests below are the other half of keying frame state per instance: the
+// taint has to be written where its readers look. Every reader of dirtyWindow
+// (dirtyOn, and gateDetector/gateDetectorSnap through it) ORs across the
+// channel's instances, so a taint written on one instance that no reader
+// associates with the channel is a taint that reaches nobody — and the rules that
+// consult it then grade transport reality as publisher misconduct, on Must rules.
+// Neither case was reachable while one tracker per port meant the taint and every
+// reader of it shared a single flag.
+
+// TestCorruptTaintReachesRealChannel: a datagram shorter than the frame header
+// decodes to an all-zero header (wire/decode.go), so it keys the instance ch=0 —
+// a channel that need not exist on the wire. The transport taint must reach the
+// channel whose snapshot series actually took the corruption, because
+// SNAP.TOTAL_ORDERS_COUNT_MATCH and MBP.SNAP.GROUP_STRUCTURE, both Must, read it
+// to tell a truncated group from a publisher that miscounted its own orders.
+func TestCorruptTaintReachesRealChannel(t *testing.T) {
+	const ch uint8 = 5
+	eng := New(Config{Feed: core.FeedMBP, ReorderWindow: 1}, &captureAll{})
+	eng.Process(srcA, makeHB(wire.MagicMBP, ch, 0, 0, 1000), core.PortSnapshot, nil)
+	runt, sf := wire.Decode([]byte{1, 2, 3}, wire.MagicMBP) // header does not decode
+	if runt.Header.ChannelID == ch {
+		t.Fatalf("premise broken: a runt datagram decoded channel %d, so it no longer keys a phantom instance", runt.Header.ChannelID)
+	}
+	eng.Process(srcA, runt, core.PortSnapshot, sf)
+	eng.Flush()
+
+	if !eng.dirtyOn(core.PortSnapshot, ch) {
+		t.Errorf("channel %d's snapshot series is clean after corruption on it: the taint landed on the phantom instance ch=%d that the runt header decoded, and no reader of dirtyOn looks there", ch, runt.Header.ChannelID)
+	}
+	if eng.gateDetectorSnap(ch) {
+		t.Errorf("gateDetectorSnap(%d) is open after corruption on the channel's snapshot series: a truncated snapshot group grades as a publisher Violation", ch)
+	}
+}
