@@ -45,7 +45,6 @@ type eraSeq struct {
 // intakeTuple is the unit buffered in the reorder window.
 type intakeTuple struct {
 	frame          *wire.Frame
-	src            netip.Addr
 	port           core.Port
 	structFindings []wire.StructFinding
 }

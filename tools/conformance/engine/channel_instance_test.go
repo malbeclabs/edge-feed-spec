@@ -293,3 +293,21 @@ func TestCorruptTaintReachesRealChannel(t *testing.T) {
 		t.Errorf("gateDetectorSnap(%d) is open after corruption on the channel's snapshot series: a truncated snapshot group grades as a publisher Violation", ch)
 	}
 }
+
+// TestSnapTaintIsChannelWide: the Reset Count is channel-wide, so when another
+// port observes the reset first the taint that keeps the wipe's own consequences
+// off the publisher's record has to reach the channel's snapshot series wherever
+// it is keyed. An exact-source lookup misses it in the case this keying exists
+// for: the mktdata series moves to a new address (a reassigned tunnel lease) while
+// the lower-rate snapshot series is still keyed under the old one.
+func TestSnapTaintIsChannelWide(t *testing.T) {
+	eng := New(Config{Feed: core.FeedMBP, ReorderWindow: 1}, &captureAll{})
+	eng.Process(srcB, makeHB(wire.MagicMBP, chArmA, 0, 0, 1000), core.PortSnapshot, nil)
+	eng.Process(srcA, makeHB(wire.MagicMBP, chArmA, 0, 0, 2000), core.PortMktData, nil)
+	eng.Process(srcA, makeHB(wire.MagicMBP, chArmA, 0, 1, 3000), core.PortMktData, nil) // reset
+	eng.Flush()
+
+	if !eng.dirtyOn(core.PortSnapshot, chArmA) {
+		t.Errorf("the reset on channel %d tainted no snapshot instance: its snapshot series is keyed under %v and the mktdata series under %v, so an exact-source lookup finds nothing and no reader learns of the reset", chArmA, srcB, srcA)
+	}
+}

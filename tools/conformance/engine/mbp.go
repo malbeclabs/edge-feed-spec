@@ -2,7 +2,6 @@ package engine
 
 import (
 	"fmt"
-	"net/netip"
 
 	"github.com/malbeclabs/edge-feed-spec/tools/conformance/core"
 	"github.com/malbeclabs/edge-feed-spec/tools/conformance/wire"
@@ -221,7 +220,7 @@ func (e *Engine) ensureMBP() {
 // snapshot series clears the flag when it advances its own era. Skipped when the
 // snapshot port led the reset, since it has already advanced and its new-era groups
 // are clean (F4).
-func (e *Engine) mbpObserveEra(src netip.Addr, port core.Port, ch uint8, era uint8) {
+func (e *Engine) mbpObserveEra(port core.Port, ch uint8, era uint8) {
 	if e.cfg.Feed != core.FeedMBP {
 		return
 	}
@@ -229,9 +228,7 @@ func (e *Engine) mbpObserveEra(src netip.Addr, port core.Port, ch uint8, era uin
 	if !e.mbp.onEraObserved(era) || port == core.PortSnapshot {
 		return
 	}
-	if snapPT, ok := e.ports[instanceKey{src, core.PortSnapshot, ch}]; ok {
-		snapPT.dirtyWindow = true
-	}
+	e.taintOn(core.PortSnapshot, ch)
 }
 
 // checkMBP validates the mktdata deltas in one frame.
