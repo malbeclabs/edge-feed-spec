@@ -73,7 +73,7 @@ func feedRefDataOneInstr(e *Engine, ch uint8, instrID uint32, startSeq uint64) u
 	feed := func(raw []byte) {
 		f, sf := wire.Decode(raw, wire.MagicMBO)
 		f.Header.Sequence = seq
-		e.Process(f, core.PortRefData, sf)
+		e.Process(srcA, f, core.PortRefData, sf)
 		seq++
 	}
 
@@ -118,7 +118,7 @@ func feedMktdataOrderAdd(e *Engine, ch uint8, instrID uint32, perSeq uint32, ord
 		Bytes()
 	f, sf := wire.Decode(raw, wire.MagicMBO)
 	f.Header.Sequence = mktSeq
-	e.Process(f, core.PortMktData, sf)
+	e.Process(srcA, f, core.PortMktData, sf)
 	return mktSeq + 1
 }
 
@@ -137,7 +137,7 @@ func feedMktdataOrderCancel(e *Engine, ch uint8, instrID uint32, perSeq uint32, 
 		Bytes()
 	f, sf := wire.Decode(raw, wire.MagicMBO)
 	f.Header.Sequence = mktSeq
-	e.Process(f, core.PortMktData, sf)
+	e.Process(srcA, f, core.PortMktData, sf)
 	return mktSeq + 1
 }
 
@@ -150,13 +150,13 @@ func feedInitialSnapshot(e *Engine, ch uint8, instrID uint32, anchorSeq uint64, 
 	beginRaw := buildSnapBeginFull(ch, instrID, anchorSeq, 0 /*totalOrders*/, snapID, 0 /*K=0*/)
 	f, sf := wire.Decode(beginRaw, wire.MagicMBO)
 	f.Header.Sequence = seq
-	e.Process(f, core.PortSnapshot, sf)
+	e.Process(srcA, f, core.PortSnapshot, sf)
 	seq++
 
 	endRaw := buildSnapEndFull(ch, instrID, anchorSeq, snapID)
 	f, sf = wire.Decode(endRaw, wire.MagicMBO)
 	f.Header.Sequence = seq
-	e.Process(f, core.PortSnapshot, sf)
+	e.Process(srcA, f, core.PortSnapshot, sf)
 	seq++
 	return seq
 }
@@ -171,20 +171,20 @@ func feedPeriodicSnapshot(e *Engine, ch uint8, instrID uint32, anchorSeq uint64,
 	beginRaw := buildSnapBeginFull(ch, instrID, anchorSeq, uint32(len(snapOrders)), snapID, lastInstrSeqK)
 	f, sf := wire.Decode(beginRaw, wire.MagicMBO)
 	f.Header.Sequence = seq
-	e.Process(f, core.PortSnapshot, sf)
+	e.Process(srcA, f, core.PortSnapshot, sf)
 	seq++
 
 	for _, orderRaw := range snapOrders {
 		f, sf = wire.Decode(orderRaw, wire.MagicMBO)
 		f.Header.Sequence = seq
-		e.Process(f, core.PortSnapshot, sf)
+		e.Process(srcA, f, core.PortSnapshot, sf)
 		seq++
 	}
 
 	endRaw := buildSnapEndFull(ch, instrID, anchorSeq, snapID)
 	f, sf = wire.Decode(endRaw, wire.MagicMBO)
 	f.Header.Sequence = seq
-	e.Process(f, core.PortSnapshot, sf)
+	e.Process(srcA, f, core.PortSnapshot, sf)
 	seq++
 	return seq
 }

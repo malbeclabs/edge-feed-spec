@@ -1,6 +1,6 @@
 # dz-conformance
 
-A conformance subscriber for edge-feed publishers. Subscribes to one feed (TOB, Midpoint, MBO, or MBP) on one channel — live multicast or pcap replay — validates the feed against 88 explicit conformance rules drawn from the [edge-feed-spec](../../) (this repo), and returns a CI-friendly exit code.
+A conformance subscriber for edge-feed publishers. Subscribes to one feed (TOB, Midpoint, MBO, or MBP) — live multicast or pcap replay — validates the feed against 88 explicit conformance rules drawn from the [edge-feed-spec](../../) (this repo), and returns a CI-friendly exit code.
 
 Unlike a production consumer — which is tolerant of publisher quirks (skipping unknown types, ignoring reserved bits, recovering silently from loss) — this tool is **strict by design**: it flags every structural, sequence, and semantic violation the spec defines. `core/registry.go` is the in-code source of truth for the full rule set.
 
@@ -35,6 +35,18 @@ Rules are partitioned into two tiers based on when they can fire:
 **Tier 2 — stateful / relational (verifiability-gated).** Require cross-message state: per-instrument sequence density, referential integrity, quantity conservation, the snapshot↔delta book oracle, refdata coverage. Before firing a Tier-2 rule the engine confirms that packet loss (or cold-start, reorder, bound-subset capture, or an in-flight transition) cannot explain the anomaly. If it can, the result is `Unverifiable` rather than a violation.
 
 This split is what makes lossless pcap replay yield near-100% verifiable coverage — the tool is strong in CI without producing false alarms on live feeds with normal multicast loss.
+
+## Sequencing keys on the channel instance
+
+A **channel instance** is one path's view of one channel, keyed `(source IP address, Channel ID, destination port)` — the unit that owns a sequence series and a `Reset Count` ([GLOSSARY.md](../../GLOSSARY.md), and *Redundant Channel Instances* in [market-by-price/spec.md](../../market-by-price/spec.md)). An operator MAY run two publishers serving the **same** channel to the same group and the same port for redundancy; each advances its own sequence space and its own `Reset Count`, and they are told apart by transport, because `Source ID` names the matching engine and is equal on both. So the checker keys its datagram-level state — sequence, dedup ring, reorder buffer, send-timestamp baseline, verifiability window, heartbeat baseline — per instance, and never per channel.
+
+Keying any less finely merges the two series, and the merge is loud in one direction and silent in the other. Loud: each alternation reads as backward motion (`FRAME.SEQ_RESET_GAP`, a `must`) or as a forward gap, which climbs `transport_loss_total` and latches the verifiability window — cleared only on a publisher reset — so every gated rule reports `unverifiable` for the process lifetime while `checks_total{result="pass"}` keeps advancing. Silent: one publisher's heartbeats cover the other's total outage, so `HEARTBEAT.CADENCE` never fires. `engine/channel_instance_test.go` pins both directions, on both axes (two sources on one channel, and two channels on one port).
+
+Three consequences worth stating:
+
+- **A source address that has not been seen before opens a new series, silently.** It is not a gap, not backward motion, and not a reset: no violation, no `transport_loss_total`, no tainted window. This matters because a publisher's address is not stable — a tunnel address is a lease that can be reassigned under a live host — and a reassignment must not page.
+- **Both inputs carry the source at the same fidelity.** Live capture takes it from the socket and pcap replay from the IP header, so an offline replay keys instances exactly as the live instance does. A capture whose link type carries no network layer yields the zero address, and every datagram in it then reads as one instance.
+- **The tracker map is bounded** at `maxChannelInstances` (`engine/engine.go`), evicting the least-recently-seen instance. The source address is part of the key and nothing authorises it — an any-source join accepts datagrams from any sender — so the key space is not ours to trust. The cap is far above any real deployment; anything still buffered for an evicted instance is counted as transport loss rather than dropped quietly, and if the instance returns it starts a fresh series.
 
 ## Coverage vs. silence
 
@@ -338,7 +350,7 @@ For a 24/7 deployment:
 - **Tame log volume.** Status-based levels keep the default (`WARN`) stderr stream to confirmed violations plus `Suspected` (oracle candidates) — the `Unverifiable` firehose is suppressed unless `-v` is passed; `--log-throttle` (default `1s`) bounds repeats. See [Structured log](#structured-log).
 - **Restarts reset deep verifiability, not structural checks.** Because a mid-stream join doesn't bootstrap a trusted book (see [Known limitations](#known-limitations)), every restart re-enters cold-start: the stateful referential/oracle checks stay `Unverifiable` until a fresh `Reset Count` era. **Tier-1 structural rules are restart-immune** — magic, schema, frame-length, message-count, enum/port placement fire on every frame regardless — so even a freshly (re)started or flapping instance still catches all structural non-conformance immediately; only the deep MBO/oracle coverage needs a stable, from-session-start process.
 
-Memory is bounded for indefinite operation: the per-`(era,seq)` dedup map is FIFO-evicted via a fixed `2×--reorder-window` ring (it does **not** grow with the sequence space), books/trackers are keyed by the live instrument set and pruned on manifest bumps / cleared on era resets, and metric cardinality is fixed — each finding series is keyed by `feed × rule_id` plus one small bounded enum (`severity`, `result`, or `reason`), never the free-form `detail`.
+Memory is bounded for indefinite operation: the per-`(era,seq)` dedup map is FIFO-evicted via a fixed `2×--reorder-window` ring (it does **not** grow with the sequence space), the per-instance tracker map is capped and evicts the least-recently-seen instance (see [Sequencing keys on the channel instance](#sequencing-keys-on-the-channel-instance)), books/trackers are keyed by the live instrument set and pruned on manifest bumps / cleared on era resets, and metric cardinality is fixed — each finding series is keyed by `feed × rule_id` plus one small bounded enum (`severity`, `result`, or `reason`), never the free-form `detail`.
 
 ## Demo monitoring stack
 
@@ -361,10 +373,12 @@ open http://127.0.0.1:3000  # admin / GF_ADMIN_PASSWORD
 
 ## Known limitations
 
-The tool is correct (no false `Violation`s) and complete for its primary use case: validating a **single channel** captured from the publisher's **session start**. Two boundaries are deliberately conservative — both fail toward `Unverifiable`, never toward a false violation:
+The tool is correct (no false `Violation`s) and complete for its primary use case: validating a feed captured from the publisher's **session start**. Two boundaries are deliberately conservative — both fail toward `Unverifiable`, never toward a false violation:
 
-- **Single channel per port.** Per-port sequencing/dedup/reorder state is keyed by port, not by `(port, channel_id)`. The edge-feed-spec allows sharding the instrument set across multiple channels; running a *multi-channel* capture where two channel IDs share one UDP port could mis-attribute sequence numbers across channels. Multi-channel support is future work; for a single channel the tool is exact.
+- **Deeper state is keyed by channel, not by instance.** Per-instrument sequencing, the reconstructed books, the snapshot groups and the reference-data state machine are keyed by `(channel_id, …)`, so two instances of one channel feed one set of them. Where a spec requires the full `(source, channel, …)` key (*Redundant Channel Instances*), this is a boundary and not conformance to it. It is conservative rather than wrong: the verifiability gate on those rules is the **OR** across the channel's instances, so any instance's loss downgrades them to `Unverifiable` instead of blaming the publisher for an anomaly the loss could explain. `HEARTBEAT.CADENCE` is the exception and gates per instance, because its baseline is per instance.
 - **Mid-stream join doesn't reconstruct a trusted book.** The referential-integrity and snapshot↔delta oracle checks only run once an instrument's delta book is *trusted*, which today requires observing its delta stream from `Per-Instrument Seq = 1` (i.e. from session start / `Reset Count` boundary). A cold-start or post-`InstrumentReset` recovery snapshot is currently used only to detect divergence, not to *bootstrap* the live book — so an instrument joined mid-stream stays `Unverifiable` for those checks until a fresh era. Capture the publisher from startup to exercise the full oracle. Bootstrapping a trusted book from a clean snapshot is a planned enhancement.
+
+One further gap is a **silence** rather than a conservative downgrade: `HEARTBEAT.CADENCE` measures an instance's cadence when that instance's *next* heartbeat arrives, so an arm that dies and stays dead is never reported — the outage a two-arm deployment is most likely to suffer. Nothing fabricates a violation, but nothing reports the outage either, while the surviving arm keeps `checks_total{result="pass"}` climbing. Closing it needs an end-of-observation sweep over the mktdata instances, and that sweep needs a clock of its own: the naive version — measure each instance's last heartbeat against the last wire timestamp seen — fires on any capture that simply ends mid-silence, reporting 5 s of silence on `nonconformant_mbp.pcap` where nothing died. So it is a follow-up with its own tests, not a rider on a keying change.
 
 Minor: the `dz_conformance_instruments_state` gauge is registered but not yet populated. This does not affect violation detection or the CI exit code.
 

@@ -211,15 +211,16 @@ func (e *Engine) ensureMBP() {
 }
 
 // mbpObserveEra feeds one accepted frame's Reset Count to the channel-wide reset
-// bookkeeping, and taints the snapshot port when a *different* port led the reset.
+// bookkeeping, and taints the channel's snapshot series when a *different* port
+// led the reset.
 //
 // That taint is what keeps the wipe's own consequences off the publisher's record:
 // the group the wipe just dropped may still have frames in flight on the snapshot
 // port, and without it each one is a false MBP.SNAP.GROUP_STRUCTURE orphan. The
-// snapshot port clears the flag when it advances its own era. Skipped when the
+// snapshot series clears the flag when it advances its own era. Skipped when the
 // snapshot port led the reset, since it has already advanced and its new-era groups
 // are clean (F4).
-func (e *Engine) mbpObserveEra(port core.Port, era uint8) {
+func (e *Engine) mbpObserveEra(port core.Port, ch uint8, era uint8) {
 	if e.cfg.Feed != core.FeedMBP {
 		return
 	}
@@ -227,9 +228,7 @@ func (e *Engine) mbpObserveEra(port core.Port, era uint8) {
 	if !e.mbp.onEraObserved(era) || port == core.PortSnapshot {
 		return
 	}
-	if snapPT, ok := e.ports[core.PortSnapshot]; ok {
-		snapPT.dirtyWindow = true
-	}
+	e.taintOn(core.PortSnapshot, ch)
 }
 
 // checkMBP validates the mktdata deltas in one frame.
@@ -407,11 +406,11 @@ func (e *Engine) checkMBPSeq(in *mbpInstr, k mbpInstrKey, got uint32, seq uint64
 // the tool. One lost snapshot datagram used to yield one MUST finding per
 // surviving level of the group it belonged to. `open` is nil for an orphan, where
 // there is no group flag to consult and the era-wide window is all there is.
-func (e *Engine) mbpGroupStatus(open *mbpOpenSnap) core.Status {
+func (e *Engine) mbpGroupStatus(ch uint8, open *mbpOpenSnap) core.Status {
 	if open != nil && open.dirty {
 		return core.Unverifiable
 	}
-	if !e.gateDetectorSnap() {
+	if !e.gateDetectorSnap(ch) {
 		return core.Unverifiable
 	}
 	return core.Violation
@@ -452,7 +451,7 @@ func (e *Engine) checkMBPSnapshot(f *wire.Frame, ch uint8, seq uint64) {
 			// frame for another. Gated, because a dropped SnapshotEnd produces exactly
 			// this shape from a conformant publisher.
 			if prev := e.mbp.open[ch]; prev != nil && prev.key != k {
-				st := e.mbpGroupStatus(prev)
+				st := e.mbpGroupStatus(ch, prev)
 				e.Emit("MBP.SNAP.GROUP_STRUCTURE", st, core.PortSnapshot, seq, ch, k.instrID,
 					fmt.Sprintf("SnapshotBegin for instrument %d while a group for %d is still open",
 						k.instrID, prev.key.instrID), mbpReason(st))
@@ -475,13 +474,13 @@ func (e *Engine) checkMBPSnapshot(f *wire.Frame, ch uint8, seq uint64) {
 			}
 			open := e.mbp.open[ch]
 			if open == nil {
-				st := e.mbpGroupStatus(nil)
+				st := e.mbpGroupStatus(ch, nil)
 				e.Emit("MBP.SNAP.GROUP_STRUCTURE", st, core.PortSnapshot, seq, ch, 0,
 					"SnapshotLevel with no open SnapshotBegin", mbpReason(st))
 				continue
 			}
 			if id := snapshotLevelSnapshotID(m); id != open.snapID {
-				st := e.mbpGroupStatus(open)
+				st := e.mbpGroupStatus(ch, open)
 				e.Emit("MBP.SNAP.GROUP_STRUCTURE", st, core.PortSnapshot, seq, ch, open.key.instrID,
 					fmt.Sprintf("SnapshotLevel Snapshot ID %d does not match the open group's %d", id, open.snapID),
 					mbpReason(st))
@@ -518,7 +517,7 @@ func (e *Engine) finishMBPSnapshot(m wire.Message, ch uint8, seq uint64) {
 	open := e.mbp.open[ch]
 	instrID := snapshotEndInstrumentID(m)
 	if open == nil {
-		st := e.mbpGroupStatus(nil)
+		st := e.mbpGroupStatus(ch, nil)
 		e.Emit("MBP.SNAP.GROUP_STRUCTURE", st, core.PortSnapshot, seq, ch, instrID,
 			"SnapshotEnd with no open SnapshotBegin", mbpReason(st))
 		return
@@ -534,7 +533,7 @@ func (e *Engine) finishMBPSnapshot(m wire.Message, ch uint8, seq uint64) {
 	// *next* group's End to be matched against this Begin — so each is gated. An
 	// over-count and a repeated key are not: loss removes messages, it never adds
 	// one.
-	gated := e.mbpGroupStatus(open)
+	gated := e.mbpGroupStatus(ch, open)
 	ok := true
 	if instrID != open.key.instrID {
 		e.Emit("MBP.SNAP.GROUP_STRUCTURE", gated, core.PortSnapshot, seq, ch, instrID,

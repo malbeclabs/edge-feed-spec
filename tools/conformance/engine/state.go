@@ -3,6 +3,7 @@ package engine
 import (
 	"container/heap"
 	"hash/maphash"
+	"net/netip"
 
 	"github.com/malbeclabs/edge-feed-spec/tools/conformance/core"
 	"github.com/malbeclabs/edge-feed-spec/tools/conformance/wire"
@@ -48,7 +49,7 @@ type intakeTuple struct {
 	structFindings []wire.StructFinding
 }
 
-// bufferItem wraps an intakeTuple for the per-port min-heap.
+// bufferItem wraps an intakeTuple for the per-series min-heap.
 type bufferItem struct {
 	era     uint8
 	seq     uint64
@@ -81,7 +82,19 @@ func (b *portBuffer) Pop() any {
 	return x
 }
 
-// portTracker holds per-port sequencing state.
+// instanceKey identifies one channel instance: "one path's view of one channel,
+// keyed (source IP address, Channel ID, destination port)" (GLOSSARY.md), which
+// is the unit that owns a sequence series and a Reset Count. Two publishers
+// serving one channel share a group and a port and are told apart by transport,
+// so the source address is part of the identity and not a detail — see
+// "Redundant Channel Instances" in market-by-price/spec.md.
+type instanceKey struct {
+	src  netip.Addr
+	port core.Port
+	ch   uint8
+}
+
+// portTracker holds the sequencing state of one channel instance on one port.
 type portTracker struct {
 	// lastSeq is nil until the first frame is classified (accepted).
 	lastSeq *uint64
@@ -107,7 +120,7 @@ type portTracker struct {
 	hashRingCap  int
 	hashRingPos  int
 	hashRingSize int // number of valid entries currently in the ring (≤ cap)
-	// buf is the bounded reorder buffer for this port.
+	// buf is the bounded reorder buffer for this series.
 	buf portBuffer
 	// arrivalCounter is incremented on each push and stored in bufferItem.arrival
 	// to provide stable heap ordering for equal-seq duplicates.
@@ -115,6 +128,15 @@ type portTracker struct {
 	// dirtyWindow is set when a gap was declared while the reorder window was
 	// non-empty (consumed by Task 18 gate.go).
 	dirtyWindow bool
+	// lastHbSendTS is the SendTS of this instance's most-recent Heartbeat, the
+	// baseline for HEARTBEAT.CADENCE. Per instance because each publisher
+	// heartbeats on its own schedule: one baseline for a port let one arm's
+	// heartbeats cover another arm's total outage. Deliberately not cleared on an
+	// era advance — the cadence expectation spans a publisher reset.
+	lastHbSendTS    uint64
+	lastHbSendTSSet bool
+	// lastSeen orders instances for eviction; see Engine.instanceTrack.
+	lastSeen uint64
 }
 
 // newPortTracker constructs a portTracker with a given reorder window.
@@ -255,7 +277,7 @@ type enqueueResult struct {
 	quarantine     bool          // true → drop as straggler, do not classify anything
 }
 
-// enqueue pushes an intake tuple into the per-port reorder buffer, honouring
+// enqueue pushes an intake tuple into this series' reorder buffer, honouring
 // era semantics. See enqueueResult for the call sequence the caller must follow.
 func (pt *portTracker) enqueue(
 	item intakeTuple,

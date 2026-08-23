@@ -94,7 +94,7 @@ func snapEntry(raw []byte, seq uint64) streamEntry {
 func feedMktdataSeq(e *Engine, raw []byte, seq uint64) {
 	f, sf := wire.Decode(raw, wire.MagicMBO)
 	f.Header.Sequence = seq
-	e.Process(f, core.PortMktData, sf)
+	e.Process(srcA, f, core.PortMktData, sf)
 }
 
 // --- TestSnapGroupWellFormed: a complete Begin→N×Order→End passes silently ---
@@ -666,7 +666,7 @@ func TestTransportCorruptionTaintsSnapPort(t *testing.T) {
 			t.Fatal("test setup: truncated frame must produce a Transport=true StructFinding")
 		}
 		f.Header.Sequence = 2
-		e.Process(f, core.PortSnapshot, sf)
+		e.Process(srcA, f, core.PortSnapshot, sf)
 	}
 	e.Flush()
 

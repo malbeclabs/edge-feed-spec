@@ -218,7 +218,7 @@ func Run(opts RunOpts) int {
 			break
 		}
 		frame, sf := wire.Decode(dg.Raw, magic)
-		eng.Process(frame, dg.Port, sf)
+		eng.Process(dg.Src, frame, dg.Port, sf)
 	}
 	close(done)
 	signal.Stop(sigs)

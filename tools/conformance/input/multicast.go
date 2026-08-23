@@ -143,7 +143,7 @@ func (ms *MulticastSource) readLoop(ctx context.Context, conn *net.UDPConn, port
 		default:
 		}
 
-		n, _, err := conn.ReadFromUDP(buf)
+		n, from, err := conn.ReadFromUDPAddrPort(buf)
 		if err != nil {
 			// If Close() has been called, treat any error as EOF.
 			select {
@@ -179,7 +179,9 @@ func (ms *MulticastSource) readLoop(ctx context.Context, conn *net.UDPConn, port
 		raw := make([]byte, n)
 		copy(raw, buf[:n])
 
-		dg := Datagram{Port: port, Raw: raw, RecvTS: time.Now()}
+		// Unmap so a v4 datagram received on a v4-mapped v6 socket keys the same
+		// instance as one received on a v4 socket.
+		dg := Datagram{Port: port, Src: from.Addr().Unmap(), Raw: raw, RecvTS: time.Now()}
 
 		// Select on done so a stalled consumer cannot prevent shutdown.
 		select {
