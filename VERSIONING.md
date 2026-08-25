@@ -87,6 +87,8 @@ Releases are tagged per spec:
 
 For example `top-of-book/v1.0.0`, `market-by-price/v1.0.0`, `sources/v1.2.0`. This matches the existing convention used by the conformance tool (`conformance/v0.1.0`).
 
+A versioned document that does not live in a directory of its own takes its own name as the prefix instead, lowercased. [`GLOSSARY.md`](./GLOSSARY.md) is the only one today and its tags are `glossary/v*`. Its `v1.0.0` and `v1.1.0` name commits made before it carried a version line, since its history was reconstructed when the line was added; the tag names the state of the vocabulary at that commit, not a version string present in the file.
+
 Because the tag's major and the wire byte are the same number by construction, a frame on the wire identifies the tag family that produced it. `Schema Version = 1` on a `0x4442` frame means the publisher implements some `market-by-price/v1.*` tag.
 
 A tag is cut when a spec's version line changes in `main`. Tags are annotated and never moved. If a release is wrong, cut a new `PATCH`; do not retag.
