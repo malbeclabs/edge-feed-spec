@@ -4,7 +4,7 @@ Canonical vocabulary for DoubleZero Edge market data.
 
 Use these words with these meanings in specs, docs, plans, comments, identifiers, CLI flags, config keys, metric names, and log fields. If a word you want is listed under [Banned](#banned-words), use the replacement.
 
-This document specifies version **1.2.0**: the terms defined below, the banned words, and their documented exceptions. See [Versioning](#versioning) for what a level means and what has changed.
+This document specifies version **1.3.0**: the terms defined below, the banned words, and their documented exceptions. See [Versioning](#versioning) for what a level means and what has changed.
 
 ## Precedence
 
@@ -15,7 +15,7 @@ This file is the authority. A definition here overrides any local one, wherever 
 | Term | Definition | Not |
 |---|---|---|
 | **Venue** | The external exchange or market operator (Hyperliquid, Kalshi, Phoenix). One venue may run several matching engines and therefore hold several Source IDs. | A matching engine, a publisher, a host, a product line |
-| **Matching engine** | One set of order-matching rules at a venue. Distinct microstructure means a distinct engine: Hyperliquid native perps, each HIP-3 builder DEX, HIP-4 prediction markets, Kalshi events, and Kalshi perps are five engines across two venues. | A venue, a channel, a feed |
+| **Matching engine** | One matching domain at a venue: a set of instruments whose resting orders can match against one another, under one set of order-matching rules. Two domains are distinct engines where their rules differ, and equally where they match independently over disjoint instrument sets under identical rules. Hyperliquid native perps, each HIP-3 builder DEX, HIP-4 prediction markets, Kalshi events, and Kalshi perps are five engines across two venues. | A venue, a channel, a feed |
 | **Source ID** | The `u16` wire field naming the matching engine whose activity a message describes, assigned by the Source ID Registry. Present on every price and event message, and on `InstrumentDefinition` as of Schema Version 3. | A venue, a channel, a publisher instance, a host, a transport, a timestamp |
 | **Source ID Registry** | The assignment table in `sources/spec.md`. Sole authority. | Any copy of it |
 | **Registry mirror** | Any copy of the Source ID Registry outside `sources/spec.md` — a hardcoded table, or a config artifact a service loads at runtime. Derived, never authoritative. | The registry |
@@ -25,7 +25,9 @@ This file is the authority. A definition here overrides any local one, wherever 
 
 Use `venue` for the external exchange. `exchange` is a synonym; prefer `venue`.
 
-**A Source ID identifies a matching engine, not a venue.** Split the ID wherever the microstructure or the logic governing how orders match differs, because that is the boundary a subscriber has to reason about: a venue name tells it nothing about how a book behaves. One venue therefore holds as many Source IDs as it runs engines, and a new engine at a known venue is a new ID rather than a reuse of the venue's existing one. Registry IDs are stable and never renumbered, so this only ever adds: an ID already assigned keeps meaning whichever engine has been publishing under it. Venues split their own engines on their own schedule, so treat the set as open and track it against each venue's roadmap rather than assuming today's list is final.
+**A Source ID identifies a matching engine, not a venue.** Split the ID wherever the microstructure or the logic governing how orders match differs, because that is the boundary a subscriber has to reason about: a venue name tells it nothing about how a book behaves. Split it equally where two instrument sets match independently of each other under the same rules, because identical rules running over disjoint books are still two books: each opens, halts and resets on its own schedule, its interface is versioned on its own schedule, and a subscriber holding a message from one learns nothing about the state of the other. One venue therefore holds as many Source IDs as it runs engines, and a new engine at a known venue is a new ID rather than a reuse of the venue's existing one. Registry IDs are stable and never renumbered, so this only ever adds: an ID already assigned keeps meaning whichever engine has been publishing under it. Venues split their own engines on their own schedule, so treat the set as open and track it against each venue's roadmap rather than assuming today's list is final.
+
+**Independent matching is not the same as sharding.** A venue that spreads one instrument set across several processes for capacity, and can move an instrument between them, runs one engine published over several **channels**: the partition is a deployment detail and `Channel ID` already carries it. It is a second engine where the venue itself treats the boundary as durable, publishing the two as separate platforms with their own interface versions, trading calendars and session lifecycles, and no instrument crossing between them. Registry IDs are never renumbered, so read the venue's own treatment of the boundary rather than the current shape of its deployment.
 
 **Venues are sometimes carried under a codename before they launch.** The Source ID Registry is public, so a venue that has not yet announced its DoubleZero feed may appear under a placeholder name there, in multicast group codes, and in operator-facing config. Retire the codename once the venue is public, registry first. Retirement is a sequenced change rather than a search-and-replace: until the DoubleZero ledger re-registers the groups, code paths that resolve ledger strings MUST keep accepting the old name on input, and a `code` that stops matching its live group fails silently rather than loudly.
 
@@ -129,6 +131,8 @@ This glossary is versioned so that a spec, a repository, or a conformance pass c
 A `MAJOR` release is the expensive one, because prose, identifiers, and config keys across several repositories were written against the older ruling and each has to be revisited. Prefer recording an exception over redefining a term.
 
 ### Changes
+
+**1.3.0** — widened **Matching engine**. The `1.2.0` test was one set of order-matching rules, under which two platforms at one venue running identical rules over disjoint instrument sets read as a single engine; they are now two. Added the guard separating that case from a capacity shard, which is a channel rather than an engine. Classified `MINOR` rather than `MAJOR` because the widening only ever splits further: every engine identified under `1.2.0` is still an engine, no Source ID Registry assignment changes, and no conforming text becomes wrong.
 
 **1.2.0** — defined the **DoubleZero Edge family** and repointed the `sibling feed` ban at it, having established that plain `feed` loses the Type ID constraint the banned phrase carries. Widened that row to `sibling spec` and `sibling protocol`, which are the same concept in different spellings, and stated that bare `sibling` keeps its ordinary meaning. No pass had applied the `1.0.0` replacement, so nothing conforming to an earlier version becomes wrong.
 
