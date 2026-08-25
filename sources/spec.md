@@ -2,7 +2,7 @@
 
 This supplement is the canonical registry of `Source ID` values carried in the `u16` Source ID field of DoubleZero Edge feed messages.
 
-A Source ID identifies the **matching engine** whose activity the message describes, as [GLOSSARY.md](../GLOSSARY.md) defines it. Every price message, every event message, and every `InstrumentDefinition` carries exactly one Source ID. IDs assigned here are stable: once allocated, an ID MUST NOT be reused for a different matching engine.
+A Source ID identifies the **matching engine** whose activity the message describes, as [GLOSSARY.md](../GLOSSARY.md) defines it. Every price message and every event message carries exactly one Source ID, as does every `InstrumentDefinition` from Schema Version 3 onward. The [midpoint feed](../midpoint/spec.md)'s 64-byte `InstrumentDefinition` variant predates the field and does not carry it; that feed is still at Schema Version 1. IDs assigned here are stable: once allocated, an ID MUST NOT be reused for a different matching engine.
 
 **A Source ID names a matching engine, not a venue.** One venue may run several matching engines and therefore hold several Source IDs: distinct microstructure, meaning a distinct set of order-matching rules, means a distinct engine and a distinct ID. A new engine at an already-registered venue is a new ID rather than a reuse of that venue's existing one. Because IDs are never renumbered, this only ever adds, and an ID already assigned keeps meaning whichever engine has been publishing under it. Venues split their own engines on their own schedule, so treat the set as open rather than assuming the current table is final.
 
@@ -23,7 +23,7 @@ This document specifies version **1.1.0**: the reserved ranges, the current assi
 |----|------|------|-------|------|-------|
 | `1` | Hyperliquid | `HYPERLIQUID` | Hyperliquid | Perpetual DEX | |
 | `2` | Phoenix | `PHOENIX` | Phoenix | Perpetual DEX | |
-| `3` | Kalshi | `KALSHI` | Kalshi | Perpetual DEX, Prediction Market | Registered under the codename `Lashay` until the venue launched. Carries two matching engines and is due to split; see below. |
+| `3` | Kalshi | `KALSHI` | Kalshi | Perpetual Futures, Prediction Market | Registered under the codename `Lashay` until the venue launched. Carries two matching engines and is due to split; see below. |
 
 `Code` is the machine-readable short name: the uppercase full name, never an abbreviation. Downstream systems already carry these values as stable keys for the engine, in metric label values and in composed product identifiers among others, so this column documents what exists rather than introducing anything new. This registry is the authority for it; any table of these values held elsewhere is a [registry mirror](../GLOSSARY.md) and is derived, never authoritative.
 
