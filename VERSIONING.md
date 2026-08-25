@@ -40,6 +40,7 @@ The current state of every feed:
 | [Perp Stats](./perp-stats/spec.md) | `0x4450` | `3` | 3.0.1 |
 | [Reference Data Distribution](./reference-data/spec.md) | *(host feed's)* | *(host feed's)* | 1.0.2 |
 | [Source ID Registry](./sources/spec.md) | *(none)* | *(none)* | 1.0.1 |
+| [Glossary](./GLOSSARY.md) | *(none)* | *(none)* | 1.2.0 |
 
 Midpoint sits at `1` while its siblings are at `3` because it was deliberately left on its 64-byte `InstrumentDefinition` variant when the shared layout changed at both `2.0.0` and `3.0.0`. This is the scheme working as intended: the specs are siblings, not a single versioned family, and a decoder reads each feed's byte to know which layout it is holding.
 
@@ -86,6 +87,8 @@ Releases are tagged per spec:
 
 For example `top-of-book/v1.0.0`, `market-by-price/v1.0.0`, `sources/v1.2.0`. This matches the existing convention used by the conformance tool (`conformance/v0.1.0`).
 
+A versioned document that does not live in a directory of its own takes its own name as the prefix instead, lowercased. [`GLOSSARY.md`](./GLOSSARY.md) is the only one today and its tags are `glossary/v*`. Its `v1.0.0` and `v1.1.0` name commits made before it carried a version line, since its history was reconstructed when the line was added; the tag names the state of the vocabulary at that commit, not a version string present in the file.
+
 Because the tag's major and the wire byte are the same number by construction, a frame on the wire identifies the tag family that produced it. `Schema Version = 1` on a `0x4442` frame means the publisher implements some `market-by-price/v1.*` tag.
 
 A tag is cut when a spec's version line changes in `main`. Tags are annotated and never moved. If a release is wrong, cut a new `PATCH`; do not retag.
@@ -94,12 +97,13 @@ The conformance tool in [`tools/conformance`](./tools/conformance) is software, 
 
 ---
 
-## Supplements
+## Supplements and the glossary
 
-Two documents here are supplements rather than feeds:
+Three documents here are not feed specs:
 
 - **[Reference Data Distribution](./reference-data/spec.md)** defines a mechanism that rides on a host feed's frame header. It has no `Magic` and no `Schema Version` of its own; frames carrying it are versioned by the host feed. It is versioned independently because a publisher and subscriber operating under the same version of the supplement interoperate regardless of which feed specs they implement.
 - **[Source ID Registry](./sources/spec.md)** is a registry with no wire format. Its version tracks the assignment set. Assigning a new Source ID is an additive change and therefore a `MINOR` bump. Because assigned IDs are stable and MUST NOT be renumbered, reordered, removed, or reused, the registry has no mechanism by which a `MAJOR` bump could arise.
+- **[Glossary](./GLOSSARY.md)** is the canonical vocabulary and has no wire format. Its version tracks the vocabulary, so that a spec or a repository can name the ruling it was written against. Defining a term, banning a word, or recording an exception is additive and therefore `MINOR`; redefining a term that conforming text already follows is `MAJOR`, because prose and identifiers in several repositories have to be revisited. Its own *Versioning* section states the rule.
 
 ---
 
