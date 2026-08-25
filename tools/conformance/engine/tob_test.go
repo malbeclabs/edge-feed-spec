@@ -91,14 +91,14 @@ func reachedReadyTOB(e *Engine, ch uint8, instrID uint32, startSeq uint64) uint6
 		Bytes()
 	f, sf := wire.Decode(raw, wire.MagicTOB)
 	f.Header.Sequence = seq
-	e.Process(f, core.PortRefData, sf)
+	e.Process(srcA, f, core.PortRefData, sf)
 	seq++
 
 	// InstrumentDefinition: instrID at manifestSeq=1.
 	rawDef := buildInstrDefFrameWithTS(1_000_000_000, instrID, 1, ch)
 	fDef, sfDef := wire.Decode(rawDef, wire.MagicTOB)
 	fDef.Header.Sequence = seq
-	e.Process(fDef, core.PortRefData, sfDef)
+	e.Process(srcA, fDef, core.PortRefData, sfDef)
 	seq++
 
 	// Second ManifestSummary to close the cycle and confirm ready state.
@@ -108,7 +108,7 @@ func reachedReadyTOB(e *Engine, ch uint8, instrID uint32, startSeq uint64) uint6
 		Bytes()
 	f2, sf2 := wire.Decode(raw2, wire.MagicTOB)
 	f2.Header.Sequence = seq
-	e.Process(f2, core.PortRefData, sf2)
+	e.Process(srcA, f2, core.PortRefData, sf2)
 	seq++
 
 	return seq
@@ -127,7 +127,7 @@ func TestTOBRefdataKnownBeforeReady(t *testing.T) {
 	raw := buildQuoteFrame(wire.MagicTOB, ch, instrID)
 	f, sf := wire.Decode(raw, wire.MagicTOB)
 	f.Header.Sequence = 1
-	e.Process(f, core.PortMktData, sf)
+	e.Process(srcA, f, core.PortMktData, sf)
 	e.Flush()
 
 	for _, fn := range findingsFor(ac, "TOB.QUOTE.REFDATA_KNOWN") {
@@ -154,7 +154,7 @@ func TestTOBRefdataKnownAfterReadyKnownInstrument(t *testing.T) {
 	raw := buildQuoteFrame(wire.MagicTOB, ch, instrID)
 	f, sf := wire.Decode(raw, wire.MagicTOB)
 	f.Header.Sequence = 1
-	e.Process(f, core.PortMktData, sf)
+	e.Process(srcA, f, core.PortMktData, sf)
 	e.Flush()
 
 	for _, fn := range findingsFor(ac, "TOB.QUOTE.REFDATA_KNOWN") {
@@ -181,7 +181,7 @@ func TestTOBRefdataKnownAfterReadyUnknownInstrument(t *testing.T) {
 	raw := buildQuoteFrame(wire.MagicTOB, ch, unknownInstr)
 	f, sf := wire.Decode(raw, wire.MagicTOB)
 	f.Header.Sequence = 1
-	e.Process(f, core.PortMktData, sf)
+	e.Process(srcA, f, core.PortMktData, sf)
 	e.Flush()
 
 	if !hasViolation(ac, "TOB.QUOTE.REFDATA_KNOWN") {
@@ -203,7 +203,7 @@ func TestTOBRefdataKnownTradeUnknownInstrument(t *testing.T) {
 	raw := buildTradeFrame(wire.MagicTOB, ch, unknownInstr)
 	f, sf := wire.Decode(raw, wire.MagicTOB)
 	f.Header.Sequence = 1
-	e.Process(f, core.PortMktData, sf)
+	e.Process(srcA, f, core.PortMktData, sf)
 	e.Flush()
 
 	if !hasViolation(ac, "TOB.QUOTE.REFDATA_KNOWN") {
@@ -223,7 +223,7 @@ func TestTOBRefdataKnownTradeKnownInstrument(t *testing.T) {
 	raw := buildTradeFrame(wire.MagicTOB, ch, instrID)
 	f, sf := wire.Decode(raw, wire.MagicTOB)
 	f.Header.Sequence = 1
-	e.Process(f, core.PortMktData, sf)
+	e.Process(srcA, f, core.PortMktData, sf)
 	e.Flush()
 
 	for _, fn := range findingsFor(ac, "TOB.QUOTE.REFDATA_KNOWN") {
@@ -248,7 +248,7 @@ func TestTOBRefdataKnownNoTier1Duplication(t *testing.T) {
 	raw := buildQuoteFrame(wire.MagicTOB, ch, instrID)
 	f, sf := wire.Decode(raw, wire.MagicTOB)
 	f.Header.Sequence = 1
-	e.Process(f, core.PortMktData, sf)
+	e.Process(srcA, f, core.PortMktData, sf)
 	e.Flush()
 
 	// Tier-1 structural rules must appear at most once per message.

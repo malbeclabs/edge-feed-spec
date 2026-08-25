@@ -124,7 +124,8 @@ func reportStarvedRules(rep report.Reporter, opts RunOpts) {
 	}
 }
 
-// Run wires the full pipeline and returns an OS exit code (0 = pass, 1 = violation).
+// Run wires the full pipeline and returns an OS exit code (0 = pass, 1 = violation,
+// 2 = the run errored; see the read-error note on report.Meta).
 func Run(opts RunOpts) int {
 	magic := magicFor(opts.Cfg.Feed)
 
@@ -141,7 +142,7 @@ func Run(opts RunOpts) int {
 	var promReporter *report.Prom
 	if opts.MetricsAddr != "" {
 		reg := prometheus.NewRegistry()
-		promReporter = report.NewProm(reg, version, commit, opts.Cfg.Feed)
+		promReporter = report.NewProm(reg, opts.Version, opts.Commit, opts.Cfg.Feed)
 		rep = report.Multi{agg, logSink, promReporter}
 
 		// Bind the metrics listener synchronously and fail fast. The metrics
@@ -217,7 +218,7 @@ func Run(opts RunOpts) int {
 			break
 		}
 		frame, sf := wire.Decode(dg.Raw, magic)
-		eng.Process(frame, dg.Port, sf)
+		eng.Process(dg.Src, frame, dg.Port, sf)
 	}
 	close(done)
 	signal.Stop(sigs)
@@ -229,7 +230,8 @@ func Run(opts RunOpts) int {
 	// --- JSON report ---
 	var reportErr error
 	if opts.JSONReport != "" {
-		if err := report.JSONReport(agg, opts.JSONReport); err != nil {
+		meta := report.Meta{Version: opts.Version, Commit: opts.Commit, Strict: opts.Cfg.Strict, ReadErr: readErr}
+		if err := report.JSONReport(agg, opts.JSONReport, meta); err != nil {
 			fmt.Fprintf(os.Stderr, "dz-conformance: json report: %v\n", err)
 			reportErr = err
 		}

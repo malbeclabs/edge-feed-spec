@@ -16,6 +16,7 @@ package main
 
 import (
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"testing"
@@ -31,6 +32,10 @@ import (
 	"github.com/malbeclabs/edge-feed-spec/tools/conformance/wire"
 	wb "github.com/malbeclabs/edge-feed-spec/tools/conformance/wire/wirebuild"
 )
+
+// testSrc is the source address the golden captures are written with. Every
+// golden replay speaks for one channel instance.
+var testSrc = netip.MustParseAddr("10.0.0.1")
 
 // golden UDP port constants — arbitrary, must not collide with run_test.go.
 const (
@@ -504,7 +509,7 @@ func runGoldenCapture(t *testing.T, feed core.Feed, magic uint16, entries []gold
 			continue
 		}
 		f, sf := wire.Decode(e.payload, magic)
-		eng.Process(f, port, sf)
+		eng.Process(testSrc, f, port, sf)
 	}
 	eng.Flush()
 	eng.EndRun()

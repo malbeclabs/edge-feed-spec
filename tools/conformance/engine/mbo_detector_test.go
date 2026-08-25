@@ -60,7 +60,7 @@ func runStream(e *Engine, entries []streamEntry) {
 		if en.seq != 0 {
 			f.Header.Sequence = en.seq
 		}
-		e.Process(f, en.port, sf)
+		e.Process(srcA, f, en.port, sf)
 	}
 	e.Flush()
 }
@@ -311,12 +311,12 @@ func TestFrameMktdataSeqStart(t *testing.T) {
 		// Era 0: frame seq=1.
 		raw0 := buildResetCountFrame(ch, 0, 1)
 		f0, sf0 := wire.Decode(raw0, wire.MagicMBO)
-		e.Process(f0, core.PortMktData, sf0)
+		e.Process(srcA, f0, core.PortMktData, sf0)
 
 		// Era 1: new reset count=1, seq=0 (conformant restart).
 		raw1 := buildResetCountFrame(ch, 1, 0)
 		f1, sf1 := wire.Decode(raw1, wire.MagicMBO)
-		e.Process(f1, core.PortMktData, sf1)
+		e.Process(srcA, f1, core.PortMktData, sf1)
 		e.Flush()
 
 		for _, fn := range findingsFor(ac, "FRAME.MKTDATA_SEQ_START") {
@@ -331,12 +331,12 @@ func TestFrameMktdataSeqStart(t *testing.T) {
 		// Era 0: frame seq=5.
 		raw0 := buildResetCountFrame(ch, 0, 5)
 		f0, sf0 := wire.Decode(raw0, wire.MagicMBO)
-		e.Process(f0, core.PortMktData, sf0)
+		e.Process(srcA, f0, core.PortMktData, sf0)
 
 		// Era 1: new reset count=1, seq=10 (NOT restarting at 0 — violation).
 		raw1 := buildResetCountFrame(ch, 1, 10)
 		f1, sf1 := wire.Decode(raw1, wire.MagicMBO)
-		e.Process(f1, core.PortMktData, sf1)
+		e.Process(srcA, f1, core.PortMktData, sf1)
 		e.Flush()
 
 		if !hasViolation(ac, "FRAME.MKTDATA_SEQ_START") {
@@ -456,7 +456,7 @@ func TestSnapAnchorMonotonicPerInstrument(t *testing.T) {
 		e, ac := newMBOEngineW1()
 		// Feed mktdata up to seq 10 first, then two snapshots with anchor 3 and 5.
 		for i := uint64(1); i <= 10; i++ {
-			e.Process(func() *wire.Frame {
+			e.Process(srcA, func() *wire.Frame {
 				f, _ := wire.Decode(buildOrderAddFrame(ch, instrID, uint32(i)), wire.MagicMBO)
 				f.Header.Sequence = i
 				return f
@@ -487,7 +487,7 @@ func TestSnapAnchorMonotonicPerInstrument(t *testing.T) {
 		e, ac := newMBOEngineW1()
 		// Feed mktdata up to seq 10.
 		for i := uint64(1); i <= 10; i++ {
-			e.Process(func() *wire.Frame {
+			e.Process(srcA, func() *wire.Frame {
 				f, _ := wire.Decode(buildOrderAddFrame(ch, instrID, uint32(i)), wire.MagicMBO)
 				f.Header.Sequence = i
 				return f
@@ -509,7 +509,7 @@ func TestSnapAnchorMonotonicPerInstrument(t *testing.T) {
 		e, ac := newMBOEngineW1()
 		// Feed mktdata first.
 		for i := uint64(1); i <= 10; i++ {
-			e.Process(func() *wire.Frame {
+			e.Process(srcA, func() *wire.Frame {
 				f, _ := wire.Decode(buildOrderAddFrame(ch, instrID, uint32(i)), wire.MagicMBO)
 				f.Header.Sequence = i
 				return f

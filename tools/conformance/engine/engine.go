@@ -2,6 +2,8 @@ package engine
 
 import (
 	"fmt"
+	"net/netip"
+	"slices"
 	"time"
 
 	"github.com/malbeclabs/edge-feed-spec/tools/conformance/core"
@@ -25,15 +27,17 @@ type Engine struct {
 	rep              report.Reporter
 	curUnknownSchema bool
 	now              func() time.Time
-	// per-port reorder buffers and seq trackers (keyed by core.Port).
-	ports map[core.Port]*portTracker
+	// reorder buffers and seq trackers, one per channel instance — per (source
+	// address, port, channel). Sequencing keys on the instance and never on the
+	// channel (GLOSSARY.md): two publishers may serve one channel on one group and
+	// one port, each advancing its own sequence space, and merging their series
+	// reads as continuous loss on every alternation.
+	ports map[instanceKey]*portTracker
+	// seenCounter stamps trackers for eviction order; see instanceTrack.
+	seenCounter uint64
 	// refdata holds the reference-data set-state machine (Task 14 + 15).
 	// Lazily initialized on the first PortRefData frame.
 	refdata *refdataState
-	// lastHbSendTS is the SendTS of the most-recent Heartbeat message seen on
-	// PortMktData. Used for HEARTBEAT.CADENCE (Task 15).
-	lastHbSendTS    uint64
-	lastHbSendTSSet bool
 	// mbo holds per-instrument MBO sequencing state (Task 18+).
 	// Lazily initialized on the first MBO mktdata frame.
 	mbo *mboState
@@ -50,7 +54,7 @@ func New(cfg Config, rep report.Reporter) *Engine {
 		cfg:   cfg,
 		rep:   rep,
 		now:   time.Now,
-		ports: make(map[core.Port]*portTracker),
+		ports: make(map[instanceKey]*portTracker),
 	}
 }
 
@@ -125,42 +129,172 @@ func (e *Engine) Emit(ruleID string, st core.Status, port core.Port, seq uint64,
 		Port: port, Seq: seq, ChannelID: ch, InstrumentID: inst, Detail: detail, Reason: rsn, At: e.now()})
 }
 
-// portTrack returns (or lazily creates) the portTracker for the given port.
-func (e *Engine) portTrack(port core.Port) *portTracker {
-	pt, ok := e.ports[port]
+// maxChannelInstances bounds the tracker map. The source address is part of the
+// key and is not under our control: an any-source join accepts datagrams from
+// any sender, and a publisher's address is a tunnel lease that gets reassigned
+// under a live host. The cap is far above any real deployment (two arms × three
+// ports × the 256 channels a u8 allows is 1,536) so only a pathological sender
+// reaches it.
+//
+// Reaching it is not free. dirtyOn scans the map and gateDetector consults it
+// several times per message, so a sender that fills the map makes every message
+// pay a handful of 4,096-entry scans and every new instance one eviction scan:
+// throughput degrades linearly with the flood, while no result changes. A dirty
+// count keyed (port, channel) would keep the scans flat and is deliberately not
+// here — it denormalises the one flag whose bookkeeping both false-Must bugs above
+// came from, and a stale count is either a stuck gate (everything Unverifiable) or
+// a cleared one (a Must the publisher never earned). Worth building when a real
+// deployment approaches the cap, with the count as the state itself rather than a
+// cache of it.
+const maxChannelInstances = 4096
+
+// instanceTrack returns (or lazily creates) the tracker for one channel instance.
+//
+// A first datagram from an unseen source opens a fresh series: no last sequence,
+// no era, a clean window. That is the point — an address change (a reassigned
+// lease, a redeployed publisher) must read as a new instance and stay silent,
+// never as a gap or a backward jump in the old one.
+func (e *Engine) instanceTrack(src netip.Addr, port core.Port, ch uint8) *portTracker {
+	key := instanceKey{src: src, port: port, ch: ch}
+	pt, ok := e.ports[key]
 	if !ok {
+		if len(e.ports) >= maxChannelInstances {
+			e.evictOldestInstance()
+		}
 		pt = newPortTracker(e.cfg.ReorderWindow)
-		e.ports[port] = pt
+		e.ports[key] = pt
 	}
+	e.seenCounter++
+	pt.lastSeen = e.seenCounter
 	return pt
 }
 
-// mktdataPending reports whether the mktdata port's reorder buffer still holds
-// unclassified frames. Cross-port snapshot checks that compare a snapshot against
+// evictOldestInstance drops the least-recently-seen instance to keep the map at
+// its cap. Anything still buffered for it is accounted as transport loss rather
+// than dropped quietly, the same as a quarantined straggler: it was received and
+// never judged. If the instance returns it starts a fresh series, silently.
+func (e *Engine) evictOldestInstance() {
+	var oldest instanceKey
+	var oldestPT *portTracker
+	for k, pt := range e.ports {
+		if oldestPT == nil || pt.lastSeen < oldestPT.lastSeen {
+			oldest, oldestPT = k, pt
+		}
+	}
+	if oldestPT == nil {
+		return
+	}
+	for range oldestPT.drainAll() {
+		e.rep.TransportLoss(oldest.port)
+	}
+	delete(e.ports, oldest)
+}
+
+// instancesOn lists the instances observed on a port, ordered by channel then
+// source, so the callers that iterate a whole port do so deterministically (F3).
+func (e *Engine) instancesOn(port core.Port) []instanceKey {
+	var keys []instanceKey
+	for k := range e.ports {
+		if k.port == port {
+			keys = append(keys, k)
+		}
+	}
+	slices.SortFunc(keys, func(a, b instanceKey) int {
+		if a.ch != b.ch {
+			return int(a.ch) - int(b.ch)
+		}
+		return a.src.Compare(b.src)
+	})
+	return keys
+}
+
+// dirtyOn reports whether any instance of this (port, channel) has a tainted
+// verifiability window.
+//
+// The OR across instances is deliberate and is the counterpart of what this
+// change does NOT rescope: per-instrument, book and reference-data state stay
+// keyed by channel, so the state a gated rule judges is fed by every instance of
+// that channel and any one of them losing datagrams can explain an anomaly in it.
+// Gating per instance there would report a Violation the loss could account for.
+// HEARTBEAT.CADENCE is the exception and gates on its own instance's window,
+// because its baseline is per instance too.
+func (e *Engine) dirtyOn(port core.Port, ch uint8) bool {
+	for k, pt := range e.ports {
+		if k.port == port && k.ch == ch && pt.dirtyWindow {
+			return true
+		}
+	}
+	return false
+}
+
+// taintOn marks every instance of one channel on one port unverifiable for the
+// rest of its era. It is the write counterpart of dirtyOn and has to match it:
+// every reader ORs across the channel's instances, so a taint written under one
+// exact source address is a taint no reader is looking for when the channel's
+// series sits under another one — and nothing about a channel keeps its ports on
+// one address. The lease this keying exists for is enough on its own: the mktdata
+// series moves to a reassigned address while the lower-rate snapshot series is
+// still keyed under the old one (F2).
+func (e *Engine) taintOn(port core.Port, ch uint8) {
+	for k, pt := range e.ports {
+		if k.port == port && k.ch == ch {
+			pt.dirtyWindow = true
+		}
+	}
+}
+
+// taintPortWide marks every instance on a port unverifiable for the rest of its
+// era. It is what a transport finding calls for, because a transport finding is
+// the one case where the channel the datagram belonged to is unknowable:
+// wire.Decode returns an all-zero header for a datagram shorter than the frame
+// header (wire/decode.go), so the frame carrying the finding names channel 0 and
+// in truth names no channel at all. Tainting that frame's own instance writes the
+// taint on a phantom instance while dirtyOn — which ORs across the real channel —
+// stays clean, and the truncated snapshot that dropped trailing SnapshotOrders is
+// then graded as a publisher Violation on two Must rules (F1).
+//
+// Port-wide is what the one-tracker-per-port state did before frame state was
+// keyed per instance, and it is the safe direction: the cost of tainting an
+// instance the corruption did not touch is a rule that grades Unverifiable
+// instead of pass, never a violation the publisher did not commit.
+func (e *Engine) taintPortWide(port core.Port) {
+	for k, pt := range e.ports {
+		if k.port == port {
+			pt.dirtyWindow = true
+		}
+	}
+}
+
+// mktdataPending reports whether any mktdata reorder buffer on this channel still
+// holds unclassified frames. Cross-port snapshot checks that compare a snapshot against
 // mktdata-derived state (SNAP.ANCHOR_IS_MKTDATA_SEQ, SNAP.LAST_INSTRUMENT_SEQ_
 // CONSISTENT_WITH_DELTAS) must downgrade to Unverifiable when this is true, even
 // on a gapless channel: a still-buffered mktdata frame could carry the anchor seq
 // or the deltas up to K, so the current mktdata state is not yet as-of-anchor (F3).
-func (e *Engine) mktdataPending() bool {
-	pt, ok := e.ports[core.PortMktData]
-	return ok && pt.buf.Len() > 0
+func (e *Engine) mktdataPending(ch uint8) bool {
+	for k, pt := range e.ports {
+		if k.port == core.PortMktData && k.ch == ch && pt.buf.Len() > 0 {
+			return true
+		}
+	}
+	return false
 }
 
-// snapPortDirty reports whether the snapshot port's verifiability window is
+// snapPortDirty reports whether the channel's snapshot verifiability window is
 // tainted (a snapshot-seq gap or transport corruption occurred this era). Used
 // by the SNAP.TOTAL_ORDERS_COUNT_MATCH under-count gate so a truncated snapshot
 // frame — whose header may not decode a channel — still downgrades the
 // under-count to Unverifiable rather than a false publisher Violation (F2).
-func (e *Engine) snapPortDirty() bool {
-	pt, ok := e.ports[core.PortSnapshot]
-	return ok && pt.dirtyWindow
+func (e *Engine) snapPortDirty(ch uint8) bool {
+	return e.dirtyOn(core.PortSnapshot, ch)
 }
 
 // Process is called once per decoded frame. It enqueues the intake tuple into
-// the per-port reorder buffer. Classification (structural findings + tier1 +
-// seq detector rules) runs when items are popped from the buffer in seq order.
-func (e *Engine) Process(f *wire.Frame, port core.Port, sf []wire.StructFinding) {
-	pt := e.portTrack(port)
+// the reorder buffer of its (port, channel) series. Classification (structural
+// findings + tier1 + seq detector rules) runs when items are popped from the
+// buffer in seq order.
+func (e *Engine) Process(src netip.Addr, f *wire.Frame, port core.Port, sf []wire.StructFinding) {
+	pt := e.instanceTrack(src, port, f.Header.ChannelID)
 	tuple := intakeTuple{frame: f, port: port, structFindings: sf}
 
 	res := pt.enqueue(tuple, e.cfg.ReorderWindow)
@@ -202,9 +336,7 @@ func (e *Engine) Process(f *wire.Frame, port core.Port, sf []wire.StructFinding)
 			// already advanced its own era, so the `port != PortSnapshot` guard avoids
 			// re-tainting it (which would wrongly mark its clean new-era groups). (F4)
 			if wiped && port != core.PortSnapshot {
-				if snapPT, ok := e.ports[core.PortSnapshot]; ok {
-					snapPT.dirtyWindow = true
-				}
+				e.taintOn(core.PortSnapshot, f.Header.ChannelID)
 			}
 			// FRAME.MKTDATA_SEQ_START: on a Reset Count change, the mktdata-port
 			// Sequence Number must restart at 0 (this is a mktdata-port rule only).
@@ -268,8 +400,8 @@ func (e *Engine) classify(item *bufferItem, pt *portTracker) {
 	e.beginFrame(f.Header.SchemaVersion)
 
 	// Channel-wide reset bookkeeping for MBP, driven by every accepted frame on any
-	// port rather than by the per-port era advance in Process.
-	e.mbpObserveEra(port, item.era)
+	// port rather than by the per-series era advance in Process.
+	e.mbpObserveEra(port, f.Header.ChannelID, item.era)
 
 	// FRAME.SEQ_RESET_GAP: backward seq motion without a reset-count change is
 	// a publisher violation. A plain forward gap is transport loss (not a violation).
@@ -308,7 +440,11 @@ func (e *Engine) classify(item *bufferItem, pt *portTracker) {
 			// (e.g. order counts) may be untrustworthy, so the snapshot port is
 			// treated the same as a gap — dirtyWindow = true prevents false-positive
 			// Violations from snapshot under-count and related rules.
-			pt.dirtyWindow = true
+			//
+			// Port-wide and not this instance: a truncated datagram has no
+			// trustworthy Channel ID, so the instance it was keyed under may not
+			// exist on the wire at all. See taintPortWide (F1).
+			e.taintPortWide(port)
 			// The SNAP.TOTAL_ORDERS_COUNT_MATCH under-count check gates on the
 			// in-flight group's own dirty flag, not the port flag, so also taint the
 			// currently-open snapshot group for this channel (if any). A truncated
@@ -374,8 +510,8 @@ func (e *Engine) checkHeartbeatCadence(f *wire.Frame, port core.Port, pt *portTr
 		}
 		sendTS := f.Header.SendTS
 		ch := f.Header.ChannelID
-		if e.lastHbSendTSSet && sendTS >= e.lastHbSendTS {
-			gap := time.Duration(sendTS-e.lastHbSendTS) * time.Nanosecond
+		if pt.lastHbSendTSSet && sendTS >= pt.lastHbSendTS {
+			gap := time.Duration(sendTS-pt.lastHbSendTS) * time.Nanosecond
 			if gap > e.cfg.ExpectHeartbeat {
 				st := core.Violation
 				reason := ""
@@ -388,28 +524,28 @@ func (e *Engine) checkHeartbeatCadence(f *wire.Frame, port core.Port, pt *portTr
 						gap, e.cfg.ExpectHeartbeat), reason)
 			}
 		}
-		e.lastHbSendTS = sendTS
-		e.lastHbSendTSSet = true
+		pt.lastHbSendTS, pt.lastHbSendTSSet = sendTS, true
 		break // one heartbeat per frame is the norm; a second would be caught by tier1
 	}
 }
 
-// Flush drains all per-port reorder buffers in seq order through the classifier.
+// Flush drains every (port, channel) reorder buffer in seq order through the
+// classifier.
 // run.go calls this at EOF/SIGINT before EndRun.
 //
 // F3 (determinism): ports are drained in ascending port-index order so that
 // findings appear in a consistent, reproducible order regardless of Go's map
 // iteration randomness. The canonical order is: PortMktData < PortRefData <
 // PortSnapshot, which mirrors the priority of cross-port checks (mktdata state
-// is established before snapshot state is evaluated at Flush time).
+// is established before snapshot state is evaluated at Flush time). Within a
+// port, instances are drained in (channel, source) order for the same reason.
 func (e *Engine) Flush() {
 	for _, port := range []core.Port{core.PortMktData, core.PortRefData, core.PortSnapshot} {
-		pt, ok := e.ports[port]
-		if !ok {
-			continue
-		}
-		for _, item := range pt.drainAll() {
-			e.classify(item, pt)
+		for _, key := range e.instancesOn(port) {
+			pt := e.ports[key]
+			for _, item := range pt.drainAll() {
+				e.classify(item, pt)
+			}
 		}
 	}
 }
@@ -448,7 +584,6 @@ func (e *Engine) EndRun() {
 		return
 	}
 	window := e.cfg.ExpectManifestCadence + e.cfg.ExpectDefinitionCycle
-	refPT, hasPT := e.ports[core.PortRefData]
 	// Each observed channel is one opportunity, and each of the four ways out below
 	// reports it. A channel that reached ready is the rule *passing* — the reason it
 	// was silent is that the check is written as a search for failures, which is
@@ -478,8 +613,8 @@ func (e *Engine) EndRun() {
 				fmt.Sprintf("channel %d: observed %v, less than the %v a publisher needs to reach ready", ch, span, window))
 			continue
 		}
-		// Gate: if the refdata port has a dirty window, downgrade.
-		dirty := hasPT && refPT.dirtyWindow
+		// Gate: if any refdata window on this channel is dirty, downgrade.
+		dirty := e.dirtyOn(core.PortRefData, ch)
 		st := core.Violation
 		reason := ""
 		if dirty {

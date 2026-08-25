@@ -43,7 +43,7 @@ func newCadenceEngine(cfg Config) (*Engine, *allCapture) {
 func processFrame(e *Engine, raw []byte, magic uint16, port core.Port, seq uint64) {
 	f, sf := wire.Decode(raw, magic)
 	f.Header.Sequence = seq
-	e.Process(f, port, sf)
+	e.Process(srcA, f, port, sf)
 }
 
 // buildHeartbeatFrame builds a 16-byte Heartbeat frame with the given SendTS and channelID.
