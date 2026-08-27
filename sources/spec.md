@@ -6,7 +6,7 @@ A Source ID identifies the **matching engine** whose activity the message descri
 
 **A Source ID names a matching engine, not a venue.** One venue may run several matching engines and therefore hold several Source IDs. Two engines are distinct where their order-matching rules differ, and equally where they match independently over disjoint instrument sets under identical rules; a capacity shard the venue can rebalance is a channel rather than an engine. [GLOSSARY.md](../GLOSSARY.md) carries the full test and is the authority for it. A new engine at an already-registered venue is a new ID rather than a reuse of that venue's existing one. Because IDs are never renumbered, this only ever adds, and an ID already assigned keeps meaning whichever engine has been publishing under it. Venues split their own engines on their own schedule, so treat the set as open rather than assuming the current table is final.
 
-This document specifies version **1.2.0**: the reserved ranges, the current assignment set, and the process for requesting a new ID.
+This document specifies version **1.2.1**: the reserved ranges, the current assignment set, and the process for requesting a new ID.
 
 ## Reserved Ranges
 
@@ -30,6 +30,8 @@ This document specifies version **1.2.0**: the reserved ranges, the current assi
 `Code` is the machine-readable short name: the uppercase full name, never an abbreviation. Where the name carries more than one word, each space becomes a single underscore, so `Setai Financials` is `SETAI_FINANCIALS`. Downstream systems already carry these values as stable keys for the engine, in metric label values and in composed product identifiers among others, so this column documents what exists rather than introducing anything new. This registry is the authority for it; any table of these values held elsewhere is a [registry mirror](../GLOSSARY.md) and is derived, never authoritative.
 
 `Venue` is the external exchange or market operator running the engine, as [GLOSSARY.md](../GLOSSARY.md) defines it. It is recorded separately from `Name` so that several engines at one venue are legible as such, which is the case the `Name` column alone cannot show.
+
+Name the venue as TradingView does, where TradingView lists it. Its [data coverage list](https://www.tradingview.com/data-coverage/) is the reference. That is one fewer name for a subscriber to map. This governs `Venue` only: TradingView has one name per venue and distinguishes products in the symbol, so it cannot name a matching engine. `Code` still names the matching engine and stays unique.
 
 Note that `Venue` is deliberately not `Operator`. The glossary reserves **Operator** for the person or organization running a *publisher*, which is a different question from which exchange runs the engine, and one this registry does not currently record.
 
@@ -65,6 +67,8 @@ Assigning a new Source ID is an additive change and is therefore a **MINOR** rel
 Because assigned IDs are stable and MUST NOT be renumbered, reordered, removed, or reused, this registry has no mechanism by which a MAJOR release could arise. A subscriber pinned to any `1.x` version of this registry will find that every ID it knows still means what it meant; a later version only adds IDs it has not seen. Subscribers MUST treat an unrecognized Source ID as an unknown matching engine rather than an error, exactly as if they were running against an older copy of this registry.
 
 ### Changes
+
+**1.2.1** — editorial. Name the venue as TradingView does. `Code` is unaffected, because TradingView cannot name a matching engine.
 
 **1.2.0** — assigned Source IDs `4` (Setai Financials) and `5` (Setai Commodities), and conformed the Source ID definition above to [GLOSSARY.md](../GLOSSARY.md) `1.3.0`. Two IDs rather than one because they match independently over disjoint instrument sets against separately versioned interfaces, which is the case the glossary widening covers; they report the **same** order-matching algorithm, so the rules-differ test alone would not have separated them. Both carry `Venue` `Setai`, which is the case that column was added for. Stated the underscore rule for a multi-word `Code`.
 
