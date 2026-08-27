@@ -6,7 +6,7 @@ A Source ID identifies the **matching engine** whose activity the message descri
 
 **A Source ID names a matching engine, not a venue.** One venue may run several matching engines and therefore hold several Source IDs. Two engines are distinct where their order-matching rules differ, and equally where they match independently over disjoint instrument sets under identical rules; a capacity shard the venue can rebalance is a channel rather than an engine. [GLOSSARY.md](../GLOSSARY.md) carries the full test and is the authority for it. A new engine at an already-registered venue is a new ID rather than a reuse of that venue's existing one. Because IDs are never renumbered, this only ever adds, and an ID already assigned keeps meaning whichever engine has been publishing under it. Venues split their own engines on their own schedule, so treat the set as open rather than assuming the current table is final.
 
-This document specifies version **1.2.0**: the reserved ranges, the current assignment set, and the process for requesting a new ID.
+This document specifies version **1.3.0**: the reserved ranges, the current assignment set, and the process for requesting a new ID.
 
 ## Reserved Ranges
 
@@ -26,8 +26,9 @@ This document specifies version **1.2.0**: the reserved ranges, the current assi
 | `3` | Kalshi | `KALSHI` | Kalshi | Perpetual Futures, Prediction Market | Registered under the codename `Lashay` until the venue launched. Carries two matching engines and is due to split; see below. |
 | `4` | Setai Financials | `SETAI_FINANCIALS` | Setai | Futures | Interface versioned separately from `5`. |
 | `5` | Setai Commodities | `SETAI_COMMODITIES` | Setai | Futures, Options on Futures | Interface versioned separately from `4`. |
+| `6` | Binance USD-Margined Futures | `BINANCE_USD_MARGINED_FUTURES` | Binance | Perpetual Futures, Dated Futures | The venue's own `futuresType` for this engine is `U_MARGINED`. Spot, coin-margined futures and options are separate engines at this venue and are unclaimed; see below. |
 
-`Code` is the machine-readable short name: the uppercase full name, never an abbreviation. Where the name carries more than one word, each space becomes a single underscore, so `Setai Financials` is `SETAI_FINANCIALS`. Downstream systems already carry these values as stable keys for the engine, in metric label values and in composed product identifiers among others, so this column documents what exists rather than introducing anything new. This registry is the authority for it; any table of these values held elsewhere is a [registry mirror](../GLOSSARY.md) and is derived, never authoritative.
+`Code` is the machine-readable short name: the uppercase full name, never an abbreviation. Where the name carries more than one word, each space becomes a single underscore, so `Setai Financials` is `SETAI_FINANCIALS`. A hyphen inside a name is a word separator like a space, so `Binance USD-Margined Futures` is `BINANCE_USD_MARGINED_FUTURES`. Downstream systems already carry these values as stable keys for the engine, in metric label values and in composed product identifiers among others, so this column documents what exists rather than introducing anything new. This registry is the authority for it; any table of these values held elsewhere is a [registry mirror](../GLOSSARY.md) and is derived, never authoritative.
 
 `Venue` is the external exchange or market operator running the engine, as [GLOSSARY.md](../GLOSSARY.md) defines it. It is recorded separately from `Name` so that several engines at one venue are legible as such, which is the case the `Name` column alone cannot show.
 
@@ -40,6 +41,20 @@ Note that `Venue` is deliberately not `Operator`. The glossary reserves **Operat
 Source ID `3` is currently stamped on four Kalshi feeds: crypto perpetuals on top-of-book and market-by-price, and sports event markets on top-of-book and market-by-price. Perpetual futures settled by funding and binary or scalar event contracts are different sets of order-matching rules, so by the rule above they are two matching engines and want two IDs.
 
 Splitting them assigns a new ID to one engine and changes what that engine's publisher stamps, so it is a deployment change rather than a registry edit, and this row records the current state rather than pre-empting it. The registry moves first when it happens, per the codename and re-registration sequencing in [GLOSSARY.md](../GLOSSARY.md). Until then a subscriber MUST NOT infer which of the two engines a message came from out of `Source ID` alone; distinguishing them is a deployment concern, out of scope here, exactly as group and port assignment is.
+
+### ID `6` claims one of a venue's four known engines
+
+Binance runs at least four matching engines: spot, USD-margined futures, coin-margined futures, and options. They are separate stacks with different order-matching rules, separate rate limits, and in the case of spot a different transport generation — spot offers a binary SBE market data interface while the USD-margined stack is JSON only. By the rule above they are four engines and take four IDs.
+
+This row claims **only the USD-margined futures engine.** The other three are deliberately unclaimed rather than overlooked, and each takes its own row and its own `Code` when a publisher emits for it. Nothing here should be read as reserving them.
+
+Two things about the name, recorded because both were decided rather than obvious.
+
+**It is not named "Perpetual".** The engine matches perpetual futures, dated quarterly and weekly futures, and perpetuals on non-crypto underlyings. A `Name` of "Binance Perpetual Futures" would describe what a first publisher chooses to carry rather than what the engine matches, and a Source ID names the engine. The distinction becomes load-bearing the day anyone publishes the dated contracts on this ID, which needs no new ID and no registry change.
+
+**"USD-Margined" rather than the venue's "USDⓈ-M" branding.** The `Code` rule above forbids an abbreviation, and `USDS-M` is one. The expanded form is also the semantic reading of the venue's own machine-readable `futuresType`, `U_MARGINED`; it survives the venue rebranding its marketing name; and it generates the sibling name without further thought, since the coin-margined engine would be `Binance Coin-Margined Futures` / `BINANCE_COIN_MARGINED_FUTURES`.
+
+Note for anyone doing diligence against this row: the operator of record for this engine is **Nest Exchange Limited**, licensed in the Abu Dhabi Global Market as a Recognised Investment Exchange for derivatives since 5 January 2026. `Venue` carries `Binance` because that is the name the market uses and the name every other column in this table is written in, not because the two are interchangeable.
 
 ### IDs `4` and `5` are one venue's two platforms
 
@@ -65,6 +80,8 @@ Assigning a new Source ID is an additive change and is therefore a **MINOR** rel
 Because assigned IDs are stable and MUST NOT be renumbered, reordered, removed, or reused, this registry has no mechanism by which a MAJOR release could arise. A subscriber pinned to any `1.x` version of this registry will find that every ID it knows still means what it meant; a later version only adds IDs it has not seen. Subscribers MUST treat an unrecognized Source ID as an unknown matching engine rather than an error, exactly as if they were running against an older copy of this registry.
 
 ### Changes
+
+**1.3.0** — assigned Source ID `6` (Binance USD-Margined Futures), and stated that a hyphen inside a `Name` is a word separator for `Code`, which this is the first assignment to need. The row claims one of four known engines at the venue; the other three are recorded as unclaimed rather than left to inference. Named for the margin stack rather than for the perpetual contracts a first publisher carries, because the engine also matches dated futures and a Source ID names the engine.
 
 **1.2.0** — assigned Source IDs `4` (Setai Financials) and `5` (Setai Commodities), and conformed the Source ID definition above to [GLOSSARY.md](../GLOSSARY.md) `1.3.0`. Two IDs rather than one because they match independently over disjoint instrument sets against separately versioned interfaces, which is the case the glossary widening covers; they report the **same** order-matching algorithm, so the rules-differ test alone would not have separated them. Both carry `Venue` `Setai`, which is the case that column was added for. Stated the underscore rule for a multi-word `Code`.
 
