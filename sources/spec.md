@@ -6,7 +6,7 @@ A Source ID identifies the **matching engine** whose activity the message descri
 
 **A Source ID names a matching engine, not a venue.** One venue may run several matching engines and therefore hold several Source IDs. Two engines are distinct where their order-matching rules differ, and equally where they match independently over disjoint instrument sets under identical rules; a capacity shard the venue can rebalance is a channel rather than an engine. [GLOSSARY.md](../GLOSSARY.md) carries the full test and is the authority for it. A new engine at an already-registered venue is a new ID rather than a reuse of that venue's existing one. Because IDs are never renumbered, this only ever adds, and an ID already assigned keeps meaning whichever engine has been publishing under it. Venues split their own engines on their own schedule, so treat the set as open rather than assuming the current table is final.
 
-This document specifies version **1.2.1**: the reserved ranges, the current assignment set, and the process for requesting a new ID.
+This document specifies version **1.3.0**: the reserved ranges, the current assignment set, and the process for requesting a new ID.
 
 ## Reserved Ranges
 
@@ -26,12 +26,19 @@ This document specifies version **1.2.1**: the reserved ranges, the current assi
 | `3` | Kalshi | `KALSHI` | Kalshi | Perpetual Futures, Prediction Market | Registered under the codename `Lashay` until the venue launched. Carries two matching engines and is due to split; see below. |
 | `4` | Setai Financials | `SETAI_FINANCIALS` | Setai | Futures | Interface versioned separately from `5`. |
 | `5` | Setai Commodities | `SETAI_COMMODITIES` | Setai | Futures, Options on Futures | Interface versioned separately from `4`. |
+| `6` | Binance USD-Margined Futures | `BINANCE` | Binance | Perpetual Futures, Dated Futures | The venue's own `futuresType` for this engine is `U_MARGINED`. Spot, coin-margined futures and options are separate matching engines at this venue, unclaimed, and will share this `Code`. |
 
-`Code` is the machine-readable short name: the uppercase full name, never an abbreviation. Where the name carries more than one word, each space becomes a single underscore, so `Setai Financials` is `SETAI_FINANCIALS`. Downstream systems already carry these values as stable keys for the engine, in metric label values and in composed product identifiers among others, so this column documents what exists rather than introducing anything new. This registry is the authority for it; any table of these values held elsewhere is a [registry mirror](../GLOSSARY.md) and is derived, never authoritative.
+`Code` is the machine-readable short name **for the venue**. It matches the `Venue` column and takes the same name TradingView uses. Uppercase, never an abbreviation, each space and hyphen a single underscore.
+
+**Several matching engines at one venue share a `Code`.** It names the venue, not the engine, so `Code` alone cannot key an engine: `Source ID` is the engine key, and anything carrying `Code` as a stable identifier — a metric label value, a composed product identifier — needs `source_id` beside it to name an engine. `Name` is where a human reader tells two engines apart.
+
+IDs `4` and `5` predate this rule and still carry engine-level Codes, `SETAI_FINANCIALS` and `SETAI_COMMODITIES`. They are left alone here: a `Code` already in use downstream cannot be changed without coordinating with whoever carries it.
+
+Downstream systems already carry these values, so this column documents what exists rather than introducing anything new. This registry is the authority for it; any table of these values held elsewhere is a [registry mirror](../GLOSSARY.md) and is derived, never authoritative.
 
 `Venue` is the external exchange or market operator running the engine, as [GLOSSARY.md](../GLOSSARY.md) defines it. It is recorded separately from `Name` so that several engines at one venue are legible as such, which is the case the `Name` column alone cannot show.
 
-Name the venue as TradingView does, where TradingView lists it. Its [data coverage list](https://www.tradingview.com/data-coverage/) is the reference. That is one fewer name for a subscriber to map. This governs `Venue` only: TradingView has one name per venue and distinguishes products in the symbol, so it cannot name a matching engine. `Code` still names the matching engine and stays unique.
+Name the venue as TradingView does, where TradingView lists it. Its [data coverage list](https://www.tradingview.com/data-coverage/) is the reference. That is one fewer name for a subscriber to map. This governs `Venue` and `Code`, which carry the same name. TradingView has one name per venue and distinguishes products in the symbol, so it cannot name a matching engine, and neither column tries to: `Source ID` and `Name` do that.
 
 Note that `Venue` is deliberately not `Operator`. The glossary reserves **Operator** for the person or organization running a *publisher*, which is a different question from which exchange runs the engine, and one this registry does not currently record.
 
@@ -42,6 +49,14 @@ Note that `Venue` is deliberately not `Operator`. The glossary reserves **Operat
 Source ID `3` is currently stamped on four Kalshi feeds: crypto perpetuals on top-of-book and market-by-price, and sports event markets on top-of-book and market-by-price. Perpetual futures settled by funding and binary or scalar event contracts are different sets of order-matching rules, so by the rule above they are two matching engines and want two IDs.
 
 Splitting them assigns a new ID to one engine and changes what that engine's publisher stamps, so it is a deployment change rather than a registry edit, and this row records the current state rather than pre-empting it. The registry moves first when it happens, per the codename and re-registration sequencing in [GLOSSARY.md](../GLOSSARY.md). Until then a subscriber MUST NOT infer which of the two engines a message came from out of `Source ID` alone; distinguishing them is a deployment concern, out of scope here, exactly as group and port assignment is.
+
+### ID `6` is one of a venue's four matching engines
+
+Binance runs at least four: spot, USD-margined futures, coin-margined futures, options. Separate stacks, different order-matching rules, separate rate limits, and for spot a different transport generation, since spot offers a binary SBE market data interface while the USD-margined stack is JSON only. Four engines, four Source IDs, one shared `Code`. This claims the USD-margined engine; the others are unclaimed rather than overlooked.
+
+The `Name` is not "Perpetual". This engine also matches dated quarterly and weekly futures, and a Source ID names the matching engine rather than the subset a publisher chooses to carry. "USD-Margined" expands the venue's own machine-readable `futuresType` of `U_MARGINED`, and names the coin-margined engine for free.
+
+The operator of record is Nest Exchange Limited, licensed in the Abu Dhabi Global Market as a Recognised Investment Exchange for derivatives since 5 January 2026. `Venue` carries `Binance` because that is the name the market uses.
 
 ### IDs `4` and `5` are one venue's two platforms
 
@@ -67,6 +82,8 @@ Assigning a new Source ID is an additive change and is therefore a **MINOR** rel
 Because assigned IDs are stable and MUST NOT be renumbered, reordered, removed, or reused, this registry has no mechanism by which a MAJOR release could arise. A subscriber pinned to any `1.x` version of this registry will find that every ID it knows still means what it meant; a later version only adds IDs it has not seen. Subscribers MUST treat an unrecognized Source ID as an unknown matching engine rather than an error, exactly as if they were running against an older copy of this registry.
 
 ### Changes
+
+**1.3.0** — assigned Source ID `6` to the USD-margined futures matching engine at Binance, and made `Code` name the venue rather than the matching engine. Several engines at one venue now share a `Code`, so `Code` alone no longer keys an engine and `Source ID` is stated as the engine key. This supersedes `1.2.1`'s statement that `Code` names the matching engine and stays unique. IDs `4` and `5` keep their engine-level Codes, because a `Code` already carried downstream cannot be changed without coordination.
 
 **1.2.1** — editorial. Name the venue as TradingView does. `Code` is unaffected, because TradingView cannot name a matching engine.
 
