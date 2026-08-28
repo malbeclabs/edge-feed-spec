@@ -56,6 +56,19 @@ type defInfo struct {
 	priceBound    uint8
 }
 
+// validZeroEvent is a ManifestSummary(Valid=0) seen with an established set, held
+// until its verdict can be decided.
+//
+// A spec-mandated shutdown (supplement §4) and a mid-service Valid drop are the
+// same message on this port; what tells them apart is EndOfSession, which every
+// feed spec puts on mktdata. The two ports have independent reorder windows, so
+// which is classified first is not a property of the publisher — deciding inline
+// would be a race on the drain order.
+type validZeroEvent struct {
+	frameSeq uint64
+	dirty    bool // the refdata window was gapped when the summary arrived
+}
+
 // channelRefdataState is the per-channel reference-data subscriber state.
 type channelRefdataState struct {
 	// subscriber algorithm state (verbatim from the supplement)
@@ -85,6 +98,11 @@ type channelRefdataState struct {
 	// hadNonEmptySet is true once we reached ready() at any point.  Used for
 	// REFDATA.VALID_FLAG_WHILE_SERVING.
 	hadNonEmptySet bool
+
+	// pendingValidZero holds the undecided REFDATA.VALID_FLAG_WHILE_SERVING verdict.
+	// At most one is outstanding: arming it requires hadNonEmptySet, which the same
+	// Valid=0 clears, so the slot cannot be re-armed until the channel re-establishes.
+	pendingValidZero *validZeroEvent
 
 	// --- Task 15: timing/cadence state ---
 
@@ -280,15 +298,12 @@ func (rs *refdataState) onManifestSummary(ch uint8, valid uint8, seq uint16, cou
 		return
 	}
 
-	// REFDATA.VALID_FLAG_WHILE_SERVING: after an established non-empty set,
-	// Valid must remain 1.  Valid=0 while serving is a publisher violation.
+	// REFDATA.VALID_FLAG_WHILE_SERVING: after an established non-empty set, Valid
+	// must remain 1 — unless the publisher is ending the session, which the spec
+	// requires it to announce exactly this way. Hold the verdict; resolveValidZero
+	// decides it once the cross-port signal is in.
 	if valid == 0 && s.hadNonEmptySet {
-		st := core.Violation
-		if dirty {
-			st = core.Unverifiable
-		}
-		rs.e.Emit("REFDATA.VALID_FLAG_WHILE_SERVING", st, core.PortRefData, frameSeq, ch, 0,
-			"ManifestSummary Valid=0 while subscriber has an established set")
+		s.pendingValidZero = &validZeroEvent{frameSeq: frameSeq, dirty: dirty}
 	}
 
 	// REFDATA.SEQ_MONOTONIC_NO_REGRESS: seq must be modular-non-decreasing within
@@ -372,11 +387,11 @@ func (rs *refdataState) onManifestSummary(ch uint8, valid uint8, seq uint16, cou
 		s.seqEverSet = false
 		s.hadNonEmptySet = false
 		s.setSnapshotSet = false
-		// Task 15: clear timing state when publisher signals valid=0.
-		s.lastManifestSendTS = 0
-		s.lastManifestSendTSSet = false
-		s.firstSendTSSet = false
-		s.everReady = false
+		// The definition cycle is about the active set, which is now gone.
+		//
+		// everReady, firstSendTS and lastManifestSendTS are deliberately NOT cleared:
+		// they record what this tool observed, not what the publisher published, so a
+		// publisher flag must not erase them. NEVER_REACHES_READY reads them.
 		s.cycleStartSendTS = 0
 		s.cycleStartSendTSSet = false
 		s.defsSeenThisCycle = make(map[uint32]struct{})
@@ -387,6 +402,20 @@ func (rs *refdataState) onManifestSummary(ch uint8, valid uint8, seq uint16, cou
 	}
 
 	// valid == 1 below.
+
+	// A Valid=1 summary means the publisher is serving, so any session it ended is
+	// over and cannot excuse a later Valid=0. Clear on EVERY Valid=1, not only one
+	// that seeds or advances state: in steady state a summary does neither, and two
+	// arms feed one channel-keyed state machine, so one arm's shutdown would sit
+	// here excusing the other arm's later drop.
+	//
+	// Reaching here with a verdict outstanding means the channel went invalid and
+	// came back, which settles it without waiting for end-of-run.
+	if s.pendingValidZero != nil {
+		rs.resolveValidZero(ch, s.pendingValidZero, true)
+		s.pendingValidZero = nil
+	}
+	delete(rs.e.sessionEnd, ch)
 
 	// --- Task 15: REFDATA.MANIFEST_CADENCE ---
 	// Check cadence between successive ManifestSummary messages.
@@ -521,6 +550,59 @@ func (rs *refdataState) onManifestSummary(ch uint8, valid uint8, seq uint16, cou
 		s.prevDefFrameTS = 0
 		s.prevDefFrameTSSet = false
 	}
+}
+
+// resolveShutdownVerdicts decides every held Valid=0 verdict at end of run.
+//
+// It must run after Flush: a publisher emits EndOfSession and then stops, so
+// nothing follows to push that last frame out of the reorder window, and before
+// the drain the signal reads as absent rather than buffered.
+func (rs *refdataState) resolveShutdownVerdicts() {
+	for ch, s := range rs.channels {
+		if s.pendingValidZero == nil {
+			continue
+		}
+		rs.resolveValidZero(ch, s.pendingValidZero, false)
+		s.pendingValidZero = nil
+	}
+}
+
+// resolveValidZero emits the REFDATA.VALID_FLAG_WHILE_SERVING verdict for one held
+// Valid=0 summary. resumed is true when the publisher has since declared the
+// channel valid again, which proves the drop was not the end of a session.
+//
+// Order matters: a witnessed EndOfSession settles it outright, and everything
+// below that turns on the *absence* of one, which loss or an unwatched mktdata
+// port can equally explain.
+func (rs *refdataState) resolveValidZero(ch uint8, ev *validZeroEvent, resumed bool) {
+	const rule = "REFDATA.VALID_FLAG_WHILE_SERVING"
+	if _, ended := rs.e.sessionEnd[ch]; ended {
+		rs.e.passed(rule, core.PortRefData, ev.frameSeq, ch, 0,
+			"ManifestSummary Valid=0 paired with EndOfSession on mktdata: the shutdown the spec mandates")
+		return
+	}
+	if ev.dirty {
+		rs.e.unverified(rule, core.ReasonLoss, core.PortRefData, ev.frameSeq, ch, 0,
+			"ManifestSummary Valid=0 on a gapped refdata window")
+		return
+	}
+	if resumed {
+		rs.e.Emit(rule, core.Violation, core.PortRefData, ev.frameSeq, ch, 0,
+			"ManifestSummary Valid=0 while subscriber has an established set, then Valid=1 again: service resumed, so this was not a session end")
+		return
+	}
+	if !rs.e.mktdataObserved(ch) {
+		rs.e.unverified(rule, core.ReasonBoundSubset, core.PortRefData, ev.frameSeq, ch, 0,
+			"ManifestSummary Valid=0 with no mktdata observed on this channel, so a session end cannot be told from a mid-service drop")
+		return
+	}
+	if rs.e.dirtyOn(core.PortMktData, ch) {
+		rs.e.unverified(rule, core.ReasonLoss, core.PortRefData, ev.frameSeq, ch, 0,
+			"ManifestSummary Valid=0 and no EndOfSession, but the mktdata window was gapped and could have carried it")
+		return
+	}
+	rs.e.Emit(rule, core.Violation, core.PortRefData, ev.frameSeq, ch, 0,
+		"ManifestSummary Valid=0 while subscriber has an established set, with no EndOfSession on mktdata")
 }
 
 // onInstrumentDef processes an InstrumentDefinition message.

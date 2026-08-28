@@ -10,6 +10,7 @@ package engine
 
 import (
 	"testing"
+	"time"
 
 	"github.com/malbeclabs/edge-feed-spec/tools/conformance/core"
 	"github.com/malbeclabs/edge-feed-spec/tools/conformance/wire"
@@ -20,6 +21,10 @@ import (
 
 // newTestRefdata builds a refdataState wired to an allCapture reporter that
 // also records Emit calls through a thin engine shim.
+//
+// This harness drives the state machine directly, so it never reaches end-of-run:
+// EndRun reads e.refdata, which Engine.Process is what populates. Rules settled at
+// end of run — REFDATA.VALID_FLAG_WHILE_SERVING — are tested through processTwoPort.
 func newTestRefdata(feed core.Feed) (*refdataState, *allCapture) {
 	ac := &allCapture{}
 	cfg := Config{Feed: feed}
@@ -248,31 +253,17 @@ func TestRefdataResetClear(t *testing.T) {
 	}
 }
 
-// TestRefdataValidFlagWhileServing: after the state machine has an established
-// non-empty set, a ManifestSummary with Valid=0 is a violation
-// (REFDATA.VALID_FLAG_WHILE_SERVING).
-func TestRefdataValidFlagWhileServing(t *testing.T) {
-	rd, ac := newTestRefdata(core.FeedTOB)
-
-	// Establish a ready set.
-	feedManifest(rd, 1, 1, 1)
-	feedDef(rd, 100, 1)
-	clearFindings(ac)
-
-	// Now send Valid=0 summary — this is the violation.
-	feedManifest(rd, 0, 0, 0)
-	if !hasViolation(ac, "REFDATA.VALID_FLAG_WHILE_SERVING") {
-		t.Error("REFDATA.VALID_FLAG_WHILE_SERVING: expected violation, got none")
-	}
-}
-
 // TestRefdataValidFlagWhileServingSilent: Valid=0 before any set is established
-// must NOT fire VALID_FLAG_WHILE_SERVING (publisher still initializing).
+// is the publisher still initializing, so nothing fires — and nothing is held for
+// end-of-run to report either.
 func TestRefdataValidFlagWhileServingSilent(t *testing.T) {
 	rd, ac := newTestRefdata(core.FeedTOB)
 	feedManifest(rd, 0, 0, 0)
-	if hasViolation(ac, "REFDATA.VALID_FLAG_WHILE_SERVING") {
+	if len(findingsFor(ac, "REFDATA.VALID_FLAG_WHILE_SERVING")) != 0 {
 		t.Error("REFDATA.VALID_FLAG_WHILE_SERVING: must be silent when set not yet established")
+	}
+	if rd.channel(1).pendingValidZero != nil {
+		t.Error("held a verdict on a channel that was never serving")
 	}
 }
 
@@ -699,5 +690,210 @@ func TestRefdataIntegration_MidpointStaleSeq(t *testing.T) {
 	}
 	if !firesRefdataRule(t, core.FeedMidpoint, wire.MagicMid, frames, "REFDATA.STALE_SEQ_TAG_AFTER_BUMP") {
 		t.Error("midpoint integration: REFDATA.STALE_SEQ_TAG_AFTER_BUMP did not fire on wrong-seq def")
+	}
+}
+
+// --- Session end: a conforming shutdown is not non-conformance (issue #47) ---
+//
+// The supplement's Publisher Behavior §4 requires Valid=0 "when the channel is
+// uninitialized or the publisher is shutting down", and every feed spec requires
+// EndOfSession on mktdata at shutdown. The two arrive on different ports, so these
+// tests drive both and always run EndRun, where the verdict is settled.
+
+// buildEndOfSessionFrame builds a raw mktdata frame carrying EndOfSession (0x06).
+func buildEndOfSessionFrame(magic uint16) []byte {
+	return wb.Frame(magic).Msg(0x06, 12, func(b *wb.Body) { b.U64(200000) }).Bytes()
+}
+
+// portFrame is one raw frame and the port it arrives on.
+type portFrame struct {
+	port core.Port
+	raw  []byte
+}
+
+func onRefdata(raw []byte) portFrame { return portFrame{core.PortRefData, raw} }
+func onMktdata(raw []byte) portFrame { return portFrame{core.PortMktData, raw} }
+
+// processTwoPort drives frames through a full Engine on the port each names, then
+// runs Flush and EndRun.
+//
+// ReorderWindow is 1, so a frame is classified when the *next* frame on its port
+// arrives, and whatever is left over is drained by Flush (mktdata first). A test
+// that cares which port is classified first therefore has to send a following
+// frame on that port — a lone one stays buffered to the end.
+func processTwoPort(t *testing.T, feed core.Feed, frames []portFrame) *allCapture {
+	t.Helper()
+	ac := &allCapture{}
+	e := New(Config{Feed: feed, ReorderWindow: 1}, ac)
+	seq := map[core.Port]uint64{}
+	for _, pf := range frames {
+		f, sf := wire.Decode(pf.raw, MagicFor(feed))
+		seq[pf.port]++
+		f.Header.Sequence = seq[pf.port]
+		e.Process(srcA, f, pf.port, sf)
+	}
+	e.Flush()
+	e.EndRun()
+	return ac
+}
+
+// servingTOB is the frame sequence that gets a TOB channel to ready().
+func servingTOB() []portFrame {
+	return []portFrame{
+		onRefdata(buildManifestFrame(wire.MagicTOB, 1, 1, 2)),
+		onRefdata(buildInstrDefFrameTOB(100, 1)),
+		onRefdata(buildInstrDefFrameTOB(200, 1)),
+	}
+}
+
+// TestShutdownSummaryIsNotAViolation: ManifestSummary(Valid=0) on refdata paired
+// with EndOfSession on mktdata is what the spec asks a publisher to do, whichever
+// of the two the engine classifies first.
+func TestShutdownSummaryIsNotAViolation(t *testing.T) {
+	// A shutting-down publisher keeps emitting Valid=0 at its manifest cadence, and
+	// the second summary is what pushes the first out of the reorder window.
+	shutdownSummaries := []portFrame{
+		onRefdata(buildManifestFrame(wire.MagicTOB, 0, 1, 2)),
+		onRefdata(buildManifestFrame(wire.MagicTOB, 0, 1, 2)),
+	}
+	endOfSession := onMktdata(buildEndOfSessionFrame(wire.MagicTOB))
+
+	for _, tc := range []struct {
+		name  string
+		order []portFrame
+	}{
+		// The summary is classified with no session-end signal recorded yet. This is
+		// the ordering the deferred verdict exists for.
+		{"summary_first", append(append([]portFrame{}, shutdownSummaries...), endOfSession)},
+		// The heartbeat pushes the EndOfSession out of the mktdata window, so the
+		// signal is already recorded when the summary lands.
+		{"end_of_session_first", append([]portFrame{
+			endOfSession,
+			onMktdata(buildHeartbeatFrame(wire.MagicTOB, 0, 0)),
+		}, shutdownSummaries...)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ac := processTwoPort(t, core.FeedTOB, append(servingTOB(), tc.order...))
+			if hasViolation(ac, "REFDATA.VALID_FLAG_WHILE_SERVING") {
+				t.Error("fired on the spec-mandated shutdown summary")
+			}
+			if !hasPass(ac, "REFDATA.VALID_FLAG_WHILE_SERVING") {
+				t.Error("no pass: the verdict has to be reported, not skipped")
+			}
+		})
+	}
+}
+
+// TestValidDropWithoutSessionEndIsAViolation: mktdata was watched throughout and
+// carried no EndOfSession, which is the case the rule exists for.
+func TestValidDropWithoutSessionEndIsAViolation(t *testing.T) {
+	frames := append([]portFrame{onMktdata(buildHeartbeatFrame(wire.MagicTOB, 0, 0))}, servingTOB()...)
+	frames = append(frames, onRefdata(buildManifestFrame(wire.MagicTOB, 0, 1, 2)))
+
+	ac := processTwoPort(t, core.FeedTOB, frames)
+	if !hasViolation(ac, "REFDATA.VALID_FLAG_WHILE_SERVING") {
+		t.Error("expected a violation: Valid dropped while serving, with no session end announced")
+	}
+}
+
+// TestSessionEndMarkDoesNotOutliveTheSession: a steady-state Valid=1 clears the
+// mark. In steady state a summary neither seeds nor advances state, so tying the
+// mark to those transitions would let one arm's shutdown sit there excusing the
+// other arm's later drop — both arms feed one channel-keyed state machine.
+func TestSessionEndMarkDoesNotOutliveTheSession(t *testing.T) {
+	frames := append(servingTOB(),
+		onMktdata(buildEndOfSessionFrame(wire.MagicTOB)),
+		onMktdata(buildHeartbeatFrame(wire.MagicTOB, 0, 0)),   // pushes the EndOfSession out of the window
+		onRefdata(buildManifestFrame(wire.MagicTOB, 1, 1, 2)), // steady state: same seq, still serving
+		onRefdata(buildManifestFrame(wire.MagicTOB, 0, 1, 2)),
+		onRefdata(buildManifestFrame(wire.MagicTOB, 0, 1, 2)),
+	)
+
+	ac := processTwoPort(t, core.FeedTOB, frames)
+	if !hasViolation(ac, "REFDATA.VALID_FLAG_WHILE_SERVING") {
+		t.Error("a stale session-end mark excused a drop on a channel that was still being served")
+	}
+}
+
+// TestValidDropThenServiceResumesIsAViolation: the publisher declared the channel
+// valid again, which settles the verdict without needing the other port at all.
+func TestValidDropThenServiceResumesIsAViolation(t *testing.T) {
+	frames := append(servingTOB(),
+		onRefdata(buildManifestFrame(wire.MagicTOB, 0, 1, 2)),
+		onRefdata(buildManifestFrame(wire.MagicTOB, 1, 2, 2)), // serving again
+	)
+
+	ac := processTwoPort(t, core.FeedTOB, frames)
+	if !hasViolation(ac, "REFDATA.VALID_FLAG_WHILE_SERVING") {
+		t.Error("expected a violation: service resumed, so the drop was not a session end")
+	}
+}
+
+// TestValidDropWithoutMktdataIsUnverifiable: with --refdata-port and no
+// --mktdata-port nothing could have witnessed an EndOfSession, so its absence
+// says nothing about the publisher.
+func TestValidDropWithoutMktdataIsUnverifiable(t *testing.T) {
+	frames := append(servingTOB(), onRefdata(buildManifestFrame(wire.MagicTOB, 0, 1, 2)))
+
+	ac := processTwoPort(t, core.FeedTOB, frames)
+	if !hasUnverifiable(ac, "REFDATA.VALID_FLAG_WHILE_SERVING", core.ReasonBoundSubset) {
+		t.Error("expected unverifiable/bound_subset with no mktdata observed on the channel")
+	}
+	if hasViolation(ac, "REFDATA.VALID_FLAG_WHILE_SERVING") {
+		t.Error("blamed the publisher for a signal the run was not watching for")
+	}
+}
+
+// TestShutdownDoesNotEraseTheObservationWindow: Valid=0 clears subscriber state,
+// never the record of what this tool watched.
+func TestShutdownDoesNotEraseTheObservationWindow(t *testing.T) {
+	rd, _ := newTestRefdata(core.FeedTOB)
+	feedManifest(rd, 1, 1, 2)
+	feedDef(rd, 100, 1)
+	feedDef(rd, 200, 1)
+
+	feedManifest(rd, 0, 1, 2)
+
+	s := rd.channel(1)
+	if !s.everReady || !s.firstSendTSSet {
+		t.Error("shutdown cleared the observation window")
+	}
+}
+
+// TestNeverReachesReadyPassesAfterAShutdown is the reported symptom end to end: a
+// channel watched for the whole window was reported cold_start ("no ManifestSummary
+// observed") because the shutdown summary had wiped its history.
+func TestNeverReachesReadyPassesAfterAShutdown(t *testing.T) {
+	ac := &allCapture{}
+	e := New(Config{
+		Feed:                  core.FeedTOB,
+		ReorderWindow:         1,
+		ExpectManifestCadence: time.Second,
+		ExpectDefinitionCycle: 30 * time.Second,
+	}, ac)
+
+	frames := []struct {
+		raw    []byte
+		sendTS uint64
+	}{
+		{buildManifestFrame(wire.MagicTOB, 1, 1, 2), 0},
+		{buildInstrDefFrameTOB(100, 1), uint64(time.Second)},
+		{buildInstrDefFrameTOB(200, 1), uint64(2 * time.Second)},
+		{buildManifestFrame(wire.MagicTOB, 0, 1, 2), uint64(75 * time.Second)},
+	}
+	for i, fr := range frames {
+		f, sf := wire.Decode(fr.raw, wire.MagicTOB)
+		f.Header.Sequence = uint64(i + 1)
+		f.Header.SendTS = fr.sendTS
+		e.Process(srcA, f, core.PortRefData, sf)
+	}
+	e.Flush()
+	e.EndRun()
+
+	if hasUnverifiable(ac, "REFDATA.NEVER_REACHES_READY", core.ReasonColdStart) {
+		t.Error("reported cold_start for a channel observed to reach ready and serve")
+	}
+	if !hasPass(ac, "REFDATA.NEVER_REACHES_READY") {
+		t.Error("expected a pass for a channel that reached ready")
 	}
 }

@@ -148,7 +148,7 @@ var ruleDocs = map[string]RuleDoc{
 	"REFDATA.SET_CHANGE_NO_SEQ_BUMP":          {"Any active-set membership change bumps the Manifest Seq."},
 	"REFDATA.COUNT_CHANGE_NO_SEQ_BUMP":        {"Any Instrument Count change between summaries comes with a Manifest Seq change."},
 	"REFDATA.STALE_SEQ_TAG_AFTER_BUMP":        {"After a seq bump, every new InstrumentDefinition is tagged with the new seq."},
-	"REFDATA.VALID_FLAG_WHILE_SERVING":        {"With an established set, ManifestSummary.Valid is 1."},
+	"REFDATA.VALID_FLAG_WHILE_SERVING":        {"With an established set, ManifestSummary.Valid is 1 unless the publisher is ending the session, which it also announces with EndOfSession on mktdata."},
 	"REFDATA.NEVER_REACHES_READY":             {"A fresh both-port subscriber reaches ready() within manifest cadence + cycle."},
 	"REFDATA.NO_BURST_DEFINITIONS":            {"Definitions are paced across the cycle, not sent in a single burst."},
 	"REFDATA.SEQ_MONOTONIC_NO_REGRESS":        {"Manifest Seq is modular-monotonic non-decreasing within an era."},
