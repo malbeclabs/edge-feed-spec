@@ -242,7 +242,7 @@ func TestRefdataResetClear(t *testing.T) {
 		t.Fatal("precondition: should be ready")
 	}
 
-	rd.onReset(2) // new Reset Count
+	rd.onResetChannel(1) // new Reset Count on this channel's instance
 	if rd.ready() {
 		t.Fatal("should NOT be ready after reset")
 	}

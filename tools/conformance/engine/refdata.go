@@ -132,12 +132,6 @@ func newChannelRefdataState() *channelRefdataState {
 type refdataState struct {
 	e        *Engine
 	channels map[uint8]*channelRefdataState
-	// portEra is the last Reset Count seen on the refdata port. Reset Count is
-	// a port/frame-level concept (not per-channel), so we track it here and
-	// reset ALL channels when it changes. This ensures that a new era observed
-	// on any channel triggers a full reset of all channel states.
-	portEra       uint8
-	portEraSeeded bool // false until the first refdata frame is processed
 }
 
 // newRefdataState creates a refdataState bound to the given engine.
@@ -209,13 +203,26 @@ func channelReady(s *channelRefdataState) bool {
 	return s.valid && uint32(len(s.defs)) == s.expectedCount
 }
 
-// onReset handles a frame-level Reset Count change.  All per-channel state is
-// discarded per the supplement: "subscribers detect the reset by comparing
-// Reset Count against their last-seen value and discard all cached state."
-func (rs *refdataState) onReset(newResetCount uint8) {
-	// Reset all channels.  A reset is frame-wide, not channel-specific, but since
-	// a channel's frames all carry the same Reset Count, we reset all channels.
+// onResetChannel handles a Reset Count change on ONE channel instance. That
+// channel's state is discarded per the supplement: "subscribers detect the reset
+// by comparing Reset Count against their last-seen value and discard all cached
+// state."
+//
+// **Only that channel.** Reset Count belongs to the channel instance, not to the
+// port: two publishers serving one group and one port advance independent Reset
+// Counts, so a port-wide reset lets either path erase the other's established set
+// on every alternation.
+//
+// The discard is still by Channel ID, because `channels` is Channel-ID-keyed:
+// two instances sharing one Channel ID would share one set and reset each other.
+// That is pre-existing, and inert while redundant paths carry distinct ids, but
+// it is the reason this is not yet the full `(source address, Channel ID)` key
+// that "Redundant Channel Instances" asks for.
+func (rs *refdataState) onResetChannel(only uint8) {
 	for ch, s := range rs.channels {
+		if ch != only {
+			continue
+		}
 		s.valid = false
 		s.latestSeq = 0
 		s.expectedCount = 0
@@ -238,7 +245,6 @@ func (rs *refdataState) onReset(newResetCount uint8) {
 		s.prevDefFrameTSSet = false
 		rs.channels[ch] = s
 	}
-	_ = newResetCount // Reset Count is now tracked at the port level (rs.portEra).
 }
 
 // onManifestSummary processes a ManifestSummary message.
@@ -627,19 +633,22 @@ func (e *Engine) processRefdataFrame(f *wire.Frame, pt *portTracker) {
 		e.refdata = newRefdataState(e)
 	}
 
-	// Detect era change (Reset Count change → full state reset).
-	// Reset Count is a port/frame-level concept, not per-channel.  We track
-	// the last-seen Reset Count at the refdataState level so that a new era
-	// observed on any channel triggers a reset of ALL channels, not just the
-	// one whose frame happened to arrive first.
+	// Detect an era change (Reset Count change → discard that channel's state).
+	// Reset Count belongs to the channel instance — (source address, Channel ID,
+	// destination port) — so it is tracked on that instance's tracker and resets
+	// only its own channel. Tracked per port instead, two publishers on one port
+	// read as an era flip on every alternation, and each flip erases both paths'
+	// definition sets: the sets never survive to ready(), and the discard is
+	// silent because onInstrumentDef drops definitions on an invalid channel
+	// without a finding.
 	ch := f.Header.ChannelID
-	if !e.refdata.portEraSeeded {
-		// Seed on the very first refdata frame (any Reset Count is valid).
-		e.refdata.portEra = f.Header.ResetCount
-		e.refdata.portEraSeeded = true
-	} else if f.Header.ResetCount != e.refdata.portEra {
-		e.refdata.portEra = f.Header.ResetCount
-		e.refdata.onReset(f.Header.ResetCount)
+	if !pt.refdataEraSeeded {
+		// Seed on this instance's first refdata datagram (any Reset Count is valid).
+		pt.refdataEra = f.Header.ResetCount
+		pt.refdataEraSeeded = true
+	} else if f.Header.ResetCount != pt.refdataEra {
+		pt.refdataEra = f.Header.ResetCount
+		e.refdata.onResetChannel(ch)
 	}
 
 	dirty := pt.dirtyWindow
