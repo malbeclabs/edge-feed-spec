@@ -210,8 +210,14 @@ func channelReady(s *channelRefdataState) bool {
 //
 // **Only that channel.** Reset Count belongs to the channel instance, not to the
 // port: two publishers serving one group and one port advance independent Reset
-// Counts, so a port-wide reset lets either arm erase the other's established set
+// Counts, so a port-wide reset lets either path erase the other's established set
 // on every alternation.
+//
+// The discard is still by Channel ID, because `channels` is Channel-ID-keyed:
+// two instances sharing one Channel ID would share one set and reset each other.
+// That is pre-existing, and inert while redundant paths carry distinct ids, but
+// it is the reason this is not yet the full `(source address, Channel ID)` key
+// that "Redundant Channel Instances" asks for.
 func (rs *refdataState) onResetChannel(only uint8) {
 	for ch, s := range rs.channels {
 		if ch != only {
@@ -631,13 +637,13 @@ func (e *Engine) processRefdataFrame(f *wire.Frame, pt *portTracker) {
 	// Reset Count belongs to the channel instance — (source address, Channel ID,
 	// destination port) — so it is tracked on that instance's tracker and resets
 	// only its own channel. Tracked per port instead, two publishers on one port
-	// read as an era flip on every alternation, and each flip erases both arms'
+	// read as an era flip on every alternation, and each flip erases both paths'
 	// definition sets: the sets never survive to ready(), and the discard is
 	// silent because onInstrumentDef drops definitions on an invalid channel
 	// without a finding.
 	ch := f.Header.ChannelID
 	if !pt.refdataEraSeeded {
-		// Seed on this instance's first refdata frame (any Reset Count is valid).
+		// Seed on this instance's first refdata datagram (any Reset Count is valid).
 		pt.refdataEra = f.Header.ResetCount
 		pt.refdataEraSeeded = true
 	} else if f.Header.ResetCount != pt.refdataEra {

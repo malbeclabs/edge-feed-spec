@@ -103,11 +103,11 @@ type portTracker struct {
 	// increasing point (not a backward-motion straggler).
 	lastSendTS *uint64
 	// refdataEra is the Reset Count the refdata set-state machine last acted on
-	// for THIS channel instance. Distinct from era below, which gates frame
+	// for THIS channel instance. Distinct from era below, which gates datagram
 	// sequencing: the two are read at different points and a shared field would
 	// couple a quarantined straggler to a set reset.
 	refdataEra uint8
-	// refdataEraSeeded is false until the first refdata frame of this instance.
+	// refdataEraSeeded is false until the first refdata datagram of this instance.
 	refdataEraSeeded bool
 	// era is the current Reset Count we accept.
 	era uint8
