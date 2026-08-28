@@ -746,6 +746,27 @@ func servingTOB() []portFrame {
 	}
 }
 
+// TestShutdownSummaryIsTheFinalRefdataFrame is the shape a real publisher produces:
+// exactly one Valid=0 and then exit, so the summary is the last refdata frame and
+// the EndOfSession the last mktdata one. Neither is pushed out of its reorder
+// window by a successor, so both reach the state machine only via Flush's drain —
+// which is why resolveShutdownVerdicts has to run after it. Reorder the two and
+// this capture reports nothing at all.
+func TestShutdownSummaryIsTheFinalRefdataFrame(t *testing.T) {
+	frames := append(servingTOB(),
+		onMktdata(buildEndOfSessionFrame(wire.MagicTOB)),
+		onRefdata(buildManifestFrame(wire.MagicTOB, 0, 1, 2)),
+	)
+
+	ac := processTwoPort(t, core.FeedTOB, frames)
+	if hasViolation(ac, "REFDATA.VALID_FLAG_WHILE_SERVING") {
+		t.Error("fired on a trailing shutdown summary")
+	}
+	if !hasPass(ac, "REFDATA.VALID_FLAG_WHILE_SERVING") {
+		t.Error("no pass: the trailing summary never reached the state machine, so no verdict was held")
+	}
+}
+
 // TestShutdownSummaryIsNotAViolation: ManifestSummary(Valid=0) on refdata paired
 // with EndOfSession on mktdata is what the spec asks a publisher to do, whichever
 // of the two the engine classifies first.
