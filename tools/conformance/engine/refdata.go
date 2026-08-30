@@ -130,6 +130,15 @@ type channelRefdataState struct {
 	// Used by NEVER_REACHES_READY.
 	everReady bool
 
+	// neverReadyDecided is true once REFDATA.NEVER_REACHES_READY has reported this
+	// serving period, so the verdict is emitted exactly once whether it was reached
+	// mid-run or at end of run. Cleared wherever a period is: a reset, and the start
+	// of the Valid=1 period that replaces one a Valid=0 closed. Deliberately NOT
+	// cleared by the Valid=0 itself — that summary does not close the period (the
+	// next one's start does), so clearing there would let the same period report
+	// twice.
+	neverReadyDecided bool
+
 	// cycleStartSendTS is the SendTS of the ManifestSummary that opened the
 	// current retransmission cycle. A cycle spans from one ManifestSummary to
 	// the next (same or newer seq). Reset when a new cycle starts.
@@ -267,6 +276,7 @@ func (rs *refdataState) onResetChannel(only uint8) {
 		s.lastServingSendTS = 0
 		s.lastServingSendTSSet = false
 		s.everReady = false
+		s.neverReadyDecided = false
 		s.cycleStartSendTS = 0
 		s.cycleStartSendTSSet = false
 		s.defsSeenThisCycle = make(map[uint32]struct{})
@@ -544,10 +554,13 @@ func (rs *refdataState) onManifestSummary(ch uint8, valid uint8, seq uint16, cou
 	// window, or the next period inherits the previous one's readiness and is
 	// credited with the wall-clock time the channel spent invalid.
 	if !s.valid && s.firstSendTSSet {
-		rs.e.checkNeverReachesReady(ch, s)
+		rs.e.decideNeverReachesReady(ch, s, true)
 		s.everReady = false
 		s.firstSendTSSet = false
 		s.lastServingSendTSSet = false
+		// The period that just decided is closed; the one opening here is a fresh
+		// subscriber and gets its own window to reach ready.
+		s.neverReadyDecided = false
 	}
 
 	// Update previous-summary tracking (for COUNT_CHANGE_NO_SEQ_BUMP).
@@ -787,4 +800,9 @@ func (e *Engine) processRefdataFrame(f *wire.Frame, pt *portTracker) {
 			e.refdata.onInstrumentDef(ch, instrID, manifestSeq, defaultMethod, priceBound, sendTS, dirty, frameSeq)
 		}
 	}
+
+	// REFDATA.NEVER_REACHES_READY decides here rather than only at EndRun, so the
+	// rule is reachable in a process that never exits (#50). Terminal verdicts only;
+	// see decideNeverReachesReady.
+	e.decideNeverReachesReady(ch, e.refdata.channel(ch), false)
 }

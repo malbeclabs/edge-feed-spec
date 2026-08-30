@@ -605,7 +605,8 @@ func (e *Engine) Flush() {
 //
 // REFDATA.NEVER_REACHES_READY (Task 15): the serving period each channel still had
 // open at end of stream. Periods a Valid=0 closed were already reported when the
-// next one opened; see checkNeverReachesReady.
+// next one opened, and a period whose window closed mid-run was reported there; see
+// decideNeverReachesReady.
 func (e *Engine) EndRun() {
 	// Flush any snapshot groups that were opened but never closed.
 	e.flushOpenSnaps()
@@ -621,43 +622,79 @@ func (e *Engine) EndRun() {
 	e.refdata.resolveShutdownVerdicts()
 
 	for ch, s := range e.refdata.channels {
-		e.checkNeverReachesReady(ch, s)
+		e.decideNeverReachesReady(ch, s, true)
 	}
 }
 
-// checkNeverReachesReady reports REFDATA.NEVER_REACHES_READY for one serving period
-// of one channel, measured between its first and last Valid=1 summary. Called from
-// EndRun for the period still open at end of stream, and from onManifestSummary for
-// one a Valid=0 closed and a later Valid=1 replaced.
+// decideNeverReachesReady reports REFDATA.NEVER_REACHES_READY for one serving period
+// of one channel, measured between its first and last Valid=1 summary, at most once
+// per period. Called per refdata datagram, from onManifestSummary for a period a
+// Valid=0 closed and a later Valid=1 replaced, and from EndRun for the period still
+// open at end of stream.
+//
+// **It runs during the run, not only at the end.** The rule's own summary is that a
+// fresh both-port subscriber reaches ready() within manifest cadence + cycle, and
+// that is decidable the moment the window closes — waiting for EndRun makes the rule
+// unreachable in the deployment it matters most in, because a `dz-conformance@`
+// systemd instance never ends (#50). A checker that only speaks at exit cannot alert.
+//
+// `final` is true from EndRun and from the close of a superseded period. The three
+// non-terminal outcomes — no manifest yet, regressed timestamps, a span still short
+// of the window — are answers to "not yet", so mid-period they defer rather than
+// report; more wire may still settle them. The two terminal ones report as soon as
+// they are true:
+//
+//   - ready reached → Pass, at the frame that reached it.
+//   - window closed without ready → Violation, at the frame that closed it.
 //
 // Each period is one opportunity, and each of the five ways out below reports it. A
 // period that reached ready is the rule *passing* — the reason it was silent is that
 // the check is written as a search for failures, which is exactly the shape that
 // makes coverage and no-op indistinguishable (engine/denominator.go).
-func (e *Engine) checkNeverReachesReady(ch uint8, s *channelRefdataState) {
+//
+// Deciding at the window rather than at exit also fixes a masking bug: a period that
+// reached ready long AFTER the window used to report Pass, because EndRun only asked
+// whether ready was ever reached, not whether it was reached in time.
+func (e *Engine) decideNeverReachesReady(ch uint8, s *channelRefdataState, final bool) {
+	if s.neverReadyDecided {
+		return
+	}
 	if e.cfg.ExpectManifestCadence == 0 || e.cfg.ExpectDefinitionCycle == 0 {
 		return
 	}
 	window := e.cfg.ExpectManifestCadence + e.cfg.ExpectDefinitionCycle
 	if s.everReady {
+		s.neverReadyDecided = true
 		e.passed("REFDATA.NEVER_REACHES_READY", core.PortRefData, 0, ch, 0,
 			fmt.Sprintf("channel %d reached ready state", ch))
 		return
 	}
 	if !s.firstSendTSSet || !s.lastServingSendTSSet {
+		if !final {
+			return
+		}
+		s.neverReadyDecided = true
 		e.unverified("REFDATA.NEVER_REACHES_READY", core.ReasonColdStart, core.PortRefData, 0, ch, 0,
 			fmt.Sprintf("channel %d: no ManifestSummary observed, so the observation span is unknown", ch))
 		return
 	}
 	if s.lastServingSendTS < s.firstSendTS {
 		// Wire timestamps regressed (FRAME.SEND_TS_MONOTONIC fires separately);
-		// skip this channel rather than computing a spurious negative/huge span.
+		// skip this period rather than computing a spurious negative/huge span.
+		if !final {
+			return
+		}
+		s.neverReadyDecided = true
 		e.unverified("REFDATA.NEVER_REACHES_READY", core.ReasonSuperseded, core.PortRefData, 0, ch, 0,
 			fmt.Sprintf("channel %d: wire timestamps regressed, so the span is not measurable (FRAME.SEND_TS_MONOTONIC reports it)", ch))
 		return
 	}
 	span := time.Duration(s.lastServingSendTS-s.firstSendTS) * time.Nanosecond
 	if span < window {
+		if !final {
+			return
+		}
+		s.neverReadyDecided = true
 		e.unverified("REFDATA.NEVER_REACHES_READY", core.ReasonInsufficientWindow, core.PortRefData, 0, ch, 0,
 			fmt.Sprintf("channel %d: observed %v, less than the %v a publisher needs to reach ready", ch, span, window))
 		return
@@ -670,6 +707,7 @@ func (e *Engine) checkNeverReachesReady(ch uint8, s *channelRefdataState) {
 		st = core.Unverifiable
 		reason = core.ReasonLoss
 	}
+	s.neverReadyDecided = true
 	e.Emit("REFDATA.NEVER_REACHES_READY", st, core.PortRefData, 0, ch, 0,
 		fmt.Sprintf("channel %d: observed %v (≥ window %v) but never reached ready state",
 			ch, span, window), reason)
