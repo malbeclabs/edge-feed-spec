@@ -603,9 +603,9 @@ func (e *Engine) Flush() {
 // could not be decided when the summary arrived because the EndOfSession that
 // settles it comes from the other port.
 //
-// REFDATA.NEVER_REACHES_READY (Task 15): for each channel that was observed long
-// enough (≥ ExpectManifestCadence + ExpectDefinitionCycle of wire time) on a
-// gapless refdata port but never reached ready(), emit a violation.
+// REFDATA.NEVER_REACHES_READY (Task 15): the serving epoch each channel still had
+// open at end of stream. Epochs a Valid=0 closed were already reported when the
+// next one opened; see checkNeverReachesReady.
 func (e *Engine) EndRun() {
 	// Flush any snapshot groups that were opened but never closed.
 	e.flushOpenSnaps()
@@ -618,52 +618,58 @@ func (e *Engine) EndRun() {
 	if e.refdata == nil {
 		return
 	}
-	// Not config-gated, so it runs ahead of the --expect-* early return below.
 	e.refdata.resolveShutdownVerdicts()
 
+	for ch, s := range e.refdata.channels {
+		e.checkNeverReachesReady(ch, s)
+	}
+}
+
+// checkNeverReachesReady reports REFDATA.NEVER_REACHES_READY for one serving epoch
+// of one channel: from EndRun for the epoch still open at end of stream, and from
+// onManifestSummary for an epoch a Valid=0 closed and a later Valid=1 replaced.
+//
+// Each epoch is one opportunity, and each of the five ways out below reports it. An
+// epoch that reached ready is the rule *passing* — the reason it was silent is that
+// the check is written as a search for failures, which is exactly the shape that
+// makes coverage and no-op indistinguishable (engine/denominator.go).
+func (e *Engine) checkNeverReachesReady(ch uint8, s *channelRefdataState) {
 	if e.cfg.ExpectManifestCadence == 0 || e.cfg.ExpectDefinitionCycle == 0 {
 		return
 	}
 	window := e.cfg.ExpectManifestCadence + e.cfg.ExpectDefinitionCycle
-	// Each observed channel is one opportunity, and each of the four ways out below
-	// reports it. A channel that reached ready is the rule *passing* — the reason it
-	// was silent is that the check is written as a search for failures, which is
-	// exactly the shape that makes coverage and no-op indistinguishable
-	// (engine/denominator.go).
-	for ch, s := range e.refdata.channels {
-		if s.everReady {
-			e.passed("REFDATA.NEVER_REACHES_READY", core.PortRefData, 0, ch, 0,
-				fmt.Sprintf("channel %d reached ready state", ch))
-			continue
-		}
-		if !s.firstSendTSSet || !s.lastManifestSendTSSet {
-			e.unverified("REFDATA.NEVER_REACHES_READY", core.ReasonColdStart, core.PortRefData, 0, ch, 0,
-				fmt.Sprintf("channel %d: no ManifestSummary observed, so the observation span is unknown", ch))
-			continue
-		}
-		if s.lastManifestSendTS < s.firstSendTS {
-			// Wire timestamps regressed (FRAME.SEND_TS_MONOTONIC fires separately);
-			// skip this channel rather than computing a spurious negative/huge span.
-			e.unverified("REFDATA.NEVER_REACHES_READY", core.ReasonSuperseded, core.PortRefData, 0, ch, 0,
-				fmt.Sprintf("channel %d: wire timestamps regressed, so the span is not measurable (FRAME.SEND_TS_MONOTONIC reports it)", ch))
-			continue
-		}
-		span := time.Duration(s.lastManifestSendTS-s.firstSendTS) * time.Nanosecond
-		if span < window {
-			e.unverified("REFDATA.NEVER_REACHES_READY", core.ReasonInsufficientWindow, core.PortRefData, 0, ch, 0,
-				fmt.Sprintf("channel %d: observed %v, less than the %v a publisher needs to reach ready", ch, span, window))
-			continue
-		}
-		// Gate: if any refdata window on this channel is dirty, downgrade.
-		dirty := e.dirtyOn(core.PortRefData, ch)
-		st := core.Violation
-		reason := ""
-		if dirty {
-			st = core.Unverifiable
-			reason = core.ReasonLoss
-		}
-		e.Emit("REFDATA.NEVER_REACHES_READY", st, core.PortRefData, 0, ch, 0,
-			fmt.Sprintf("channel %d: observed %v (≥ window %v) but never reached ready state",
-				ch, span, window), reason)
+	if s.everReady {
+		e.passed("REFDATA.NEVER_REACHES_READY", core.PortRefData, 0, ch, 0,
+			fmt.Sprintf("channel %d reached ready state", ch))
+		return
 	}
+	if !s.firstSendTSSet || !s.lastManifestSendTSSet {
+		e.unverified("REFDATA.NEVER_REACHES_READY", core.ReasonColdStart, core.PortRefData, 0, ch, 0,
+			fmt.Sprintf("channel %d: no ManifestSummary observed, so the observation span is unknown", ch))
+		return
+	}
+	if s.lastManifestSendTS < s.firstSendTS {
+		// Wire timestamps regressed (FRAME.SEND_TS_MONOTONIC fires separately);
+		// skip this channel rather than computing a spurious negative/huge span.
+		e.unverified("REFDATA.NEVER_REACHES_READY", core.ReasonSuperseded, core.PortRefData, 0, ch, 0,
+			fmt.Sprintf("channel %d: wire timestamps regressed, so the span is not measurable (FRAME.SEND_TS_MONOTONIC reports it)", ch))
+		return
+	}
+	span := time.Duration(s.lastManifestSendTS-s.firstSendTS) * time.Nanosecond
+	if span < window {
+		e.unverified("REFDATA.NEVER_REACHES_READY", core.ReasonInsufficientWindow, core.PortRefData, 0, ch, 0,
+			fmt.Sprintf("channel %d: observed %v, less than the %v a publisher needs to reach ready", ch, span, window))
+		return
+	}
+	// Gate: if any refdata window on this channel is dirty, downgrade.
+	dirty := e.dirtyOn(core.PortRefData, ch)
+	st := core.Violation
+	reason := ""
+	if dirty {
+		st = core.Unverifiable
+		reason = core.ReasonLoss
+	}
+	e.Emit("REFDATA.NEVER_REACHES_READY", st, core.PortRefData, 0, ch, 0,
+		fmt.Sprintf("channel %d: observed %v (≥ window %v) but never reached ready state",
+			ch, span, window), reason)
 }

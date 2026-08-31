@@ -694,3 +694,95 @@ func TestNeverReachesReadyWindowTooShort(t *testing.T) {
 		t.Error("REFDATA.NEVER_REACHES_READY: a span shorter than the window must be reported as unverifiable/insufficient_window")
 	}
 }
+
+// --- Serving epochs: a Valid=0 ends one, the next Valid=1 opens another (PR #48 review) ---
+
+// TestManifestCadenceAcrossAValidZeroPeriod: the cadence is measured between
+// ManifestSummary messages, so the Valid=0 summaries a shutting-down (or
+// re-initialising) publisher emits at cadence are anchors like any other. Measuring
+// the first Valid=1 after a resume against the last Valid=1 reports the whole
+// invalid period as one gap.
+func TestManifestCadenceAcrossAValidZeroPeriod(t *testing.T) {
+	cfg := Config{Feed: core.FeedTOB, ExpectManifestCadence: 1 * time.Second}
+	e, ac := newCadenceEngine(cfg)
+
+	// Serving, then invalid for 3 s at a conformant 1 s cadence, then serving again.
+	for i, fr := range []struct {
+		ts    uint64
+		valid uint8
+	}{
+		{0, 1}, {1 * nsPerSec, 0}, {2 * nsPerSec, 0}, {3 * nsPerSec, 0}, {4 * nsPerSec, 1},
+	} {
+		raw := buildManifestFrameWithTS(wire.MagicTOB, fr.ts, fr.valid, 1, 1, 1)
+		processFrame(e, raw, wire.MagicTOB, core.PortRefData, uint64(i+1))
+	}
+	e.Flush()
+
+	if hasViolation(ac, "REFDATA.MANIFEST_CADENCE") {
+		t.Error("REFDATA.MANIFEST_CADENCE: fired on a publisher that met the cadence throughout")
+	}
+}
+
+// TestNeverReachesReadySpanIsPerEpoch: a channel that re-establishes after a long
+// invalid period must be judged on the epoch's own observation window, not on the
+// wall clock since the first summary it ever sent.
+func TestNeverReachesReadySpanIsPerEpoch(t *testing.T) {
+	cfg := Config{
+		Feed:                  core.FeedTOB,
+		ExpectManifestCadence: 1 * time.Second,
+		ExpectDefinitionCycle: 30 * time.Second,
+	}
+	e, ac := newCadenceEngine(cfg)
+
+	// Epoch 1: t=0-2s, count=2 but only one def, so never ready. Then Valid=0.
+	processFrame(e, buildManifestFrameWithTS(wire.MagicTOB, 0, 1, 1, 2, 1), wire.MagicTOB, core.PortRefData, 1)
+	processFrame(e, buildInstrDefFrameWithTS(nsPerSec, 100, 1, 1), wire.MagicTOB, core.PortRefData, 2)
+	processFrame(e, buildManifestFrameWithTS(wire.MagicTOB, 2*nsPerSec, 0, 1, 2, 1), wire.MagicTOB, core.PortRefData, 3)
+
+	// Epoch 2: starts at t=100s and is observed for 2s, also never ready.
+	processFrame(e, buildManifestFrameWithTS(wire.MagicTOB, 100*nsPerSec, 1, 2, 2, 1), wire.MagicTOB, core.PortRefData, 4)
+	processFrame(e, buildInstrDefFrameWithTS(101*nsPerSec, 100, 2, 1), wire.MagicTOB, core.PortRefData, 5)
+	processFrame(e, buildManifestFrameWithTS(wire.MagicTOB, 102*nsPerSec, 1, 2, 2, 1), wire.MagicTOB, core.PortRefData, 6)
+
+	e.Flush()
+	e.EndRun()
+
+	if hasViolation(ac, "REFDATA.NEVER_REACHES_READY") {
+		t.Error("REFDATA.NEVER_REACHES_READY: charged the epoch with the time the channel was invalid")
+	}
+	if !hasUnverifiable(ac, "REFDATA.NEVER_REACHES_READY", core.ReasonInsufficientWindow) {
+		t.Error("REFDATA.NEVER_REACHES_READY: expected insufficient_window for a 2s epoch")
+	}
+}
+
+// TestNeverReachesReadyIsNotMaskedByAnEarlierEpoch: reaching ready once does not
+// buy a publisher the rest of the capture. An epoch that re-establishes and then
+// never reaches ready is still a violation.
+func TestNeverReachesReadyIsNotMaskedByAnEarlierEpoch(t *testing.T) {
+	cfg := Config{
+		Feed:                  core.FeedTOB,
+		ExpectManifestCadence: 1 * time.Second,
+		ExpectDefinitionCycle: 30 * time.Second,
+	}
+	e, ac := newCadenceEngine(cfg)
+
+	// Epoch 1 reaches ready (count=1, one def), then Valid=0.
+	processFrame(e, buildManifestFrameWithTS(wire.MagicTOB, 0, 1, 1, 1, 1), wire.MagicTOB, core.PortRefData, 1)
+	processFrame(e, buildInstrDefFrameWithTS(nsPerSec, 100, 1, 1), wire.MagicTOB, core.PortRefData, 2)
+	processFrame(e, buildManifestFrameWithTS(wire.MagicTOB, 2*nsPerSec, 0, 1, 1, 1), wire.MagicTOB, core.PortRefData, 3)
+
+	// Epoch 2 declares two instruments, delivers one, and runs long enough to judge.
+	processFrame(e, buildManifestFrameWithTS(wire.MagicTOB, 3*nsPerSec, 1, 2, 2, 1), wire.MagicTOB, core.PortRefData, 4)
+	processFrame(e, buildInstrDefFrameWithTS(4*nsPerSec, 100, 2, 1), wire.MagicTOB, core.PortRefData, 5)
+	processFrame(e, buildManifestFrameWithTS(wire.MagicTOB, 100*nsPerSec, 1, 2, 2, 1), wire.MagicTOB, core.PortRefData, 6)
+
+	e.Flush()
+	e.EndRun()
+
+	if !hasViolation(ac, "REFDATA.NEVER_REACHES_READY") {
+		t.Error("REFDATA.NEVER_REACHES_READY: an earlier epoch's readiness masked an epoch that never reached it")
+	}
+	if !hasPass(ac, "REFDATA.NEVER_REACHES_READY") {
+		t.Error("REFDATA.NEVER_REACHES_READY: epoch 1 reached ready and owes a pass of its own")
+	}
+}

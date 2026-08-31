@@ -387,11 +387,17 @@ func (rs *refdataState) onManifestSummary(ch uint8, valid uint8, seq uint16, cou
 		s.seqEverSet = false
 		s.hadNonEmptySet = false
 		s.setSnapshotSet = false
-		// The definition cycle is about the active set, which is now gone.
+		// The cadence is between ManifestSummary messages (supplement §3), and a
+		// Valid=0 summary is one — so the anchor advances here rather than being
+		// cleared. Leaving it at the last Valid=1 measures a publisher's whole
+		// invalid period as one gap the moment it resumes.
+		s.lastManifestSendTS = sendTS
+		s.lastManifestSendTSSet = true
+		// everReady and firstSendTS are what this tool observed, not what the
+		// publisher published, so a publisher flag does not erase them. The epoch
+		// they describe is closed at the *start* of the next one, below.
 		//
-		// everReady, firstSendTS and lastManifestSendTS are deliberately NOT cleared:
-		// they record what this tool observed, not what the publisher published, so a
-		// publisher flag must not erase them. NEVER_REACHES_READY reads them.
+		// The definition cycle is about the active set, which is now gone.
 		s.cycleStartSendTS = 0
 		s.cycleStartSendTSSet = false
 		s.defsSeenThisCycle = make(map[uint32]struct{})
@@ -515,6 +521,16 @@ func (rs *refdataState) onManifestSummary(ch uint8, valid uint8, seq uint16, cou
 		s.prevDefFrameTSSet = false
 	}
 
+	// A Valid=1 on an invalid channel that has already been observed opens a NEW
+	// serving epoch. Judge the one that just ended and start a fresh observation
+	// window, or the next epoch inherits the previous one's readiness and is
+	// credited with the wall-clock time the channel spent invalid.
+	if !s.valid && s.firstSendTSSet {
+		rs.e.checkNeverReachesReady(ch, s)
+		s.everReady = false
+		s.firstSendTSSet = false
+	}
+
 	// Update previous-summary tracking (for COUNT_CHANGE_NO_SEQ_BUMP).
 	s.prevSummarySeq = seq
 	s.prevSummaryCount = count
@@ -571,9 +587,17 @@ func (rs *refdataState) resolveShutdownVerdicts() {
 // Valid=0 summary. resumed is true when the publisher has since declared the
 // channel valid again, which proves the drop was not the end of a session.
 //
-// Order matters: a witnessed EndOfSession settles it outright, and everything
-// below that turns on the *absence* of one, which loss or an unwatched mktdata
-// port can equally explain.
+// Order matters. A witnessed EndOfSession settles it outright; everything below
+// turns on the *absence* of one, which loss or an unwatched mktdata port can
+// equally explain.
+//
+// The mark deliberately outranks resumed, even though a resume looks like stronger
+// evidence. Under channel-keyed state "EndOfSession, Valid=0, Valid=1" is the same
+// byte sequence for a publisher that ended its session and then resumed, and for
+// one arm shutting down cleanly while the other keeps serving — the routine shape
+// in a two-arm deployment. Ranking resumed first turns that conformant shutdown
+// into a must violation; this way round the cost is a missed one. See the README's
+// channel-vs-instance limitation.
 func (rs *refdataState) resolveValidZero(ch uint8, ev *validZeroEvent, resumed bool) {
 	const rule = "REFDATA.VALID_FLAG_WHILE_SERVING"
 	if _, ended := rs.e.sessionEnd[ch]; ended {
