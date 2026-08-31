@@ -603,8 +603,8 @@ func (e *Engine) Flush() {
 // could not be decided when the summary arrived because the EndOfSession that
 // settles it comes from the other port.
 //
-// REFDATA.NEVER_REACHES_READY (Task 15): the serving epoch each channel still had
-// open at end of stream. Epochs a Valid=0 closed were already reported when the
+// REFDATA.NEVER_REACHES_READY (Task 15): the serving period each channel still had
+// open at end of stream. Periods a Valid=0 closed were already reported when the
 // next one opened; see checkNeverReachesReady.
 func (e *Engine) EndRun() {
 	// Flush any snapshot groups that were opened but never closed.
@@ -625,12 +625,13 @@ func (e *Engine) EndRun() {
 	}
 }
 
-// checkNeverReachesReady reports REFDATA.NEVER_REACHES_READY for one serving epoch
-// of one channel: from EndRun for the epoch still open at end of stream, and from
-// onManifestSummary for an epoch a Valid=0 closed and a later Valid=1 replaced.
+// checkNeverReachesReady reports REFDATA.NEVER_REACHES_READY for one serving period
+// of one channel — the span from the Valid=1 that establishes a set to the Valid=0
+// that ends it. Called from EndRun for the period still open at end of stream, and
+// from onManifestSummary for one a Valid=0 closed and a later Valid=1 replaced.
 //
-// Each epoch is one opportunity, and each of the five ways out below reports it. An
-// epoch that reached ready is the rule *passing* — the reason it was silent is that
+// Each period is one opportunity, and each of the five ways out below reports it. A
+// period that reached ready is the rule *passing* — the reason it was silent is that
 // the check is written as a search for failures, which is exactly the shape that
 // makes coverage and no-op indistinguishable (engine/denominator.go).
 func (e *Engine) checkNeverReachesReady(ch uint8, s *channelRefdataState) {

@@ -394,8 +394,8 @@ func (rs *refdataState) onManifestSummary(ch uint8, valid uint8, seq uint16, cou
 		s.lastManifestSendTS = sendTS
 		s.lastManifestSendTSSet = true
 		// everReady and firstSendTS are what this tool observed, not what the
-		// publisher published, so a publisher flag does not erase them. The epoch
-		// they describe is closed at the *start* of the next one, below.
+		// publisher published, so a publisher flag does not erase them. The serving
+		// period they describe is closed at the *start* of the next one, below.
 		//
 		// The definition cycle is about the active set, which is now gone.
 		s.cycleStartSendTS = 0
@@ -522,8 +522,8 @@ func (rs *refdataState) onManifestSummary(ch uint8, valid uint8, seq uint16, cou
 	}
 
 	// A Valid=1 on an invalid channel that has already been observed opens a NEW
-	// serving epoch. Judge the one that just ended and start a fresh observation
-	// window, or the next epoch inherits the previous one's readiness and is
+	// serving period. Judge the one that just ended and start a fresh observation
+	// window, or the next period inherits the previous one's readiness and is
 	// credited with the wall-clock time the channel spent invalid.
 	if !s.valid && s.firstSendTSSet {
 		rs.e.checkNeverReachesReady(ch, s)
