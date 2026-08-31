@@ -739,10 +739,18 @@ func TestNeverReachesReadySpanIsPerServingPeriod(t *testing.T) {
 	processFrame(e, buildInstrDefFrameWithTS(nsPerSec, 100, 1, 1), wire.MagicTOB, core.PortRefData, 2)
 	processFrame(e, buildManifestFrameWithTS(wire.MagicTOB, 2*nsPerSec, 0, 1, 2, 1), wire.MagicTOB, core.PortRefData, 3)
 
+	// The publisher keeps its manifest cadence while invalid. Without these the
+	// anchor advance across the gap is 0 s wide and the test passes either way.
+	seq := uint64(4)
+	for ts := 3 * nsPerSec; ts < 100*nsPerSec; ts += nsPerSec {
+		processFrame(e, buildManifestFrameWithTS(wire.MagicTOB, ts, 0, 1, 2, 1), wire.MagicTOB, core.PortRefData, seq)
+		seq++
+	}
+
 	// Period 2: starts at t=100s and is observed for 2s, also never ready.
-	processFrame(e, buildManifestFrameWithTS(wire.MagicTOB, 100*nsPerSec, 1, 2, 2, 1), wire.MagicTOB, core.PortRefData, 4)
-	processFrame(e, buildInstrDefFrameWithTS(101*nsPerSec, 100, 2, 1), wire.MagicTOB, core.PortRefData, 5)
-	processFrame(e, buildManifestFrameWithTS(wire.MagicTOB, 102*nsPerSec, 1, 2, 2, 1), wire.MagicTOB, core.PortRefData, 6)
+	processFrame(e, buildManifestFrameWithTS(wire.MagicTOB, 100*nsPerSec, 1, 2, 2, 1), wire.MagicTOB, core.PortRefData, seq)
+	processFrame(e, buildInstrDefFrameWithTS(101*nsPerSec, 100, 2, 1), wire.MagicTOB, core.PortRefData, seq+1)
+	processFrame(e, buildManifestFrameWithTS(wire.MagicTOB, 102*nsPerSec, 1, 2, 2, 1), wire.MagicTOB, core.PortRefData, seq+2)
 
 	e.Flush()
 	e.EndRun()
@@ -784,5 +792,44 @@ func TestNeverReachesReadyIsNotMaskedByAnEarlierPeriod(t *testing.T) {
 	}
 	if !hasPass(ac, "REFDATA.NEVER_REACHES_READY") {
 		t.Error("REFDATA.NEVER_REACHES_READY: serving period 1 reached ready and owes a pass of its own")
+	}
+}
+
+// TestNeverReachesReadySpanEndsAtTheLastServingSummary: a serving period is not
+// charged with the invalid stretch that follows it. The publisher below serves for
+// 2 s without reaching ready, then holds its manifest cadence while invalid until
+// the capture ends — an observation window of 2 s, not of a minute.
+func TestNeverReachesReadySpanEndsAtTheLastServingSummary(t *testing.T) {
+	cfg := Config{
+		Feed:                  core.FeedTOB,
+		ExpectManifestCadence: 1 * time.Second,
+		ExpectDefinitionCycle: 30 * time.Second,
+	}
+	e, ac := newCadenceEngine(cfg)
+
+	// Serving t=0-2s at a 1 s summary cadence, count=2 but only one def, so never ready.
+	processFrame(e, buildManifestFrameWithTS(wire.MagicTOB, 0, 1, 1, 2, 1), wire.MagicTOB, core.PortRefData, 1)
+	processFrame(e, buildInstrDefFrameWithTS(nsPerSec/2, 100, 1, 1), wire.MagicTOB, core.PortRefData, 2)
+	processFrame(e, buildManifestFrameWithTS(wire.MagicTOB, nsPerSec, 1, 1, 2, 1), wire.MagicTOB, core.PortRefData, 3)
+	processFrame(e, buildManifestFrameWithTS(wire.MagicTOB, 2*nsPerSec, 1, 1, 2, 1), wire.MagicTOB, core.PortRefData, 4)
+
+	// Invalid from t=3s to the end of the capture, still at a conformant cadence.
+	seq := uint64(5)
+	for ts := 3 * nsPerSec; ts <= 60*nsPerSec; ts += nsPerSec {
+		processFrame(e, buildManifestFrameWithTS(wire.MagicTOB, ts, 0, 1, 2, 1), wire.MagicTOB, core.PortRefData, seq)
+		seq++
+	}
+
+	e.Flush()
+	e.EndRun()
+
+	if hasViolation(ac, "REFDATA.NEVER_REACHES_READY") {
+		t.Error("REFDATA.NEVER_REACHES_READY: charged the serving period with the invalid stretch after it")
+	}
+	if !hasUnverifiable(ac, "REFDATA.NEVER_REACHES_READY", core.ReasonInsufficientWindow) {
+		t.Error("REFDATA.NEVER_REACHES_READY: expected insufficient_window for a 2s serving period")
+	}
+	if hasViolation(ac, "REFDATA.MANIFEST_CADENCE") {
+		t.Error("REFDATA.MANIFEST_CADENCE: fired on a publisher that held its cadence throughout")
 	}
 }

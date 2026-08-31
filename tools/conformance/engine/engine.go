@@ -626,9 +626,9 @@ func (e *Engine) EndRun() {
 }
 
 // checkNeverReachesReady reports REFDATA.NEVER_REACHES_READY for one serving period
-// of one channel — the span from the Valid=1 that establishes a set to the Valid=0
-// that ends it. Called from EndRun for the period still open at end of stream, and
-// from onManifestSummary for one a Valid=0 closed and a later Valid=1 replaced.
+// of one channel, measured between its first and last Valid=1 summary. Called from
+// EndRun for the period still open at end of stream, and from onManifestSummary for
+// one a Valid=0 closed and a later Valid=1 replaced.
 //
 // Each period is one opportunity, and each of the five ways out below reports it. A
 // period that reached ready is the rule *passing* — the reason it was silent is that
@@ -644,19 +644,19 @@ func (e *Engine) checkNeverReachesReady(ch uint8, s *channelRefdataState) {
 			fmt.Sprintf("channel %d reached ready state", ch))
 		return
 	}
-	if !s.firstSendTSSet || !s.lastManifestSendTSSet {
+	if !s.firstSendTSSet || !s.lastServingSendTSSet {
 		e.unverified("REFDATA.NEVER_REACHES_READY", core.ReasonColdStart, core.PortRefData, 0, ch, 0,
 			fmt.Sprintf("channel %d: no ManifestSummary observed, so the observation span is unknown", ch))
 		return
 	}
-	if s.lastManifestSendTS < s.firstSendTS {
+	if s.lastServingSendTS < s.firstSendTS {
 		// Wire timestamps regressed (FRAME.SEND_TS_MONOTONIC fires separately);
 		// skip this channel rather than computing a spurious negative/huge span.
 		e.unverified("REFDATA.NEVER_REACHES_READY", core.ReasonSuperseded, core.PortRefData, 0, ch, 0,
 			fmt.Sprintf("channel %d: wire timestamps regressed, so the span is not measurable (FRAME.SEND_TS_MONOTONIC reports it)", ch))
 		return
 	}
-	span := time.Duration(s.lastManifestSendTS-s.firstSendTS) * time.Nanosecond
+	span := time.Duration(s.lastServingSendTS-s.firstSendTS) * time.Nanosecond
 	if span < window {
 		e.unverified("REFDATA.NEVER_REACHES_READY", core.ReasonInsufficientWindow, core.PortRefData, 0, ch, 0,
 			fmt.Sprintf("channel %d: observed %v, less than the %v a publisher needs to reach ready", ch, span, window))

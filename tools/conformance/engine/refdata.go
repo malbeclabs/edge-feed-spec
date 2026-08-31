@@ -106,15 +106,25 @@ type channelRefdataState struct {
 
 	// --- Task 15: timing/cadence state ---
 
-	// lastManifestSendTS is the SendTS of the most-recently accepted ManifestSummary
-	// (valid=1 that seeds or advances state). Set from frame SendTS (nanoseconds).
+	// lastManifestSendTS is the SendTS of the most recent ManifestSummary of any
+	// kind, Valid=0 included: the MANIFEST_CADENCE anchor, and only that. The
+	// cadence is measured between summaries, so it must not skip the ones a
+	// publisher sends while invalid.
 	lastManifestSendTS    uint64
 	lastManifestSendTSSet bool
 
-	// firstSendTS is the SendTS of the first ManifestSummary seen on this channel.
-	// Used by NEVER_REACHES_READY to compute the observation window.
-	firstSendTS    uint64
-	firstSendTSSet bool
+	// firstSendTS and lastServingSendTS bound the current serving period: the first
+	// and most recent Valid=1 summary of it. NEVER_REACHES_READY measures its
+	// observation window between them.
+	//
+	// lastServingSendTS is deliberately not lastManifestSendTS. Sharing one field
+	// charges a serving period with the invalid stretch that follows it, so a
+	// publisher that keeps its cadence while invalid turns a 2 s period into a
+	// minute-long one and earns a violation on a must rule.
+	firstSendTS          uint64
+	firstSendTSSet       bool
+	lastServingSendTS    uint64
+	lastServingSendTSSet bool
 
 	// everReady is true once channelReady has ever been true for this channel.
 	// Used by NEVER_REACHES_READY.
@@ -247,6 +257,8 @@ func (rs *refdataState) onReset(newResetCount uint8) {
 		s.lastManifestSendTSSet = false
 		s.firstSendTS = 0
 		s.firstSendTSSet = false
+		s.lastServingSendTS = 0
+		s.lastServingSendTSSet = false
 		s.everReady = false
 		s.cycleStartSendTS = 0
 		s.cycleStartSendTSSet = false
@@ -529,6 +541,7 @@ func (rs *refdataState) onManifestSummary(ch uint8, valid uint8, seq uint16, cou
 		rs.e.checkNeverReachesReady(ch, s)
 		s.everReady = false
 		s.firstSendTSSet = false
+		s.lastServingSendTSSet = false
 	}
 
 	// Update previous-summary tracking (for COUNT_CHANGE_NO_SEQ_BUMP).
@@ -555,6 +568,8 @@ func (rs *refdataState) onManifestSummary(ch uint8, valid uint8, seq uint16, cou
 	}
 	s.lastManifestSendTS = sendTS
 	s.lastManifestSendTSSet = true
+	s.lastServingSendTS = sendTS
+	s.lastServingSendTSSet = true
 	// Open the (single) retransmission cycle on the first valid manifest. It then
 	// tumbles every ExpectDefinitionCycle (closed/reopened in the block above),
 	// rather than resetting on every manifest.
