@@ -43,6 +43,10 @@ type Engine struct {
 	mbo *mboState
 	// Market-by-price consumer state; lazily initialised by ensureMBP.
 	mbp *mbpState
+	// sessionEnd holds the channels that have announced EndOfSession on mktdata.
+	// The refdata state machine reads it to tell the shutdown ManifestSummary the
+	// spec mandates from a mid-service Valid drop; see resolveValidZero.
+	sessionEnd map[uint8]struct{}
 }
 
 // New constructs an Engine with the given config and reporter.
@@ -51,10 +55,11 @@ func New(cfg Config, rep report.Reporter) *Engine {
 		cfg.ReorderWindow = 8
 	}
 	return &Engine{
-		cfg:   cfg,
-		rep:   rep,
-		now:   time.Now,
-		ports: make(map[instanceKey]*portTracker),
+		cfg:        cfg,
+		rep:        rep,
+		now:        time.Now,
+		ports:      make(map[instanceKey]*portTracker),
+		sessionEnd: make(map[uint8]struct{}),
 	}
 }
 
@@ -477,6 +482,7 @@ func (e *Engine) classify(item *bufferItem, pt *portTracker) {
 
 	// Per-feed validator routing (mktdata port only).
 	if port == core.PortMktData {
+		e.observeSessionEnd(f)
 		switch e.cfg.Feed {
 		case core.FeedTOB:
 			e.checkTOB(f, port, f.Header.ChannelID)
@@ -496,6 +502,34 @@ func (e *Engine) classify(item *bufferItem, pt *portTracker) {
 	if port == core.PortSnapshot && e.cfg.Feed == core.FeedMBP {
 		e.checkMBPSnapshot(f, f.Header.ChannelID, f.Header.Sequence)
 	}
+}
+
+// observeSessionEnd records that a channel announced the end of its session.
+// EndOfSession is per channel ("no more data on this channel for the current
+// session") and carries no channel field of its own, so the frame header names it.
+//
+// Only a mktdata placement counts. Anywhere else the message is already
+// MSG.WRONG_PORT_PLACEMENT, and a misplaced one must not excuse a refdata finding.
+func (e *Engine) observeSessionEnd(f *wire.Frame) {
+	for _, m := range f.Messages {
+		if m.Type == wire.TypeEndOfSession {
+			e.sessionEnd[f.Header.ChannelID] = struct{}{}
+			return
+		}
+	}
+}
+
+// mktdataObserved reports whether any mktdata frame arrived on this channel — i.e.
+// whether an EndOfSession could have been witnessed at all. False under
+// --refdata-port with no --mktdata-port, where the absence of a session-end
+// signal says nothing about the publisher.
+func (e *Engine) mktdataObserved(ch uint8) bool {
+	for k := range e.ports {
+		if k.port == core.PortMktData && k.ch == ch {
+			return true
+		}
+	}
+	return false
 }
 
 // checkHeartbeatCadence checks HEARTBEAT.CADENCE on the mktdata port.
@@ -565,9 +599,13 @@ func (e *Engine) Flush() {
 // SNAP.ROUND_ROBIN_COVERS_MANIFEST (Task 22): after ≥2 clean snapshot cycles,
 // any manifest-ready instrument with no completed snapshots fires this rule.
 //
-// REFDATA.NEVER_REACHES_READY (Task 15): for each channel that was observed long
-// enough (≥ ExpectManifestCadence + ExpectDefinitionCycle of wire time) on a
-// gapless refdata port but never reached ready(), emit a violation.
+// REFDATA.VALID_FLAG_WHILE_SERVING: each channel's held Valid=0 verdict, which
+// could not be decided when the summary arrived because the EndOfSession that
+// settles it comes from the other port.
+//
+// REFDATA.NEVER_REACHES_READY (Task 15): the serving period each channel still had
+// open at end of stream. Periods a Valid=0 closed were already reported when the
+// next one opened; see checkNeverReachesReady.
 func (e *Engine) EndRun() {
 	// Flush any snapshot groups that were opened but never closed.
 	e.flushOpenSnaps()
@@ -580,49 +618,59 @@ func (e *Engine) EndRun() {
 	if e.refdata == nil {
 		return
 	}
+	e.refdata.resolveShutdownVerdicts()
+
+	for ch, s := range e.refdata.channels {
+		e.checkNeverReachesReady(ch, s)
+	}
+}
+
+// checkNeverReachesReady reports REFDATA.NEVER_REACHES_READY for one serving period
+// of one channel, measured between its first and last Valid=1 summary. Called from
+// EndRun for the period still open at end of stream, and from onManifestSummary for
+// one a Valid=0 closed and a later Valid=1 replaced.
+//
+// Each period is one opportunity, and each of the five ways out below reports it. A
+// period that reached ready is the rule *passing* — the reason it was silent is that
+// the check is written as a search for failures, which is exactly the shape that
+// makes coverage and no-op indistinguishable (engine/denominator.go).
+func (e *Engine) checkNeverReachesReady(ch uint8, s *channelRefdataState) {
 	if e.cfg.ExpectManifestCadence == 0 || e.cfg.ExpectDefinitionCycle == 0 {
 		return
 	}
 	window := e.cfg.ExpectManifestCadence + e.cfg.ExpectDefinitionCycle
-	// Each observed channel is one opportunity, and each of the four ways out below
-	// reports it. A channel that reached ready is the rule *passing* — the reason it
-	// was silent is that the check is written as a search for failures, which is
-	// exactly the shape that makes coverage and no-op indistinguishable
-	// (engine/denominator.go).
-	for ch, s := range e.refdata.channels {
-		if s.everReady {
-			e.passed("REFDATA.NEVER_REACHES_READY", core.PortRefData, 0, ch, 0,
-				fmt.Sprintf("channel %d reached ready state", ch))
-			continue
-		}
-		if !s.firstSendTSSet || !s.lastManifestSendTSSet {
-			e.unverified("REFDATA.NEVER_REACHES_READY", core.ReasonColdStart, core.PortRefData, 0, ch, 0,
-				fmt.Sprintf("channel %d: no ManifestSummary observed, so the observation span is unknown", ch))
-			continue
-		}
-		if s.lastManifestSendTS < s.firstSendTS {
-			// Wire timestamps regressed (FRAME.SEND_TS_MONOTONIC fires separately);
-			// skip this channel rather than computing a spurious negative/huge span.
-			e.unverified("REFDATA.NEVER_REACHES_READY", core.ReasonSuperseded, core.PortRefData, 0, ch, 0,
-				fmt.Sprintf("channel %d: wire timestamps regressed, so the span is not measurable (FRAME.SEND_TS_MONOTONIC reports it)", ch))
-			continue
-		}
-		span := time.Duration(s.lastManifestSendTS-s.firstSendTS) * time.Nanosecond
-		if span < window {
-			e.unverified("REFDATA.NEVER_REACHES_READY", core.ReasonInsufficientWindow, core.PortRefData, 0, ch, 0,
-				fmt.Sprintf("channel %d: observed %v, less than the %v a publisher needs to reach ready", ch, span, window))
-			continue
-		}
-		// Gate: if any refdata window on this channel is dirty, downgrade.
-		dirty := e.dirtyOn(core.PortRefData, ch)
-		st := core.Violation
-		reason := ""
-		if dirty {
-			st = core.Unverifiable
-			reason = core.ReasonLoss
-		}
-		e.Emit("REFDATA.NEVER_REACHES_READY", st, core.PortRefData, 0, ch, 0,
-			fmt.Sprintf("channel %d: observed %v (≥ window %v) but never reached ready state",
-				ch, span, window), reason)
+	if s.everReady {
+		e.passed("REFDATA.NEVER_REACHES_READY", core.PortRefData, 0, ch, 0,
+			fmt.Sprintf("channel %d reached ready state", ch))
+		return
 	}
+	if !s.firstSendTSSet || !s.lastServingSendTSSet {
+		e.unverified("REFDATA.NEVER_REACHES_READY", core.ReasonColdStart, core.PortRefData, 0, ch, 0,
+			fmt.Sprintf("channel %d: no ManifestSummary observed, so the observation span is unknown", ch))
+		return
+	}
+	if s.lastServingSendTS < s.firstSendTS {
+		// Wire timestamps regressed (FRAME.SEND_TS_MONOTONIC fires separately);
+		// skip this channel rather than computing a spurious negative/huge span.
+		e.unverified("REFDATA.NEVER_REACHES_READY", core.ReasonSuperseded, core.PortRefData, 0, ch, 0,
+			fmt.Sprintf("channel %d: wire timestamps regressed, so the span is not measurable (FRAME.SEND_TS_MONOTONIC reports it)", ch))
+		return
+	}
+	span := time.Duration(s.lastServingSendTS-s.firstSendTS) * time.Nanosecond
+	if span < window {
+		e.unverified("REFDATA.NEVER_REACHES_READY", core.ReasonInsufficientWindow, core.PortRefData, 0, ch, 0,
+			fmt.Sprintf("channel %d: observed %v, less than the %v a publisher needs to reach ready", ch, span, window))
+		return
+	}
+	// Gate: if any refdata window on this channel is dirty, downgrade.
+	dirty := e.dirtyOn(core.PortRefData, ch)
+	st := core.Violation
+	reason := ""
+	if dirty {
+		st = core.Unverifiable
+		reason = core.ReasonLoss
+	}
+	e.Emit("REFDATA.NEVER_REACHES_READY", st, core.PortRefData, 0, ch, 0,
+		fmt.Sprintf("channel %d: observed %v (≥ window %v) but never reached ready state",
+			ch, span, window), reason)
 }

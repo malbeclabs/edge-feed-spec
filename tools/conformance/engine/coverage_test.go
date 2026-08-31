@@ -106,7 +106,7 @@ var testedRules = map[string]string{
 	"REFDATA.SET_CHANGE_NO_SEQ_BUMP":          "TestRefdataSetChangeNoSeqBump (refdata_test.go)",
 	"REFDATA.COUNT_CHANGE_NO_SEQ_BUMP":        "TestRefdataCountChangeNoSeqBump (refdata_test.go)",
 	"REFDATA.STALE_SEQ_TAG_AFTER_BUMP":        "TestRefdataStaleSeqTagAfterBump (refdata_test.go)",
-	"REFDATA.VALID_FLAG_WHILE_SERVING":        "TestRefdataValidFlagWhileServing (refdata_test.go)",
+	"REFDATA.VALID_FLAG_WHILE_SERVING":        "TestValidDropWithoutSessionEndIsAViolation / TestShutdownSummaryIsNotAViolation (refdata_test.go)",
 	"REFDATA.NEVER_REACHES_READY":             "TestNeverReachesReady (cadence_test.go)",
 	"REFDATA.NO_BURST_DEFINITIONS":            "TestNoBurstDefinitions (cadence_test.go)",
 	"REFDATA.SEQ_MONOTONIC_NO_REGRESS":        "TestRefdataSeqMonotonicNoRegress (refdata_test.go)",
