@@ -6,7 +6,9 @@ A Source ID identifies the **matching engine** whose activity the message descri
 
 **A Source ID names a matching engine, not a venue.** One venue may run several matching engines and therefore hold several Source IDs. Two engines are distinct where their order-matching rules differ, and equally where they match independently over disjoint instrument sets under identical rules; a capacity shard the venue can rebalance is a channel rather than an engine. [GLOSSARY.md](../GLOSSARY.md) carries the full test and is the authority for it. A new engine at an already-registered venue is a new ID rather than a reuse of that venue's existing one. Because IDs are never renumbered, this only ever adds, and an ID already assigned keeps meaning whichever engine has been publishing under it. Venues split their own engines on their own schedule, so treat the set as open rather than assuming the current table is final.
 
-This document specifies version **1.3.1**: the reserved ranges, the current assignment set, and the process for requesting a new ID.
+**A distinct market identifier code is strong evidence of a distinct engine.** Where a regulated venue operates under several ISO 10383 MICs, each names a market with its own rulebook and its own matching, so the MIC settles the test above without further argument. The converse does not hold: one MIC routinely covers several engines, which is the ordinary case wherever a venue runs spot and derivatives under one code. Treat a distinct MIC as sufficient, never as necessary.
+
+This document specifies version **1.4.0**: the reserved ranges, the current assignment set, and the process for requesting a new ID.
 
 ## Reserved Ranges
 
@@ -19,20 +21,22 @@ This document specifies version **1.3.1**: the reserved ranges, the current assi
 
 ## Assigned Source IDs
 
-| ID | Name | Code | Venue | Kind | Notes |
-|----|------|------|-------|------|-------|
-| `1` | Hyperliquid | `HYPERLIQUID` | Hyperliquid | Perpetual DEX | |
-| `2` | Phoenix | `PHOENIX` | Phoenix | Perpetual DEX | |
-| `3` | Kalshi | `KALSHI` | Kalshi | Perpetual Futures, Prediction Market | Registered under the codename `Lashay` until the venue launched. Carries two matching engines and is due to split; see below. |
-| `4` | Setai Financials | `SETAI` | Setai | Futures | Interface versioned separately from `5`. |
-| `5` | Setai Commodities | `SETAI` | Setai | Futures, Options on Futures | Interface versioned separately from `4`. |
-| `6` | Binance USD-Margined Futures | `BINANCE` | Binance | Perpetual Futures, Dated Futures | The venue's own `futuresType` for this engine is `U_MARGINED`. Spot, coin-margined futures and options are separate matching engines at this venue, unclaimed, and will share this `Code`. |
+| ID | Name | Code | Venue | MIC | Kind | Notes |
+|----|------|------|-------|-----|------|-------|
+| `1` | Hyperliquid | `HYPERLIQUID` | Hyperliquid | — | Perpetual DEX | |
+| `2` | Phoenix | `PHOENIX` | Phoenix | — | Perpetual DEX | |
+| `3` | Kalshi | `KALSHI` | Kalshi | `KLSH` | Perpetual Futures, Prediction Market | Registered under the codename `Lashay` until the venue launched. Carries two matching engines and is due to split; see below. |
+| `4` | Setai Financials | `SETAI` | Setai | *(withheld)* | Futures | Interface versioned separately from `5`. |
+| `5` | Setai Commodities | `SETAI` | Setai | *(withheld)* | Futures, Options on Futures | Interface versioned separately from `4`. |
+| `6` | Binance USD-Margined Futures | `BINANCE` | Binance | — | Perpetual Futures, Dated Futures | The venue's own `futuresType` for this engine is `U_MARGINED`. Spot, coin-margined futures and options are separate matching engines at this venue, unclaimed, and will share this `Code`. |
 
 `Code` is the machine-readable short name **for the venue**. It matches the `Venue` column and takes the same name TradingView uses. Uppercase, never an abbreviation, each space and hyphen a single underscore.
 
 **Several matching engines at one venue share a `Code`.** It names the venue, not the engine, so `Code` alone cannot key an engine: `Source ID` is the engine key, and anything carrying `Code` as a stable identifier — a metric label value, a composed product identifier — needs `source_id` beside it to name an engine. `Name` is where a human reader tells two engines apart.
 
 Downstream systems already carry these values, so this column documents what exists rather than introducing anything new. This registry is the authority for it; any table of these values held elsewhere is a [registry mirror](../GLOSSARY.md) and is derived, never authoritative.
+
+`MIC` is the engine's ISO 10383 market identifier code. An em dash means the venue has none, which is the normal case for a decentralised exchange and for any venue outside the standard's scope; *(withheld)* means one exists but naming it would identify a venue trading under a codename. Where two rows at one venue carry different MICs, that alone establishes them as distinct engines.
 
 `Venue` is the external exchange or market operator running the engine, as [GLOSSARY.md](../GLOSSARY.md) defines it. It is recorded separately from `Name` so that several engines at one venue are legible as such, which is the case the `Name` column alone cannot show.
 
@@ -67,7 +71,7 @@ Recorded because it is the first assignment resting on the second half of the ru
 To request a new Source ID, open a pull request against this file that:
 
 1. Adds a row to the **Assigned Source IDs** table with the next unused ID in the production range.
-2. Names the matching engine in `Name`, gives its uppercase `Code`, names the exchange running it in `Venue`, and fills in `Kind` and (optionally) `Notes`.
+2. Names the matching engine in `Name`, gives its uppercase `Code`, names the exchange running it in `Venue`, records the engine's `MIC` where it has one, and fills in `Kind` and (optionally) `Notes`.
 3. States what makes the engine distinct from any already-registered engine at the same venue, where there is one.
 4. Does not renumber, reorder, or remove existing rows.
 
@@ -81,7 +85,7 @@ Because assigned IDs are stable and MUST NOT be renumbered, reordered, removed, 
 
 ### Changes
 
-**1.3.1** — editorial. Conformed `Code` on IDs `4` and `5` to the venue-level rule from `1.3.0`; both now read `SETAI`. No assignment changed and no ID was renumbered.
+**1.4.0** — added the `MIC` column, recording each engine's ISO 10383 market identifier code, and stated that a distinct MIC is sufficient though not necessary to establish a distinct engine. Conformed `Code` on IDs `4` and `5` to the venue-level rule from `1.3.0`; both now read `SETAI`. No assignment changed and no ID was renumbered.
 
 **1.3.0** — assigned Source ID `6` to the USD-margined futures matching engine at Binance, and made `Code` name the venue rather than the matching engine. Several engines at one venue now share a `Code`, so `Code` alone no longer keys an engine and `Source ID` is stated as the engine key. This supersedes `1.2.1`'s statement that `Code` names the matching engine and stays unique. IDs `4` and `5` keep their engine-level Codes, because a `Code` already carried downstream cannot be changed without coordination.
 
