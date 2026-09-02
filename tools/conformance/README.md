@@ -1,8 +1,8 @@
 # dz-conformance
 
-A conformance subscriber for edge-feed publishers. Subscribes to one feed (TOB, Midpoint, MBO, or MBP) — live multicast or pcap replay — validates the feed against 88 explicit conformance rules drawn from the [edge-feed-spec](../../) (this repo), and returns a CI-friendly exit code.
+A conformance subscriber for edge-feed publishers. Subscribes to one feed (TOB, Midpoint, MBO, or MBP) — live multicast or pcap replay — validates the feed against its subset of an 88-rule catalog drawn from the [edge-feed-spec](../../) (this repo), and returns a CI-friendly exit code. The subset is 31 to 68 rules depending on the feed — see [Rule catalog](#rule-catalog).
 
-Unlike a production consumer — which is tolerant of publisher quirks (skipping unknown types, ignoring reserved bits, recovering silently from loss) — this tool is **strict by design**: it flags every structural, sequence, and semantic violation the spec defines. `core/registry.go` is the in-code source of truth for the full rule set.
+Unlike a production consumer — which is tolerant of publisher quirks (skipping unknown types, ignoring reserved bits, recovering silently from loss) — this tool is **strict by design**: it flags every structural, sequence, and semantic violation its catalog covers, and never excuses one as a quirk. `core/registry.go` is the in-code source of truth for the full rule set.
 
 ## What it does
 
@@ -10,10 +10,10 @@ Unlike a production consumer — which is tolerant of publisher quirks (skipping
 multicast group (or .pcap)
   ├── mktdata port ──► frame decoder (strict, intolerant)
   ├── refdata port ──► frame decoder
-  └── snapshot port ──► frame decoder (MBO only)
+  └── snapshot port ──► frame decoder (MBO and MBP)
            │
            ▼
-      engine (88-rule validator)
+      engine (rule validator)
            │
     ┌──────┴──────┐
     │             │
@@ -103,6 +103,17 @@ For the MBO feed the engine reconstructs the order book independently from both 
 ## Rule catalog
 
 The full 88-rule catalog — rule ID, severity, tier, applicable feeds — is defined in `core/registry.go` (the in-code source of truth), with one-line per-rule summaries in `core/ruledoc.go`. `core/registry_test.go` and `core/ruledoc_test.go` guarantee the set stays complete and documented.
+
+**No feed sees all 88.** Each rule carries the feeds it applies to, and a run reports only its own feed's subset — `rule_info` publishes exactly that subset at startup, so the denominator is visible before a frame arrives. The split today:
+
+| Feed | Feed-specific rules | Shared rules | Total |
+|------|--------------------:|-------------:|------:|
+| `mbo` | 43 | 25 | 68 |
+| `tob` | 8 | 25 | 33 |
+| `mbp` | 7 | 25 | 32 |
+| `midpoint` | 6 | 25 | 31 |
+
+`TestFeedRuleCounts` pins these numbers against `core.Rules`, so a new feed-scoped rule fails the build until this table is updated with it. The 25 shared rules are the frame/message structural set and the reference-data supplement, which every feed carries identically; `RESET.ANCHOR_SEQ_IS_CURRENT_FRAME` is counted feed-specific for both `mbo` and `mbp`, which is where the totals overlap. The market-by-order asymmetry is real rather than an artifact of counting: that feed's rules were written first and its per-order state model admits checks a price-aggregated book has no analogue for (dangling order IDs, overfill, duplicate live adds). What the gap does *not* mean is that the missing market-by-price checks are unwritable — see [Known limitations](#known-limitations).
 
 ## Quick start
 
@@ -201,11 +212,11 @@ With `--pcap`, the tool replays the capture in order and exits when the file is 
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--feed` | `mbo` | Feed to validate: `tob`, `midpoint`, or `mbo` |
+| `--feed` | `mbo` | Feed to validate: `tob`, `midpoint`, `mbo`, or `mbp` |
 | `--group` | | Multicast group address (required for live capture; omit with `--pcap`) |
 | `--mktdata-port` | `0` (off) | UDP port for market-data frames |
 | `--refdata-port` | `0` (off) | UDP port for reference-data frames |
-| `--snapshot-port` | `0` (off) | UDP port for snapshot frames (MBO only) |
+| `--snapshot-port` | `0` (off) | UDP port for snapshot frames (MBO and MBP) |
 | `--interface` | system default | Network interface for multicast join (e.g. `doublezero1`) |
 | `--pcap` | | Replay a `.pcap` file instead of live capture |
 | `--metrics-addr` | (off) | Serve Prometheus metrics on this address (e.g. `127.0.0.1:9100`). Bind to a non-public interface. |
@@ -344,7 +355,7 @@ The tool has two operating modes:
 
 For a 24/7 deployment:
 
-- **One instance per feed.** `--feed` is singular (each feed has its own frame magic and rule subset). Run separate processes for `tob`, `midpoint`, and `mbo`, each with its own `--metrics-addr`.
+- **One instance per feed.** `--feed` is singular (each feed has its own frame magic and rule subset). Run separate processes for `tob`, `midpoint`, `mbo`, and `mbp`, each with its own `--metrics-addr`.
 - **Supervise it.** A read error exits the process with code `2`; there is no internal reconnect (e.g. on an interface flap). Run under `systemd` or Docker with a restart policy such as `restart: unless-stopped`.
 - **Alert on metrics, not the exit code.** The `0/1/2` exit code is a batch artifact and is meaningless for a live instance (which only exits on signal/error). Live alerting watches `dz_conformance_violations_total` (and the `should`-graded `unverifiable`/`suspected` counters) via Prometheus.
 - **Tame log volume.** Status-based levels keep the default (`WARN`) stderr stream to confirmed violations plus `Suspected` (oracle candidates) — the `Unverifiable` firehose is suppressed unless `-v` is passed; `--log-throttle` (default `1s`) bounds repeats. See [Structured log](#structured-log).
@@ -379,6 +390,13 @@ The tool is correct (no false `Violation`s) and complete for its primary use cas
 - **Mid-stream join doesn't reconstruct a trusted book.** The referential-integrity and snapshot↔delta oracle checks only run once an instrument's delta book is *trusted*, which today requires observing its delta stream from `Per-Instrument Seq = 1` (i.e. from session start / `Reset Count` boundary). A cold-start or post-`InstrumentReset` recovery snapshot is currently used only to detect divergence, not to *bootstrap* the live book — so an instrument joined mid-stream stays `Unverifiable` for those checks until a fresh era. Capture the publisher from startup to exercise the full oracle. Bootstrapping a trusted book from a clean snapshot is a planned enhancement.
 
 One further gap is a **silence** rather than a conservative downgrade: `HEARTBEAT.CADENCE` measures an instance's cadence when that instance's *next* heartbeat arrives, so an arm that dies and stays dead is never reported — the outage a two-arm deployment is most likely to suffer. Nothing fabricates a violation, but nothing reports the outage either, while the surviving arm keeps `checks_total{result="pass"}` climbing. Closing it needs an end-of-observation sweep over the mktdata instances, and that sweep needs a clock of its own: the naive version — measure each instance's last heartbeat against the last wire timestamp seen — fires on any capture that simply ends mid-silence, reporting 5 s of silence on `nonconformant_mbp.pcap` where nothing died. So it is a follow-up with its own tests, not a rider on a keying change.
+
+Two further boundaries are about **scope** — rules that could be written and have not been, rather than rules that hedge:
+
+- **Market-by-price does not yet cover the whole spec.** What it does cover: frame, message-length and port-placement checks across the feed's message types through `tier1.go`; the three `MBP.DELTA.*` rules for per-instrument sequencing and absolute-apply semantics; `MBP.SNAP.GROUP_STRUCTURE`; `RESET.ANCHOR_SEQ_IS_CURRENT_FRAME`; and `MBP.SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT`, the deep one. Beyond those, several requirements the spec states normatively have no rule behind them: [Crossed-Book Monitoring](../../market-by-price/spec.md#crossed-book-monitoring) and the publisher's matching "not emit a settled crossed book" (`mbpBook.crossed()` exists and is unused — `engine/mbp_book.go` says so at its head), the `Depth Bound` obligations of *Publisher Behavior* item 7 (`0` when the book is complete, and no `Quantity = 0` for a level that merely fell out of a declared depth window), the enum ranges on `LevelUpdate`'s `Side`/`Action` and `BookClear`'s `Clear Side`/`Scope`, price bounds against reference data, the *recovery* half of per-instrument reset handling, and snapshot round-robin coverage and monotonicity. Market-by-order has a rule for each of those last four; they are registered `mboOnly` because their emit paths read market-by-order messages, not because the market-by-price spec is silent. Widening one means giving it a market-by-price emit path, not editing its `Feeds` list — a rule listed for a feed whose findings never carry that feed produces the inverse of the starvation trap above. Tracked as [#54](https://github.com/malbeclabs/edge-feed-spec/issues/54) (crossed book), [#55](https://github.com/malbeclabs/edge-feed-spec/issues/55) (enums, `Depth Bound`), [#56](https://github.com/malbeclabs/edge-feed-spec/issues/56) (price bounds) and [#57](https://github.com/malbeclabs/edge-feed-spec/issues/57) (reset recovery, snapshot family).
+- **`testdata/` has no conformant market-by-price capture.** `conformant_{mbo,tob,midpoint}.pcap` pin the positive path for their feeds; market-by-price has only `nonconformant_mbp.pcap`, a pre-2.0 fixture that exits 1 by design. So the feed's clean-run behaviour is pinned by synthetic tests in `engine/` and not by a golden capture — [#58](https://github.com/malbeclabs/edge-feed-spec/issues/58).
+
+The [Order-Intent](../../order-intent/spec.md) and [Perp Stats](../../perp-stats/spec.md) feeds have **no checker at all**: `core.Feed` has four values, and neither spec is mentioned anywhere under `tools/`. `--feed` rejects anything else, so this is a visible absence rather than a silent one — [#59](https://github.com/malbeclabs/edge-feed-spec/issues/59) and [#60](https://github.com/malbeclabs/edge-feed-spec/issues/60).
 
 Minor: the `dz_conformance_instruments_state` gauge is registered but not yet populated. This does not affect violation detection or the CI exit code.
 
