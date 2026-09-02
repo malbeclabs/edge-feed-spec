@@ -52,7 +52,7 @@ type mbpJournalEntry struct {
 // overflow the instrument goes unverifiable until a baseline subsumes what was
 // dropped, rather than the journal growing without limit.
 //
-// Sized against a real venue: a 700-instrument Phoenix capture peaked at 9,529
+// Sized against a real venue: a 78-instrument Phoenix capture peaked at 9,529
 // entries on its busiest instrument, so a bound near it blinds the rule to
 // exactly the markets worth checking.
 const maxMBPJournal = 16384
