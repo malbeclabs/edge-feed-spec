@@ -138,6 +138,11 @@ func ValidReason(s string) bool {
 	return ok
 }
 
+// InstrumentUnknown marks a Finding whose subject carries no Instrument ID — an
+// orphan `SnapshotLevel` names none, and reporting 0 there read as a real id and
+// misattributed a capture's burst to it. Reporters render this as "unknown".
+const InstrumentUnknown uint32 = ^uint32(0)
+
 // Finding is the unit of output. Reporters consume it.
 type Finding struct {
 	RuleID       string
@@ -146,7 +151,7 @@ type Finding struct {
 	Feed         Feed
 	Port         Port
 	ChannelID    uint8
-	InstrumentID uint32 // 0 when not instrument-scoped
+	InstrumentID uint32 // 0 when not instrument-scoped, InstrumentUnknown when absent
 	Seq          uint64
 	Detail       string // free-form, for logs only — NEVER a metric label (unbounded)
 	// Reason is a bounded, low-cardinality code used for the unverifiable_total

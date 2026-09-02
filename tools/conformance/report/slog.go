@@ -133,6 +133,10 @@ func (s *SlogSink) Record(f core.Finding) {
 // emit writes a single finding line. suppressed (>0) reports how many findings
 // for this (rule,status) were dropped since the previous logged line.
 func (s *SlogSink) emit(level slog.Level, f core.Finding, suppressed int) {
+	instrument := slog.Uint64("instrument_id", uint64(f.InstrumentID))
+	if f.InstrumentID == core.InstrumentUnknown {
+		instrument = slog.String("instrument_id", "unknown")
+	}
 	attrs := []slog.Attr{
 		slog.String("rule_id", f.RuleID),
 		slog.String("severity", f.Severity.String()),
@@ -140,7 +144,7 @@ func (s *SlogSink) emit(level slog.Level, f core.Finding, suppressed int) {
 		slog.String("feed", string(f.Feed)),
 		slog.String("port", f.Port.String()),
 		slog.Int("channel_id", int(f.ChannelID)),
-		slog.Uint64("instrument_id", uint64(f.InstrumentID)),
+		instrument,
 		slog.Uint64("seq", f.Seq),
 		slog.String("detail", f.Detail),
 	}

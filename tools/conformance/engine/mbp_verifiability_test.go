@@ -66,6 +66,17 @@ func countByStatus(t *testing.T, fs []core.Finding, rule string) (viol, unver in
 	return viol, unver
 }
 
+// countByReason tallies one rule's unverifiable findings carrying one reason.
+func countByReason(fs []core.Finding, rule, reason string) int {
+	n := 0
+	for _, f := range fs {
+		if f.RuleID == rule && f.Status == core.Unverifiable && f.Reason == reason {
+			n++
+		}
+	}
+	return n
+}
+
 // dropFirst removes the first step whose frame leads with the given message type,
 // which is what one lost datagram looks like: the message is gone AND the
 // snapshot-port sequence has a hole.
@@ -401,4 +412,90 @@ func TestMBPResetAnchorRuleIsRegisteredForMBP(t *testing.T) {
 		t.Fatalf("emitted with feed=%s but the registry lists %v", f.Feed, meta.Feeds)
 	}
 	t.Fatal("the rule never fired under feed=mbp")
+}
+
+// --- the two ends of a capture, which pull in opposite directions ---
+
+// A running publisher's snapshot port is always mid-group, so a capture's first
+// levels belong to a group whose `SnapshotBegin` predates the recorder. Both
+// preserved Phoenix captures open this way; that was their whole count (#65).
+func TestMBPCaptureHeadOrphansAreUnverifiable(t *testing.T) {
+	steps := []mbpStep{
+		mbpFrame(core.PortSnapshot, 0, 0, 0, wire.TypeSnapshotLevel, 32, 1, mbpSnapLevel(7, 1000, 5, mbpClearSideBid)),
+		mbpFrame(core.PortSnapshot, 1, 0, 0, wire.TypeSnapshotLevel, 32, 1, mbpSnapLevel(7, 1001, 5, mbpClearSideAsk)),
+		mbpFrame(core.PortSnapshot, 2, 0, 0, wire.TypeSnapshotEnd, 20, 1, mbpSnapEnd(1, 10, 7)),
+		// The run's first Begin. Everything from here on is judged normally.
+		mbpFrame(core.PortSnapshot, 3, 0, 0, wire.TypeSnapshotBegin, 40, 1, mbpSnapBegin(1, 20, 1, 8, 0, 0)),
+		mbpFrame(core.PortSnapshot, 4, 0, 0, wire.TypeSnapshotLevel, 32, 1, mbpSnapLevel(8, 1000, 5, mbpClearSideBid)),
+		mbpFrame(core.PortSnapshot, 5, 0, 0, wire.TypeSnapshotEnd, 20, 1, mbpSnapEnd(1, 20, 8)),
+	}
+	_, fs := runMBPSteps(t, steps)
+	viol, unver := countByStatus(t, fs, "MBP.SNAP.GROUP_STRUCTURE")
+	if viol != 0 || unver != 3 {
+		t.Errorf("head partial group: got %d Violation / %d Unverifiable, want 0 / 3", viol, unver)
+	}
+	// Visible in `unverifiable_by_reason`, never absent: a silently shrinking
+	// denominator is this forgiveness's own failure mode.
+	if got := countByReason(fs, "MBP.SNAP.GROUP_STRUCTURE", core.ReasonColdStart); got != 3 {
+		t.Errorf("head orphans carried %d cold_start reason(s), want 3", got)
+	}
+}
+
+// The other end, and why the head rule stops at the first Begin. An
+// `InstrumentReset` discards that instrument's open snapshot group (spec,
+// *Instrument Reset* step 1), so the group's tail belongs to nothing and is the
+// publisher's defect — malbeclabs/phoenix#163, which scored clean before this.
+// **A blanket forgive of orphans fails here**, while looking like success on both
+// preserved captures.
+func TestMBPPostResetGroupTailStaysAViolation(t *testing.T) {
+	reset := func(instrID uint32) func(*wb.Body) {
+		return func(b *wb.Body) {
+			b.U32(instrID).U16(1).Pad(2)
+			b.U64(0) // New Anchor Seq, matching the frame's own sequence
+			b.U64(0)
+		}
+	}
+	tail := func(resetInstr uint32) []mbpStep {
+		return []mbpStep{
+			mbpFrame(core.PortSnapshot, 0, 0, 0, wire.TypeSnapshotBegin, 40, 1, mbpSnapBegin(1, 10, 3, 7, 0, 0)),
+			mbpFrame(core.PortSnapshot, 1, 0, 0, wire.TypeSnapshotLevel, 32, 1, mbpSnapLevel(7, 1000, 5, mbpClearSideBid)),
+			mbpFrame(core.PortMktData, 0, 0, 0, wire.TypeInstrReset, 28, 0, reset(resetInstr)),
+			mbpFrame(core.PortSnapshot, 2, 0, 0, wire.TypeSnapshotLevel, 32, 1, mbpSnapLevel(7, 1001, 5, mbpClearSideBid)),
+			mbpFrame(core.PortSnapshot, 3, 0, 0, wire.TypeSnapshotLevel, 32, 1, mbpSnapLevel(7, 1002, 5, mbpClearSideBid)),
+			mbpFrame(core.PortSnapshot, 4, 0, 0, wire.TypeSnapshotEnd, 20, 1, mbpSnapEnd(1, 10, 7)),
+		}
+	}
+
+	_, fs := runMBPSteps(t, tail(1))
+	if viol, _ := countByStatus(t, fs, "MBP.SNAP.GROUP_STRUCTURE"); viol != 3 {
+		t.Errorf("post-reset group tail: got %d Violation(s), want 3 (two levels and the End)", viol)
+	}
+
+	// A reset for a *different* instrument discards nothing: step 1 is scoped to `I`.
+	_, other := runMBPSteps(t, tail(2))
+	if viol, unver := countByStatus(t, other, "MBP.SNAP.GROUP_STRUCTURE"); viol != 0 || unver != 0 {
+		t.Errorf("another instrument's reset: got %d Violation / %d Unverifiable, want 0 / 0", viol, unver)
+	}
+}
+
+// An orphan level names no instrument. Reporting 0 read as "instrument 0" and
+// misattributed a real capture's burst to SOL during phoenix#163's diagnosis (#53).
+func TestMBPOrphanLevelNamesNoInstrument(t *testing.T) {
+	steps := []mbpStep{
+		mbpFrame(core.PortSnapshot, 0, 0, 0, wire.TypeSnapshotLevel, 32, 1, mbpSnapLevel(7, 1000, 5, mbpClearSideBid)),
+	}
+	_, fs := runMBPSteps(t, steps)
+	found := false
+	for _, f := range fs {
+		if f.RuleID != "MBP.SNAP.GROUP_STRUCTURE" {
+			continue
+		}
+		found = true
+		if f.InstrumentID != core.InstrumentUnknown {
+			t.Errorf("orphan level reported instrument %d, want the unknown sentinel", f.InstrumentID)
+		}
+	}
+	if !found {
+		t.Fatal("the orphan level produced no GROUP_STRUCTURE finding at all")
+	}
 }
