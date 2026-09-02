@@ -154,7 +154,7 @@ func (r *ngReader) readBlock() (uint32, []byte, error) {
 		// including its own length field — so the magic has to be read before the
 		// length can be interpreted.
 		if _, err := io.ReadFull(r.r, bom[:]); err != nil {
-			return 0, nil, err
+			return 0, nil, midBlock(err)
 		}
 		switch {
 		case binary.LittleEndian.Uint32(bom[:]) == ngByteOrderMagic:
@@ -180,13 +180,31 @@ func (r *ngReader) readBlock() (uint32, []byte, error) {
 	rest := r.scratch(int(total) - 8)
 	copy(rest, bom[:pre])
 	if _, err := io.ReadFull(r.r, rest[pre:]); err != nil {
-		return 0, nil, err
+		return 0, nil, midBlock(err)
 	}
 	if trailer := r.bo.Uint32(rest[len(rest)-4:]); trailer != total {
 		return 0, nil, fmt.Errorf("pcapng: block type %#x opens with length %d and closes with %d",
 			typ, total, trailer)
 	}
 	return typ, rest[:len(rest)-4], nil
+}
+
+// midBlock is what every read past a block's type/length pair is wrapped in.
+//
+// io.ReadFull reports bare io.EOF when it reads *no* bytes and
+// io.ErrUnexpectedEOF only when it reads some, and pcap.go turns io.EOF into a
+// clean end of file. Past the 8-byte header the block is committed, so a file
+// that ends exactly at the start of a body — a trailing Enhanced Packet Block
+// cut to its 8-byte header, or a second section header cut before its
+// byte-order magic — ended mid-block. Left unmapped, that reads as a complete
+// capture: the run exits 0 with an empty read_error over a segment it only
+// partly read, which is the one outcome the whole read-error path exists to
+// prevent.
+func midBlock(err error) error {
+	if errors.Is(err, io.EOF) {
+		return io.ErrUnexpectedEOF
+	}
+	return err
 }
 
 // scratch returns a buffer of exactly n bytes, growing the reusable one when a

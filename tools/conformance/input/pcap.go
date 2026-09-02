@@ -48,6 +48,11 @@ type PcapSource struct {
 	// datagram yielded — which is why the total is read from here and not summed
 	// from the datagrams.
 	dropTotal uint64
+	// truncated counts packets the capture's snap length cut short. They are
+	// counted as capture-owned loss alongside the admitted drops and are never
+	// decoded; the separate tally exists so an operator is told which of the two
+	// they are looking at.
+	truncated uint64
 }
 
 // NewPcapSource opens a capture file and returns a Source that yields Datagrams.
@@ -102,6 +107,28 @@ func (s *PcapSource) Next() (Datagram, bool, error) {
 		s.pendingDrops += cp.drops
 		s.dropTotal += cp.drops
 
+		// A packet the capture's snap length cut short is not a datagram the
+		// publisher sent, and it is the capture that is missing the bytes. Both
+		// lengths are in the file — pcapng's captured_len and original_len, and a
+		// legacy pcap's incl_len and orig_len — so the shortfall is stated rather
+		// than inferred.
+		//
+		// Handing the surviving bytes to the decoder charges the recorder's own
+		// snap length to the feed: a short frame reads as a declared length past
+		// the datagram, its payload hashes differently from the same seq recorded
+		// whole, and the run reports MUST violations for bytes that were never
+		// missing on the wire. That is the misattribution epb_dropcount was
+		// threaded in to prevent, arriving from a field this reader already had.
+		// Counted as capture-owned instead: the frame's sequence number goes
+		// missing from the series, and the taint that follows sends the operator
+		// to the capture rather than to the publisher.
+		if cp.ci.Length > 0 && cp.ci.CaptureLength < cp.ci.Length {
+			s.pendingDrops++
+			s.dropTotal++
+			s.truncated++
+			continue
+		}
+
 		pkt := gopacket.NewPacket(cp.data, cp.linkType, gopacket.Default)
 		udpLayer := pkt.Layer(layers.LayerTypeUDP)
 		if udpLayer == nil {
@@ -135,6 +162,18 @@ func (s *PcapSource) Next() (Datagram, bool, error) {
 // includes drops admitted after the last datagram this source yielded, which a
 // caller summing Datagram.CaptureDrops would never see.
 func (s *PcapSource) CaptureDrops() uint64 { return s.dropTotal }
+
+// PendingDrops implements CaptureLossReporter: admitted loss that no datagram
+// has carried yet. At the end of a run it is what was admitted after the last
+// mapped datagram — loss the windows the end-of-run findings are graded against
+// are inside, which nothing would otherwise tell the engine about.
+func (s *PcapSource) PendingDrops() uint64 { return s.pendingDrops }
+
+// SnaplenTruncated implements CaptureLossReporter: how many of the drops above
+// are packets the capture's snap length cut short rather than ones it admits it
+// never wrote. Both are the capture's loss; only one of them is fixed by
+// recording with a snap length that holds the feed.
+func (s *PcapSource) SnaplenTruncated() uint64 { return s.truncated }
 
 // srcAddr returns the packet's source address, so a replay keys channel
 // instances exactly as a live capture does. A capture whose link type carries no

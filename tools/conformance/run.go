@@ -135,9 +135,13 @@ func reportStarvedRules(rep report.Reporter, opts RunOpts) {
 // answer. The exit code is deliberately unchanged: a lossy segment is still worth
 // replaying, and the violations it does confirm are real.
 //
-// Only pcapng carries the accounting. A legacy pcap converted from one has had
-// the per-packet option stripped by the conversion, so it reports zero and means
-// nothing by it — which is the reason to replay the archive directly.
+// Only pcapng carries the recorder's *admission*. A legacy pcap converted from
+// one has had the per-packet option stripped by the conversion, so it reports no
+// admitted drop and means nothing by it — which is the reason to replay the
+// archive directly. A packet the snap length cut short is counted in either
+// format, and named separately here: an operator fixes it by re-recording with a
+// snap length that holds the feed, which is not what they would do about a
+// dropped datagram.
 func reportCaptureLoss(src input.Source) uint64 {
 	cl, ok := src.(input.CaptureLossReporter)
 	if !ok {
@@ -148,10 +152,16 @@ func reportCaptureLoss(src input.Source) uint64 {
 		return 0
 	}
 	fmt.Fprintf(os.Stderr,
-		"dz-conformance: WARNING the capture admits it failed to record %d datagram(s) "+
-			"(pcapng epb_dropcount), so checks over the windows they fall in are reported as "+
-			"capture_loss, NOT as passes. Violations remain trustworthy; an empty report does "+
-			"not mean the feed was clean.\n", n)
+		"dz-conformance: WARNING the capture failed to record %d datagram(s), so checks over "+
+			"the windows they fall in are reported as capture_loss, NOT as passes. Violations "+
+			"remain trustworthy; an empty report does not mean the feed was clean.\n", n)
+	if t := cl.SnaplenTruncated(); t > 0 {
+		fmt.Fprintf(os.Stderr,
+			"dz-conformance: WARNING %d of those are datagrams the capture's snap length cut "+
+				"short, not datagrams it admits it never wrote. A partly-recorded datagram is "+
+				"not the publisher's bytes and is not decoded; re-record with a snap length "+
+				"that holds the feed's frames.\n", t)
+	}
 	return n
 }
 
@@ -256,6 +266,17 @@ func Run(opts RunOpts) int {
 	}
 	close(done)
 	signal.Stop(sigs)
+
+	// Loss the capture admitted after the last mapped datagram, which no
+	// datagram was left to carry. Handed over before the end-of-run findings are
+	// produced, because they are graded against the windows that loss falls in:
+	// flushOpenSnaps grades an unfinished snapshot group a Violation unless its
+	// window is tainted, and at EOF no later frame can arrive to taint it. Without
+	// this a report shows non-zero capture_drops beside end-of-run findings graded
+	// as though the capture were clean.
+	if cl, ok := src.(input.CaptureLossReporter); ok {
+		eng.ObserveCaptureLoss(cl.PendingDrops())
+	}
 
 	// --- end-of-run (always, even after a read error) ---
 	eng.Flush()

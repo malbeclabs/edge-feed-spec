@@ -167,6 +167,11 @@ type openSnapshot struct {
 	// dirty is true if a snapshot-port seq gap was observed DURING this group
 	// (i.e. after this group's SnapshotBegin). Pre-group gaps do not set dirty.
 	dirty bool
+	// captureEpoch is the arrival-time capture-loss epoch this group opened at.
+	// A drop admitted after it is loss inside this group's window — and one that
+	// cost the group its SnapshotEnd leaves no snapshot-port gap for dirty to
+	// see, because the group simply never closes. See Engine.captureLossSince.
+	captureEpoch uint64
 	// structuralViolation is true if any structural violation was detected during
 	// this group (ORDER_SNAPSHOT_ID_MATCH, SNAPSHOT_ORDER_NO_DUP_ORDER_ID,
 	// EMPTY_BOOK_WELL_FORMED, etc.). The oracle gates on this flag to avoid
@@ -901,6 +906,7 @@ func (e *Engine) handleSnapBegin(m wire.Message, ch uint8, snapPortSeq uint64) {
 		orderIDs:        make(map[uint64]struct{}),
 		orders:          make(map[uint64]snapOrderRecord),
 		dirty:           false,
+		captureEpoch:    e.curCaptureEpoch,
 		lastSnapPortSeq: snapPortSeq,
 	}
 }
@@ -1211,7 +1217,13 @@ func (e *Engine) flushOpenSnaps() {
 			continue
 		}
 		st := core.Violation
-		if open.dirty {
+		// The group's own flag catches a snapshot-port gap during its lifetime.
+		// It cannot catch the datagram the capture admits it never wrote: that
+		// leaves no gap, the group just never closes, and at end of run no later
+		// frame can arrive to taint anything. Loss admitted after the last mapped
+		// datagram is inside this window too, which is why the run loop hands the
+		// residual over before this runs.
+		if open.dirty || e.captureLossSince(open.captureEpoch) {
 			st = core.Unverifiable
 		}
 		e.Emit("SNAP.BEGIN_ORDER_END_GROUPING", st, core.PortSnapshot, 0, ch, open.instrID,

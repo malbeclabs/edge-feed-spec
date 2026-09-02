@@ -113,4 +113,4 @@ tests:
               reason: capture_loss
             exp_annotations:
               summary: "Conformance coverage loss on mbp feed"
-              description: "Rule ORACLE became unverifiable (reason=capture_loss) on feed mbp. Check feed health and instrument definitions.\n"
+              description: "Rule ORACLE became unverifiable (reason=capture_loss) on feed mbp. The recorder admits it failed to record the datagrams, so the coverage was lost between the wire and the archive: check the recorder host and its own drop counters, not the feed.\n"

@@ -131,6 +131,36 @@ func (b *ngBuilder) obsolete(ifaceID, drops uint16, ts uint64, data []byte) {
 	b.block(ngBlockPacket, body)
 }
 
+// enhancedShort appends an Enhanced Packet Block declaring more bytes on the
+// wire than it holds — a capture recorded with a snap length shorter than the
+// feed's frames. Both lengths are the format's, and only one of them is the
+// number of bytes the block actually carries.
+func (b *ngBuilder) enhancedShort(ifaceID uint32, ts uint64, data []byte, origLen int) {
+	body := append([]byte{}, b.u32(ifaceID)...)
+	body = append(body, b.u32(uint32(ts>>32))...)
+	body = append(body, b.u32(uint32(ts))...)
+	body = append(body, b.u32(uint32(len(data)))...) // captured length
+	body = append(body, b.u32(uint32(origLen))...)   // original length, on the wire
+	body = append(body, pad(data)...)
+	b.block(ngBlockEnhancedPacket, body)
+}
+
+// mark is the offset the next block will start at, so a test can cut the file
+// at an exact position inside that block.
+func (b *ngBuilder) mark() int { return len(b.buf) }
+
+// writeCut puts the first n bytes of the assembled file in a temp dir. A
+// capture a recorder was killed part-way through writing is the shape this
+// produces.
+func (b *ngBuilder) writeCut(t *testing.T, n int) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "cut.pcapng")
+	if err := os.WriteFile(path, b.buf[:n], 0o644); err != nil {
+		t.Fatalf("write pcapng: %v", err)
+	}
+	return path
+}
+
 // write puts the assembled file in a temp dir and returns its path.
 func (b *ngBuilder) write(t *testing.T) string {
 	t.Helper()
@@ -281,6 +311,46 @@ func TestPcapngCarriesDropsAcrossSkippedPackets(t *testing.T) {
 	}
 	if got := src.CaptureDrops(); got != 19 {
 		t.Errorf("CaptureDrops total = %d, want 19 (3+5+11, the last after every datagram)", got)
+	}
+}
+
+// Loss admitted after the last mapped datagram has no datagram left to carry it.
+//
+// It reaches the run's total, which is what the report shows, and it used to
+// reach nothing else: the end-of-run findings were graded as though the capture
+// had been clean over the window that loss falls in, because the total is read
+// after they are produced. PendingDrops is what the run loop hands the engine
+// before it flushes, so the last window is graded on the same terms as every
+// other one.
+func TestPcapngResidualDropsAreReadableAfterEOF(t *testing.T) {
+	drops := uint64(4)
+	b := newNgBuilder(binary.LittleEndian)
+	b.sectionHeader()
+	b.iface(layers.LinkTypeEthernet, 65535)
+	b.enhanced(0, 0, udpEthPacket(t, 0, 7001, []byte("the last datagram")), nil)
+	// Admitted on a packet no port role owns, so no datagram follows it.
+	b.enhanced(0, 0, udpEthPacket(t, 1, 9999, []byte("unmapped")), &drops)
+
+	src, err := NewPcapSource(b.write(t), mktOnly)
+	if err != nil {
+		t.Fatalf("NewPcapSource: %v", err)
+	}
+	defer func() { _ = src.Close() }()
+
+	got := drain(t, src)
+	if len(got) != 1 {
+		t.Fatalf("got %d datagram(s), want 1", len(got))
+	}
+	if got[0].CaptureDrops != 0 {
+		t.Errorf("the datagram before the admission carries %d drop(s), want 0: the drops "+
+			"follow it", got[0].CaptureDrops)
+	}
+	if n := src.PendingDrops(); n != drops {
+		t.Errorf("PendingDrops() after EOF = %d, want %d: loss no datagram carried is loss "+
+			"the end-of-run findings are still graded inside", n, drops)
+	}
+	if n := src.CaptureDrops(); n != drops {
+		t.Errorf("CaptureDrops() = %d, want %d", n, drops)
 	}
 }
 
@@ -444,6 +514,121 @@ func TestPcapngTruncatedFileErrors(t *testing.T) {
 	_, ok, err := src.Next()
 	if err == nil {
 		t.Fatalf("truncated capture read as complete (ok=%v); want an error", ok)
+	}
+}
+
+// A file that ends exactly at the start of a block *body* is the case the
+// truncation test above cannot reach, and the one that used to read as a
+// complete capture.
+//
+// io.ReadFull reports bare io.EOF when it reads no bytes and
+// io.ErrUnexpectedEOF only when it reads some, and pcap.go turns io.EOF into a
+// clean end of file. Cut mid-body — the test above — some bytes are read and the
+// error is already right; cut at the boundary, none are, and the run exited 0
+// with an empty read_error over a segment it had only partly read. The
+// end-of-file signal has to mean a whole file, or every other check in the tool
+// is being reported over an unknown fraction of the archive.
+func TestPcapngFileEndingAtABlockBoundaryErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// build appends the whole file and returns the offset the last block
+		// starts at; the file is cut 8 bytes past it, which is the type/length
+		// pair read and the body never begun.
+		build func(*ngBuilder) int
+	}{
+		{
+			// The recorder was killed between writing a packet's header and its
+			// body, which is where a segment on a full disk ends.
+			name: "trailing packet block cut to its header",
+			build: func(b *ngBuilder) int {
+				at := b.mark()
+				b.enhanced(0, 0, udpEthPacket(t, 1, 7001, []byte("never written")), nil)
+				return at
+			},
+		},
+		{
+			// A section header is worse: its length field cannot even be read
+			// until its byte-order magic has been, so the cut lands between two
+			// reads of the same block.
+			name: "second section header cut before its byte-order magic",
+			build: func(b *ngBuilder) int {
+				at := b.mark()
+				b.sectionHeader()
+				return at
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := newNgBuilder(binary.LittleEndian)
+			b.sectionHeader()
+			b.iface(layers.LinkTypeEthernet, 65535)
+			b.enhanced(0, 0, udpEthPacket(t, 0, 7001, []byte("whole")), nil)
+			at := tc.build(b)
+
+			src, err := NewPcapSource(b.writeCut(t, at+8), mktOnly)
+			if err != nil {
+				t.Fatalf("NewPcapSource: %v", err)
+			}
+			defer func() { _ = src.Close() }()
+
+			if _, ok, err := src.Next(); err != nil || !ok {
+				t.Fatalf("first datagram: ok=%v err=%v, want the whole packet before the cut", ok, err)
+			}
+			_, ok, err := src.Next()
+			if err == nil {
+				t.Fatalf("a capture cut at a block boundary read as a complete one (ok=%v): the "+
+					"run exits 0 with an empty read_error over a segment it only partly read", ok)
+			}
+		})
+	}
+}
+
+// A packet the capture's snap length cut short is the capture's missing bytes,
+// not the publisher's.
+//
+// Both lengths are in the block, and origLen used to be parsed and never read:
+// the surviving bytes went to the decoder, where a frame declaring a length past
+// its own datagram reads as publisher truncation and a payload hashed short of
+// its twin reads as a divergent duplicate. That is the recorder-artifact-charged-
+// to-the-feed error epb_dropcount was threaded in to prevent, from a field the
+// reader already had.
+func TestPcapngSnaplenTruncatedPacketIsCaptureOwned(t *testing.T) {
+	whole := udpEthPacket(t, 0, 7001, []byte("recorded whole"))
+	short := udpEthPacket(t, 1, 7001, []byte("cut by the snap length"))
+
+	b := newNgBuilder(binary.LittleEndian)
+	b.sectionHeader()
+	b.iface(layers.LinkTypeEthernet, 96)
+	b.enhancedShort(0, 0, short[:len(short)-20], len(short))
+	b.enhanced(0, 0, whole, nil)
+
+	src, err := NewPcapSource(b.write(t), mktOnly)
+	if err != nil {
+		t.Fatalf("NewPcapSource: %v", err)
+	}
+	defer func() { _ = src.Close() }()
+
+	got := drain(t, src)
+	if len(got) != 1 {
+		t.Fatalf("got %d datagram(s), want 1: a partly-recorded datagram is not the "+
+			"publisher's bytes and must not reach the decoder", len(got))
+	}
+	if string(got[0].Raw) != "recorded whole" {
+		t.Errorf("yielded payload %q, want the whole packet", got[0].Raw)
+	}
+	// Capture-owned, and it has to reach the engine as such: the sequence number
+	// the block carried is now missing from the series, and a gap nothing owns is
+	// a gap charged to the publisher.
+	if got[0].CaptureDrops != 1 {
+		t.Errorf("the datagram after the cut-short one carries %d capture drop(s), want 1",
+			got[0].CaptureDrops)
+	}
+	if n := src.CaptureDrops(); n != 1 {
+		t.Errorf("CaptureDrops() = %d, want 1", n)
+	}
+	if n := src.SnaplenTruncated(); n != 1 {
+		t.Errorf("SnaplenTruncated() = %d, want 1: an operator fixes a short snap length by "+
+			"re-recording, which is not what they would do about a dropped datagram", n)
 	}
 }
 

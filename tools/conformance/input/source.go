@@ -34,13 +34,26 @@ type Source interface {
 	Close() error
 }
 
-// CaptureLossReporter is a Source whose input carries the recorder's own loss
-// accounting. Only pcapng does, so the run loop type-asserts for it rather than
-// widening Source: a live socket has no such number to report, and a legacy pcap
-// has no field to have recorded one in.
+// CaptureLossReporter is a Source whose input carries the capture's own loss
+// accounting. Only a file does, so the run loop type-asserts for it rather than
+// widening Source: a live socket has nowhere to have recorded such a number.
+//
+// Only pcapng carries an *admission* — epb_dropcount, the recorder saying what
+// it never wrote — and a legacy pcap has no field for it. Both formats state
+// each packet's captured and original length, so a packet the snap length cut
+// short is capture-owned loss in either, and both report it here.
 type CaptureLossReporter interface {
 	Source
 	// CaptureDrops returns the total datagrams the capture admits it failed to
 	// record over everything read so far.
 	CaptureDrops() uint64
+	// PendingDrops returns the part of that total no datagram has carried yet.
+	// Read after the loop ends, it is what the capture admitted after the last
+	// mapped datagram: loss inside the windows the end-of-run findings are graded
+	// against, which reaches the engine no other way.
+	PendingDrops() uint64
+	// SnaplenTruncated returns how many of the drops are packets the capture's
+	// snap length cut short rather than ones it admits it never wrote. It changes
+	// nothing about the grading and everything about what an operator does next.
+	SnaplenTruncated() uint64
 }
