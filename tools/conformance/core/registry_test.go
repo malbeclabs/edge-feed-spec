@@ -86,3 +86,36 @@ func TestSnapshotDrivenRulesExist(t *testing.T) {
 		}
 	}
 }
+
+// TestFeedRuleCounts pins the per-feed split published in the README's rule
+// catalog. TestRegistryComplete already guards the total, but the total is the
+// number that does not matter to a user: a run reports one feed's subset, and a
+// new feed-scoped rule moves that subset while leaving the total's guard happy.
+//
+// Documentation that no test reads goes stale silently, which is the same failure
+// the rules themselves are written to avoid (engine/denominator.go). Update the
+// README table in the same commit that changes a count here.
+func TestFeedRuleCounts(t *testing.T) {
+	want := map[Feed]int{
+		FeedMBO:      68,
+		FeedTOB:      33,
+		FeedMBP:      32,
+		FeedMidpoint: 31,
+	}
+	got := map[Feed]int{}
+	for _, r := range Rules {
+		for _, f := range r.Feeds {
+			got[f]++
+		}
+	}
+	for feed, n := range want {
+		if got[feed] != n {
+			t.Errorf("feed %s: registry has %d rules, README's rule catalog says %d — update tools/conformance/README.md", feed, got[feed], n)
+		}
+	}
+	for feed := range got {
+		if _, ok := want[feed]; !ok {
+			t.Errorf("feed %s has rules but no expected count; add it here and to the README table", feed)
+		}
+	}
+}
