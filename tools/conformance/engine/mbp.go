@@ -49,9 +49,13 @@ type mbpJournalEntry struct {
 // The spec requires a bounded buffer and a defined overflow policy, for the same
 // reason it gives: worst case is one snapshot cycle of channel traffic, and an
 // operator stretching the cycle for bandwidth is also stretching this. On
-// overflow the instrument goes unverifiable until its next group rather than
-// growing without limit — it recovers exactly as any gapped instrument does.
-const maxMBPJournal = 4096
+// overflow the instrument goes unverifiable until a baseline subsumes what was
+// dropped, rather than the journal growing without limit.
+//
+// Sized against a real venue: a 700-instrument Phoenix capture peaked at 9,529
+// entries on its busiest instrument, so a bound near it blinds the rule to
+// exactly the markets worth checking.
+const maxMBPJournal = 16384
 
 type mbpInstr struct {
 	book *mbpBook
@@ -78,6 +82,9 @@ type mbpInstr struct {
 	baseSet  bool
 	journal  []mbpJournalEntry
 	overflow bool
+	// droppedMax is the highest Per-Instrument Seq the bound discarded. A dropped
+	// delta never comes back, so overflow clears only once a baseline subsumes it.
+	droppedMax uint32
 }
 
 // stateAsOf replays the base ladder plus every journalled delta at or below k.
@@ -102,6 +109,9 @@ func (in *mbpInstr) stateAsOf(k uint32) map[mbpLevelKey]uint64 {
 func (in *mbpInstr) record(e mbpJournalEntry) {
 	if len(in.journal) >= maxMBPJournal {
 		in.overflow = true
+		if e.perSeq > in.droppedMax {
+			in.droppedMax = e.perSeq
+		}
 		return
 	}
 	in.journal = append(in.journal, e)
@@ -316,7 +326,8 @@ func (e *Engine) checkMBP(f *wire.Frame, ch uint8) {
 			in.gapped = false
 			in.lastSeqSet = false
 			in.sawSnapshotSinceDelta = false
-			in.base, in.baseSet, in.journal, in.overflow = nil, false, nil, false
+			in.base, in.baseSet, in.journal = nil, false, nil
+			in.overflow, in.droppedMax = false, 0
 		}
 	}
 }
@@ -658,7 +669,12 @@ func (e *Engine) finishMBPSnapshot(m wire.Message, ch uint8, seq uint64) {
 		}
 	}
 	in.journal = kept
-	in.overflow = false
+	// Clearing this unconditionally replayed a journal with a hole in it and
+	// reported the deltas we discarded as publisher drift (malbeclabs/phoenix#181).
+	in.overflow = in.droppedMax > open.lastK
+	if !in.overflow {
+		in.droppedMax = 0
+	}
 	// The live ladder is the new baseline plus whatever the journal still holds.
 	in.book.levels = in.stateAsOf(^uint32(0))
 	in.ready = true
