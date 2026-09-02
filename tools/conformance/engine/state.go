@@ -135,6 +135,12 @@ type portTracker struct {
 	// dirtyWindow is set when a gap was declared while the reorder window was
 	// non-empty (consumed by Task 18 gate.go).
 	dirtyWindow bool
+	// captureDirty is set when the *capture* admitted losing datagrams while this
+	// instance's window was open (see Engine.ObserveCaptureLoss). It always
+	// accompanies dirtyWindow and never gates anything on its own: the taint that
+	// stops a gated rule from grading a Violation is one flag, and this only names
+	// the owner of the loss so the finding reports capture_loss rather than loss.
+	captureDirty bool
 	// lastHbSendTS is the SendTS of this instance's most-recent Heartbeat, the
 	// baseline for HEARTBEAT.CADENCE. Per instance because each publisher
 	// heartbeats on its own schedule: one baseline for a port let one arm's
@@ -268,6 +274,7 @@ func (t *portTracker) advanceEra(newEra uint8) {
 	// prevents stale gap signals from a prior era from suppressing violations
 	// that are clearly observable in the new era.
 	t.dirtyWindow = false
+	t.captureDirty = false
 }
 
 // enqueueResult is the structured result of enqueue. The caller must process

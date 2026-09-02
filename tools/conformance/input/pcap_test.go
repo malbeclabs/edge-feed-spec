@@ -14,6 +14,44 @@ import (
 	"github.com/malbeclabs/edge-feed-spec/tools/conformance/core"
 )
 
+// udpEthPacket serialises one Ethernet/IPv4/UDP frame carrying payload, which is
+// the only packet shape either capture reader has to get through. srcPortOffset
+// varies the source port so consecutive packets are distinguishable.
+func udpEthPacket(t *testing.T, srcPortOffset int, dstPort uint16, payload []byte) []byte {
+	t.Helper()
+	buf := gopacket.NewSerializeBuffer()
+	ip4 := &layers.IPv4{
+		Version:  4,
+		TTL:      64,
+		Protocol: layers.IPProtocolUDP,
+		SrcIP:    net.IP{10, 0, 0, 1},
+		DstIP:    net.IP{10, 0, 0, 2},
+	}
+	udp := &layers.UDP{
+		SrcPort: layers.UDPPort(50000 + srcPortOffset),
+		DstPort: layers.UDPPort(dstPort),
+	}
+	if err := udp.SetNetworkLayerForChecksum(ip4); err != nil {
+		t.Fatalf("SetNetworkLayerForChecksum: %v", err)
+	}
+	err := gopacket.SerializeLayers(buf, gopacket.SerializeOptions{FixLengths: true, ComputeChecksums: true},
+		&layers.Ethernet{
+			SrcMAC:       net.HardwareAddr{0x00, 0x01, 0x02, 0x03, 0x04, 0x05},
+			DstMAC:       net.HardwareAddr{0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b},
+			EthernetType: layers.EthernetTypeIPv4,
+		},
+		ip4,
+		udp,
+		gopacket.Payload(payload),
+	)
+	if err != nil {
+		t.Fatalf("serialize packet: %v", err)
+	}
+	out := make([]byte, len(buf.Bytes()))
+	copy(out, buf.Bytes())
+	return out
+}
+
 func writePcap(t *testing.T, path string, packets [][]byte, dstPorts []uint16) {
 	t.Helper()
 	f, err := os.Create(path)
@@ -27,44 +65,14 @@ func writePcap(t *testing.T, path string, packets [][]byte, dstPorts []uint16) {
 		t.Fatalf("write pcap header: %v", err)
 	}
 
-	buf := gopacket.NewSerializeBuffer()
-	opts := gopacket.SerializeOptions{FixLengths: true, ComputeChecksums: true}
-
 	for i, payload := range packets {
-		_ = buf.Clear()
-		ip4 := &layers.IPv4{
-			Version:  4,
-			TTL:      64,
-			Protocol: layers.IPProtocolUDP,
-			SrcIP:    net.IP{10, 0, 0, 1},
-			DstIP:    net.IP{10, 0, 0, 2},
-		}
-		udp := &layers.UDP{
-			SrcPort: layers.UDPPort(50000 + i),
-			DstPort: layers.UDPPort(dstPorts[i]),
-		}
-		if err := udp.SetNetworkLayerForChecksum(ip4); err != nil {
-			t.Fatalf("SetNetworkLayerForChecksum packet %d: %v", i, err)
-		}
-		err := gopacket.SerializeLayers(buf, opts,
-			&layers.Ethernet{
-				SrcMAC:       net.HardwareAddr{0x00, 0x01, 0x02, 0x03, 0x04, 0x05},
-				DstMAC:       net.HardwareAddr{0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b},
-				EthernetType: layers.EthernetTypeIPv4,
-			},
-			ip4,
-			udp,
-			gopacket.Payload(payload),
-		)
-		if err != nil {
-			t.Fatalf("serialize packet %d: %v", i, err)
-		}
+		data := udpEthPacket(t, i, dstPorts[i], payload)
 		ci := gopacket.CaptureInfo{
 			Timestamp:     time.Unix(int64(1000+i), 0),
-			CaptureLength: len(buf.Bytes()),
-			Length:        len(buf.Bytes()),
+			CaptureLength: len(data),
+			Length:        len(data),
 		}
-		if err := w.WritePacket(ci, buf.Bytes()); err != nil {
+		if err := w.WritePacket(ci, data); err != nil {
 			t.Fatalf("write packet %d: %v", i, err)
 		}
 	}

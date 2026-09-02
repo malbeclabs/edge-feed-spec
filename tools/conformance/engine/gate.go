@@ -721,14 +721,19 @@ func (e *Engine) applyDeltaSeq(ch uint8, instrID uint32, perSeq uint32, frameSeq
 		// without a reset count change) is handled in the default arm. But a
 		// forward jump alone is not a snapshot-reset issue.
 
-		st := core.Violation
+		st, reason := core.Violation, ""
 		if !gapless {
-			// A mktdata channel gap could account for the missing delta(s).
-			st = core.Unverifiable
+			// A mktdata channel gap could account for the missing delta(s). The cause
+			// is named rather than left empty because it is the label an operator
+			// reads off `unverifiable_total{reason}` — and because Emit re-owns it as
+			// `capture_loss` when the capture admits the datagram never reached the
+			// file, which is the distinction that keeps a replay from charging its own
+			// recorder's drops to the publisher.
+			st, reason = core.Unverifiable, core.ReasonLoss
 		}
 		e.Emit("DELTA.PERINSTR_DENSITY", st, core.PortMktData, frameSeq, ch, instrID,
 			fmt.Sprintf("instrument %d: per-instrument seq jumped %d→%d (expected %d)",
-				instrID, last, perSeq, last+1))
+				instrID, last, perSeq, last+1), reason)
 
 	default:
 		// perSeq <= last: duplicate or late arrival.

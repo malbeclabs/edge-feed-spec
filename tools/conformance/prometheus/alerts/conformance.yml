@@ -24,13 +24,20 @@ groups:
       # operation, which trains an operator to silence it. The causes below are the
       # ones that mean something is wrong upstream:
       #
-      #   loss      a datagram went missing
-      #   overflow  a bounded buffer was outrun (snapshot cycle too long for it)
-      #   untrusted an instrument's history never became established
+      #   loss         a datagram went missing
+      #   capture_loss the recorder admits it failed to record datagrams
+      #   overflow     a bounded buffer was outrun (snapshot cycle too long for it)
+      #   untrusted    an instrument's history never became established
+      #
+      # `capture_loss` reaches a scrape only from a replay run with --metrics-addr,
+      # since a live socket has no such accounting to report. It is here because
+      # when it does appear it is upstream in the same sense as the others — the
+      # recorder rather than the wire — and a set that silently omitted it would be
+      # a second place to keep in step with core.Reason*.
       #
       # See "Coverage vs. silence" in tools/conformance/README.md.
       - alert: ConformanceCoverageLoss
-        expr: increase(dz_conformance_unverifiable_total{reason=~"loss|overflow|untrusted"}[5m]) > 5
+        expr: increase(dz_conformance_unverifiable_total{reason=~"loss|capture_loss|overflow|untrusted"}[5m]) > 5
         for: 2m
         labels:
           severity: warning

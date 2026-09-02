@@ -130,6 +130,17 @@ func (e *Engine) Emit(ruleID string, st core.Status, port core.Port, seq uint64,
 	if len(reason) > 0 {
 		rsn = reason[0]
 	}
+	// Name the owner of the loss. Every gated rule reports ReasonLoss for "a
+	// datagram that could have carried what I needed is missing", and on a replay
+	// that datagram may be one the recorder admits it never wrote (see
+	// ObserveCaptureLoss). The distinction is not cosmetic: `loss` sends an
+	// operator to the network and `capture_loss` sends them to the recorder, and
+	// the rules cannot each make the call — the taint is on the window, not on the
+	// individual gap. Substituting here, at the one point every finding passes
+	// through, keeps that knowledge in one place.
+	if st == core.Unverifiable && rsn == core.ReasonLoss && e.captureDirtyOn(port, ch) {
+		rsn = core.ReasonCaptureLoss
+	}
 	e.rep.Record(core.Finding{RuleID: ruleID, Severity: sev, Status: st, Feed: e.cfg.Feed,
 		Port: port, Seq: seq, ChannelID: ch, InstrumentID: inst, Detail: detail, Reason: rsn, At: e.now()})
 }
@@ -268,6 +279,47 @@ func (e *Engine) taintPortWide(port core.Port) {
 			pt.dirtyWindow = true
 		}
 	}
+}
+
+// ObserveCaptureLoss records datagrams the *capture* admits it failed to record
+// before the datagram about to be processed — pcapng's epb_dropcount, which is
+// the only place an archive says what it is missing.
+//
+// **Why it taints everything.** The recorder drops at its interface: what it
+// lost was never parsed, so its channel, its source address and even its
+// destination port are unknowable. Marking only the instance whose datagram
+// carried the admission would leave every other series reading a
+// capture-inflicted gap as the publisher's, which is precisely the error the
+// archive format was chosen to prevent — one lost datagram breaks the
+// per-instrument sequence chain of every instrument it carried, so the
+// misattribution amplifies rather than staying proportional. The direction is
+// the safe one taintPortWide already takes: the cost of tainting a series the
+// drop did not touch is a rule that grades Unverifiable instead of pass, never a
+// Violation the publisher did not commit.
+//
+// An instance first seen *after* the drop is deliberately not tainted. It seeds
+// its own sequence baseline from its first datagram, so loss that precedes it
+// declares no gap and is already reported as a mid-stream join (cold_start).
+func (e *Engine) ObserveCaptureLoss(n uint64) {
+	if n == 0 {
+		return
+	}
+	for _, pt := range e.ports {
+		pt.dirtyWindow = true
+		pt.captureDirty = true
+	}
+}
+
+// captureDirtyOn reports whether any instance of this (port, channel) has a
+// window that admitted capture loss. It ORs across the channel's instances for
+// the same reason dirtyOn does, and is read only to label a finding's cause.
+func (e *Engine) captureDirtyOn(port core.Port, ch uint8) bool {
+	for k, pt := range e.ports {
+		if k.port == port && k.ch == ch && pt.captureDirty {
+			return true
+		}
+	}
+	return false
 }
 
 // mktdataPending reports whether any mktdata reorder buffer on this channel still

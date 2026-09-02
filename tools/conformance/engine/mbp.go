@@ -375,8 +375,10 @@ func (e *Engine) checkMBPSeq(in *mbpInstr, k mbpInstrKey, got uint32, seq uint64
 		// snapshot rather than blamed for a later mismatch. The tracker advances to
 		// the number actually on the wire: the following delta is dense against
 		// *this* one, not against the number the gap skipped.
-		e.Emit("MBP.DELTA.PERINSTR_DENSITY", core.Violation, core.PortMktData, seq, ch, k.instrID,
-			fmt.Sprintf("Per-Instrument Seq jumped %d -> %d (expected %d)", in.lastSeq, got, in.lastSeq+1))
+		st, reason := e.mbpDensityStatus(ch)
+		e.Emit("MBP.DELTA.PERINSTR_DENSITY", st, core.PortMktData, seq, ch, k.instrID,
+			fmt.Sprintf("Per-Instrument Seq jumped %d -> %d (expected %d)", in.lastSeq, got, in.lastSeq+1),
+			reason)
 		in.gapped = true
 		in.lastSeq = got
 		return true
@@ -414,6 +416,27 @@ func (e *Engine) mbpGroupStatus(ch uint8, open *mbpOpenSnap) core.Status {
 		return core.Unverifiable
 	}
 	return core.Violation
+}
+
+// mbpDensityStatus grades a per-instrument sequence gap.
+//
+// The gap above is graded a Violation even on a channel whose *frame* series has
+// a hole, and that is deliberate: at this layer a publisher's skip and a lost
+// datagram look identical, and the rule reports the gap rather than staying
+// silent and letting a later reconstruction mismatch carry the blame for it.
+//
+// Admitted capture loss is the one case that is not a judgement call. The
+// recorder says, in the file, that it failed to write datagrams in this window —
+// so the missing numbers belong to the archive and not to the publisher, and
+// grading them is how a replay comes to charge its own recorder's drops to the
+// feed. One lost datagram breaks the per-instrument chain of every instrument it
+// carried, so the misattribution amplifies: a segment admitting 663 drops earned
+// 238 findings on this rule alone.
+func (e *Engine) mbpDensityStatus(ch uint8) (core.Status, string) {
+	if e.captureDirtyOn(core.PortMktData, ch) {
+		return core.Unverifiable, core.ReasonCaptureLoss
+	}
+	return core.Violation, ""
 }
 
 // mbpReason renders the bounded metric reason that pairs with the status above.
