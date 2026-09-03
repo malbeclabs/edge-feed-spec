@@ -644,8 +644,9 @@ func (e *Engine) EndRun() {
 // report; more wire may still settle them. The two terminal ones report as soon as
 // they are true:
 //
-//   - ready reached → Pass, at the frame that reached it.
-//   - window closed without ready → Violation, at the frame that closed it.
+//   - ready reached inside the window → Pass, at the datagram that reached it.
+//   - ready reached past it, or the window closed without ready → Violation, at the
+//     datagram that settled it.
 //
 // Each period is one opportunity, and each of the five ways out below reports it. A
 // period that reached ready is the rule *passing* — the reason it was silent is that
@@ -654,7 +655,10 @@ func (e *Engine) EndRun() {
 //
 // Deciding at the window rather than at exit also fixes a masking bug: a period that
 // reached ready long AFTER the window used to report Pass, because EndRun only asked
-// whether ready was ever reached, not whether it was reached in time.
+// whether ready was ever reached, not whether it was reached in time. Closing it takes
+// the readiness timestamp, not the span: the span ends at the last Valid=1 summary, so
+// where none lands between the window closing and a late readiness there is no span
+// past the window to catch it.
 func (e *Engine) decideNeverReachesReady(ch uint8, s *channelRefdataState, final bool) {
 	if s.neverReadyDecided {
 		return
@@ -665,6 +669,22 @@ func (e *Engine) decideNeverReachesReady(ch uint8, s *channelRefdataState, final
 	window := e.cfg.ExpectManifestCadence + e.cfg.ExpectDefinitionCycle
 	if s.everReady {
 		s.neverReadyDecided = true
+		// Ready alone is not a Pass — the rule grades a deadline. Compare the moment
+		// readiness was reached against the window, because the span below cannot see
+		// a late ready that no later Valid=1 summary follows.
+		if s.firstSendTSSet && s.readySendTSSet && s.readySendTS >= s.firstSendTS {
+			if elapsed := time.Duration(s.readySendTS-s.firstSendTS) * time.Nanosecond; elapsed > window {
+				st := core.Violation
+				reason := ""
+				if e.dirtyOn(core.PortRefData, ch) {
+					st = core.Unverifiable
+					reason = core.ReasonLoss
+				}
+				e.Emit("REFDATA.NEVER_REACHES_READY", st, core.PortRefData, 0, ch, 0,
+					fmt.Sprintf("channel %d reached ready after %v, past the %v window", ch, elapsed, window), reason)
+				return
+			}
+		}
 		e.passed("REFDATA.NEVER_REACHES_READY", core.PortRefData, 0, ch, 0,
 			fmt.Sprintf("channel %d reached ready state", ch))
 		return

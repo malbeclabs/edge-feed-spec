@@ -9,8 +9,8 @@ package engine
 // verdict never arrived and no alert could ever see it (#50).
 //
 // These tests pin the live contract: terminal verdicts land when they become true,
-// non-terminal ones still wait, each era says its piece exactly once, and a channel
-// that reaches ready *late* is a violation rather than a pass.
+// non-terminal ones still wait, each serving period says its piece exactly once, and a
+// channel that reaches ready *late* is a violation rather than a pass.
 
 import (
 	"testing"
@@ -20,8 +20,8 @@ import (
 	"github.com/malbeclabs/edge-feed-spec/tools/conformance/wire"
 )
 
-// liveReadyEngine is an engine with both --expect-* values set, which is what arms
-// this rule at all.
+// liveReadyEngine is an engine with both --expect-* values set, which is what puts
+// this rule in scope at all.
 func liveReadyEngine(t *testing.T) (*Engine, *allCapture) {
 	t.Helper()
 	return newCadenceEngine(Config{
@@ -57,7 +57,7 @@ func TestNeverReachesReadyDecidesWithoutEndRun(t *testing.T) {
 		t.Fatal("REFDATA.NEVER_REACHES_READY: no verdict in a run that never ends — the rule is unreachable, which is #50")
 	}
 	if n := len(findingsFor(ac, "REFDATA.NEVER_REACHES_READY")); n != 1 {
-		t.Errorf("REFDATA.NEVER_REACHES_READY: reported %d times across one era, want exactly 1", n)
+		t.Errorf("REFDATA.NEVER_REACHES_READY: reported %d times across one serving period, want exactly 1", n)
 	}
 }
 
@@ -100,21 +100,21 @@ func TestNeverReachesReadyLateReadyIsAViolation(t *testing.T) {
 		t.Error("REFDATA.NEVER_REACHES_READY: reaching ready 7s into a 2s window is a violation, not a pass")
 	}
 	if hasPass(ac, "REFDATA.NEVER_REACHES_READY") {
-		t.Error("REFDATA.NEVER_REACHES_READY: a late ready must not also report a pass for the same era")
+		t.Error("REFDATA.NEVER_REACHES_READY: a late ready must not also report a pass for the same serving period")
 	}
 }
 
-// TestNeverReachesReadyReArmsOnANewEra: the verdict is per era. A Reset Count change
-// starts a fresh subscriber, which gets its own window — otherwise one bad era would
+// TestNeverReachesReadyDecidesAgainOnANewEra: a Reset Count change starts a fresh
+// subscriber, which gets its own window — otherwise one bad serving period would
 // silence the rule for the life of the process, which is the same unreachability in a
 // different disguise.
-func TestNeverReachesReadyReArmsOnANewEra(t *testing.T) {
+func TestNeverReachesReadyDecidesAgainOnANewEra(t *testing.T) {
 	e, ac := liveReadyEngine(t)
 
 	// Frame sequence is contiguous throughout, in both eras. A single skipped seq
 	// latches the dirty window for the channel instance — it is cleared only by a
 	// publisher reset, not by onResetChannel — and every later verdict would
-	// downgrade to Unverifiable/loss, which is a different arm than the one here.
+	// downgrade to Unverifiable/loss, which is a different branch than the one here.
 	for i := 1; i <= 6; i++ {
 		manifestAt(e, uint64(i), uint64(i-1)*nsPerSec, 2)
 	}
@@ -134,5 +134,62 @@ func TestNeverReachesReadyReArmsOnANewEra(t *testing.T) {
 
 	if !hasViolation(ac, "REFDATA.NEVER_REACHES_READY") {
 		t.Error("REFDATA.NEVER_REACHES_READY: a new era must get its own verdict, not inherit the last one's silence")
+	}
+}
+
+// TestNeverReachesReadyLateReadyWithNoTrailingSummaryIsAViolation is the same masking
+// bug reached from the side the span cannot see. The observation span ends at the last
+// Valid=1 summary, so where none lands between the window closing and a late readiness
+// there is no span past the window at all — and a check that short-circuits on "ready
+// was reached" then reports a Pass for a channel that took half again the window. The
+// readiness timestamp is what settles it.
+func TestNeverReachesReadyLateReadyWithNoTrailingSummaryIsAViolation(t *testing.T) {
+	// Window is cadence + cycle = 6s.
+	e, ac := newCadenceEngine(Config{
+		Feed:                  core.FeedTOB,
+		ExpectManifestCadence: 5 * time.Second,
+		ExpectDefinitionCycle: 1 * time.Second,
+	})
+
+	// One summary announcing two instruments, and one of them at t=0.1s.
+	manifestAt(e, 1, 0, 2)
+	processFrame(e, buildInstrDefFrameWithTS(nsPerSec/10, 100, 1, 1), wire.MagicTOB, core.PortRefData, 2)
+
+	// The second definition completes the set at t=9s — 3s past the window — and no
+	// summary follows it, so lastServingSendTS is still the t=0 one and the span
+	// stays 0.
+	processFrame(e, buildInstrDefFrameWithTS(9*nsPerSec, 101, 1, 1), wire.MagicTOB, core.PortRefData, 3)
+	e.Flush()
+	e.EndRun()
+
+	if hasPass(ac, "REFDATA.NEVER_REACHES_READY") {
+		t.Error("REFDATA.NEVER_REACHES_READY: ready at 9s in a 6s window is a violation, not a pass")
+	}
+	if !hasViolation(ac, "REFDATA.NEVER_REACHES_READY") {
+		t.Error("REFDATA.NEVER_REACHES_READY: no verdict at all — a late ready with no summary behind it must still be graded")
+	}
+}
+
+// TestNeverReachesReadyDoesNotVivifyAChannel: deciding per datagram must look the
+// channel up, not create it. A refdata datagram carrying neither a ManifestSummary nor
+// an InstrumentDefinition — a Heartbeat, or a runt decoding to the all-zero header —
+// otherwise materializes state for a channel that has no reference data, and EndRun
+// then grades a channel that was never there.
+func TestNeverReachesReadyDoesNotVivifyAChannel(t *testing.T) {
+	e, ac := liveReadyEngine(t)
+
+	// Channel 1 is real and healthy: announced one instrument, shipped it.
+	processFrame(e, buildManifestFrameWithTS(wire.MagicTOB, 0, 1, 1, 1, 1), wire.MagicTOB, core.PortRefData, 1)
+	processFrame(e, buildInstrDefFrameWithTS(nsPerSec/10, 100, 1, 1), wire.MagicTOB, core.PortRefData, 2)
+
+	// Channel 7 carries a Heartbeat and nothing else.
+	processFrame(e, buildHeartbeatFrame(wire.MagicTOB, nsPerSec, 7), wire.MagicTOB, core.PortRefData, 3)
+	e.Flush()
+	e.EndRun()
+
+	for _, f := range findingsFor(ac, "REFDATA.NEVER_REACHES_READY") {
+		if f.ChannelID == 7 {
+			t.Errorf("REFDATA.NEVER_REACHES_READY: graded channel 7, which carried no reference data: %s", f.Detail)
+		}
 	}
 }
