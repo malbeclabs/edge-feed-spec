@@ -33,10 +33,10 @@ The current state of every feed:
 | Spec | Frame `Magic` | `Schema Version` | Version |
 |------|---------------|------------------|---------|
 | [Top-of-Book & Trades](./top-of-book/spec.md) | `0x445A` | `3` | 3.0.1 |
-| [Midpoint](./midpoint/spec.md) | `0x4D44` | `1` | 1.0.1 |
-| [Market-by-Order](./market-by-order/spec.md) | `0x4444` | `3` | 3.2.0 |
+| [Midpoint](./midpoint/spec.md) | `0x4D44` | `1` | 1.1.0 |
+| [Market-by-Order](./market-by-order/spec.md) | `0x4444` | `3` | 3.3.0 |
 | [Market-by-Price](./market-by-price/spec.md) | `0x4442` | `3` | 3.1.1 |
-| [Order-Intent](./order-intent/spec.md) | `0x494F` | `3` | 3.0.1 |
+| [Order-Intent](./order-intent/spec.md) | `0x494F` | `3` | 3.1.0 |
 | [Perp Stats](./perp-stats/spec.md) | `0x4450` | `3` | 3.0.1 |
 | [Reference Data Distribution](./reference-data/spec.md) | *(host feed's)* | *(host feed's)* | 1.0.2 |
 | [Source ID Registry](./sources/spec.md) | *(none)* | *(none)* | 1.2.0 |
