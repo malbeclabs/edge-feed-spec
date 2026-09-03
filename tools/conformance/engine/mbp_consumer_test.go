@@ -363,3 +363,36 @@ func TestMBPReconstructionIsUnverifiableAfterAGap(t *testing.T) {
 		t.Error("a mismatch after observed loss must not be blamed on the publisher")
 	}
 }
+
+// A baseline captured before a discarded delta does not bring it back, so the
+// group after it is still not comparable (malbeclabs/phoenix#181).
+func TestMBPReconstructionStaysUnverifiableUntilABaselineSubsumesTheDroppedDeltas(t *testing.T) {
+	// bid(99) is deleted by the one delta the bound discards, so only a replay
+	// that has forgotten that delete still carries the level.
+	tape := newTape().group(1, 0, 1, 0, 0, bid(100, 5), bid(99, 3))
+	fill := uint32(maxMBPJournal)
+	for seq := uint32(1); seq <= fill; seq++ {
+		tape = tape.delta(seq, mbpClearSideBid, mbpActionChange, 100, uint64(5+seq%3))
+	}
+	dropped := fill + 1
+	tape = tape.
+		delta(dropped, mbpClearSideBid, mbpActionDelete, 99, 0).
+		// Captured at the last seq the journal holds, so it cannot account for the
+		// delete at `dropped` — and its own levels still carry bid(99).
+		group(1, 1, 2, fill, 0, bid(100, int64(5+fill%3)), bid(99, 3)).
+		delta(dropped+1, mbpClearSideBid, mbpActionChange, 100, 7).
+		// Captured past the delete, so the publisher's ladder has bid(99) gone.
+		group(1, 2, 3, dropped+1, 0, bid(100, 7))
+	if tape.violated(t, "MBP.SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT") {
+		t.Error("a divergence explained by a delta the journal bound discarded must not be blamed on the publisher")
+	}
+
+	// Control: forgiving the overflow forever would also pass the assertion above,
+	// and would silence the rule on the busiest instruments for the whole run.
+	resumed := tape.
+		delta(dropped+2, mbpClearSideBid, mbpActionChange, 100, 11).
+		group(1, 3, 4, dropped+2, 0, bid(100, 4))
+	if !resumed.violated(t, "MBP.SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT") {
+		t.Error("comparison must resume once a baseline subsumes the dropped deltas")
+	}
+}
