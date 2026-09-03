@@ -363,6 +363,8 @@ For a 24/7 deployment:
 
 Memory is bounded for indefinite operation: the per-`(era,seq)` dedup map is FIFO-evicted via a fixed `2×--reorder-window` ring (it does **not** grow with the sequence space), the per-instance tracker map is capped and evicts the least-recently-seen instance (see [Sequencing keys on the channel instance](#sequencing-keys-on-the-channel-instance)), books/trackers are keyed by the live instrument set and pruned on manifest bumps / cleared on era resets, and metric cardinality is fixed — each finding series is keyed by `feed × rule_id` plus one small bounded enum (`severity`, `result`, or `reason`), never the free-form `detail`.
 
+The market-by-price delta journal is the largest of those structures and the one to size a host against. `engine.maxMBPJournal` bounds it at 16,384 entries per instrument, 32 bytes each — 0.5 MiB per instrument, so 39 MiB for a 78-instrument venue and ~500 MiB for a 1,000-instrument one, if every instrument sat at the bound. None do in practice: the journal is pruned at every completed snapshot group, and a 78-instrument Phoenix capture peaked at 9,529 entries on its busiest instrument and 54,631 across all of them at once — 1.7 MiB. What moves that peak is the publisher's snapshot cycle, since a journal must span one rotation: stretching the cycle for bandwidth stretches this too, and an instrument whose delta rate outruns the bound goes `Unverifiable` (`unverifiable_total{reason="overflow"}`) until a snapshot baseline subsumes what was dropped, rather than the journal growing without limit.
+
 ## Demo monitoring stack
 
 This directory ships a **self-contained** monitoring demo — the conformance subscriber plus Prometheus (scrape + alerts) and Grafana (the per-rule dashboard):
