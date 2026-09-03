@@ -193,3 +193,67 @@ func TestNeverReachesReadyDoesNotVivifyAChannel(t *testing.T) {
 		}
 	}
 }
+
+// processFrameSchema is processFrame with the header's Schema Version overridden after
+// decode, so the datagram reaches the engine as one from a publisher ahead of us
+// without wire.Decode itself reporting FRAME.SCHEMA_VERSION. That isolates the
+// downgrade beginFrame applies, which is what is under test here.
+func processFrameSchema(e *Engine, raw []byte, magic uint16, port core.Port, seq uint64, schema uint8) {
+	f, sf := wire.Decode(raw, magic)
+	f.Header.Sequence = seq
+	f.Header.SchemaVersion = schema
+	e.Process(srcA, f, port, sf)
+}
+
+// TestNeverReachesReadyRecordsTheDecidingSeq: the verdict now claims to land at the
+// datagram that settled it, so it has to say which one. Seq 0 was harmless while the
+// rule only spoke from EndRun, where there is no datagram to point at; live, an
+// operator alerting on this has to be able to find it in a capture.
+func TestNeverReachesReadyRecordsTheDecidingSeq(t *testing.T) {
+	e, ac := liveReadyEngine(t)
+
+	manifestAt(e, 1, 0, 2)
+	processFrame(e, buildInstrDefFrameWithTS(nsPerSec/10, 100, 1, 1), wire.MagicTOB, core.PortRefData, 2)
+	// Frame seq 3 carries t=2s, which is where the 2s window closes.
+	for i := 2; i <= 6; i++ {
+		manifestAt(e, uint64(i+1), uint64(i)*nsPerSec, 2)
+	}
+	e.Flush()
+
+	found := findingsFor(ac, "REFDATA.NEVER_REACHES_READY")
+	if len(found) != 1 {
+		t.Fatalf("setup: want exactly 1 verdict, got %d", len(found))
+	}
+	if found[0].Seq != 3 {
+		t.Errorf("REFDATA.NEVER_REACHES_READY: recorded seq %d, want 3 — the datagram that closed the window", found[0].Seq)
+	}
+}
+
+// TestNeverReachesReadyDoesNotLatchASchemaDowngrade: an unknown (higher) schema version
+// downgrades every non-envelope rule for the datagram being classified, and deciding
+// mid-run means the verdict inherits the version of whichever datagram happened to
+// close the window. neverReadyDecided would then make that permanent — one datagram
+// from a mid-upgrade publisher, arriving at exactly the wrong moment, and the period's
+// Violation is recorded as NA/Info with no later datagram able to restate it. A
+// non-final decision defers instead.
+func TestNeverReachesReadyDoesNotLatchASchemaDowngrade(t *testing.T) {
+	e, ac := liveReadyEngine(t)
+
+	manifestAt(e, 1, 0, 2)
+	processFrame(e, buildInstrDefFrameWithTS(nsPerSec/10, 100, 1, 1), wire.MagicTOB, core.PortRefData, 2)
+	manifestAt(e, 3, nsPerSec, 2)
+
+	// t=2s closes the 2s window, and this is the one datagram from a publisher ahead
+	// of us.
+	processFrameSchema(e, buildManifestFrameWithTS(wire.MagicTOB, 2*nsPerSec, 1, 1, 2, 1),
+		wire.MagicTOB, core.PortRefData, 4, wire.ExpectedSchemaVersion(wire.MagicTOB)+1)
+	e.Flush()
+
+	// A clean datagram behind it, which is the one that should decide the period.
+	manifestAt(e, 5, 3*nsPerSec, 2)
+	e.Flush()
+
+	if !hasViolation(ac, "REFDATA.NEVER_REACHES_READY") {
+		t.Error("REFDATA.NEVER_REACHES_READY: the period is stuck on the downgrade one datagram forced; a later clean datagram must still decide it")
+	}
+}
