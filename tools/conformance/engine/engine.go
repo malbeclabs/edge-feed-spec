@@ -674,7 +674,17 @@ func (e *Engine) decideNeverReachesReady(ch uint8, s *channelRefdataState, frame
 	if e.curUnknownSchema && !final {
 		return
 	}
+	// Not configured to measure a window. Say so rather than returning silently: a
+	// rule that stops running reports the same thing as one that checked everything
+	// and found nothing, and Config.Configured agrees with this test, so the rule is
+	// Info here rather than a Must claiming coverage it has not got.
 	if e.cfg.ExpectManifestCadence == 0 || e.cfg.ExpectDefinitionCycle == 0 {
+		if !final {
+			return
+		}
+		s.neverReadyDecided = true
+		e.inapplicable("REFDATA.NEVER_REACHES_READY", core.PortRefData, frameSeq, ch, 0,
+			fmt.Sprintf("channel %d: the window is manifest cadence + definition cycle, and this run set neither or only one of them", ch))
 		return
 	}
 	window := e.cfg.ExpectManifestCadence + e.cfg.ExpectDefinitionCycle
