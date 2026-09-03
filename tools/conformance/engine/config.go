@@ -37,7 +37,7 @@ type Config struct {
 //
 //	REFDATA.MANIFEST_CADENCE        → ExpectManifestCadence
 //	REFDATA.DEFINITION_CYCLE_COVERAGE → ExpectDefinitionCycle
-//	REFDATA.NEVER_REACHES_READY     → ExpectDefinitionCycle (same observation window)
+//	REFDATA.NEVER_REACHES_READY     → ExpectManifestCadence + ExpectDefinitionCycle
 //	REFDATA.NO_BURST_DEFINITIONS    → ExpectDefinitionCycle
 //	HEARTBEAT.CADENCE               → ExpectHeartbeat
 func (c Config) Configured(ruleID string) bool {
@@ -47,7 +47,11 @@ func (c Config) Configured(ruleID string) bool {
 	case "REFDATA.DEFINITION_CYCLE_COVERAGE":
 		return c.ExpectDefinitionCycle > 0
 	case "REFDATA.NEVER_REACHES_READY":
-		return c.ExpectDefinitionCycle > 0
+		// Both, because the window this rule grades is their sum. Claiming the rule
+		// is in scope on the cycle alone kept it at Must severity in a run where
+		// decideNeverReachesReady can never measure anything -- a second silence
+		// path of exactly the #50 shape, reached through the config instead.
+		return c.ExpectManifestCadence > 0 && c.ExpectDefinitionCycle > 0
 	case "REFDATA.NO_BURST_DEFINITIONS":
 		return c.ExpectDefinitionCycle > 0
 	case "HEARTBEAT.CADENCE":
