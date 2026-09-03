@@ -152,6 +152,9 @@ type mbpState struct {
 	// single slot made two conformant channels sharing a snapshot port look like an
 	// interleaving publisher, and silently discarded one of their groups.
 	open map[uint8]*mbpOpenSnap
+	// sawBegin records the channels whose first SnapshotBegin this run has seen;
+	// until then an orphan predates the observation window (see mbpOrphanStatus).
+	sawBegin map[uint8]bool
 	// resetEra is the Reset Count this state was last wiped for, so the second and
 	// third port to cross the same reset do not wipe again.
 	resetEra    uint8
@@ -160,8 +163,9 @@ type mbpState struct {
 
 func newMBPState() *mbpState {
 	return &mbpState{
-		instr: make(map[mbpInstrKey]*mbpInstr),
-		open:  make(map[uint8]*mbpOpenSnap),
+		instr:    make(map[mbpInstrKey]*mbpInstr),
+		open:     make(map[uint8]*mbpOpenSnap),
+		sawBegin: make(map[uint8]bool),
 	}
 }
 
@@ -328,6 +332,11 @@ func (e *Engine) checkMBP(f *wire.Frame, ch uint8) {
 			in.sawSnapshotSinceDelta = false
 			in.base, in.baseSet, in.journal = nil, false, nil
 			in.overflow, in.droppedMax = false, 0
+			// Step 1 discards "any open snapshot for `I`" too, so a level of that group
+			// arriving afterwards belongs to nothing (malbeclabs/phoenix#163).
+			if open := e.mbp.open[ch]; open != nil && open.key == k {
+				delete(e.mbp.open, ch)
+			}
 		}
 	}
 }
@@ -435,6 +444,22 @@ func mbpReason(st core.Status) string {
 	return ""
 }
 
+// mbpOrphanStatus grades a snapshot-port message that belongs to no open group.
+//
+// **Before the channel's first `SnapshotBegin`, forgiven; after it, charged.** The
+// rotation is continuous, so every capture and every live join opens mid-group —
+// the tail's treatment in `flushOpenMBPSnaps`, applied to the head. But after one,
+// an orphan is a group's tail emitted after an `InstrumentReset` discarded it
+// (malbeclabs/phoenix#163), and blanket-forgiving orphans silences the rule while
+// still looking clean on a capture's head.
+func (e *Engine) mbpOrphanStatus(ch uint8) (core.Status, string) {
+	if !e.mbp.sawBegin[ch] {
+		return core.Unverifiable, core.ReasonColdStart
+	}
+	st := e.mbpGroupStatus(ch, nil)
+	return st, mbpReason(st)
+}
+
 // checkMBPSnapshot validates snapshot-group structure and runs the reconstruction
 // diff when a group completes.
 func (e *Engine) checkMBPSnapshot(f *wire.Frame, ch uint8, seq uint64) {
@@ -467,6 +492,7 @@ func (e *Engine) checkMBPSnapshot(f *wire.Frame, ch uint8, seq uint64) {
 					fmt.Sprintf("SnapshotBegin for instrument %d while a group for %d is still open",
 						k.instrID, prev.key.instrID), mbpReason(st))
 			}
+			e.mbp.sawBegin[ch] = true
 			e.mbp.open[ch] = &mbpOpenSnap{
 				key:                k,
 				snapID:             snapshotBeginSnapshotID(m),
@@ -485,9 +511,9 @@ func (e *Engine) checkMBPSnapshot(f *wire.Frame, ch uint8, seq uint64) {
 			}
 			open := e.mbp.open[ch]
 			if open == nil {
-				st := e.mbpGroupStatus(ch, nil)
-				e.Emit("MBP.SNAP.GROUP_STRUCTURE", st, core.PortSnapshot, seq, ch, 0,
-					"SnapshotLevel with no open SnapshotBegin", mbpReason(st))
+				st, rsn := e.mbpOrphanStatus(ch)
+				e.emitNoInstrument("MBP.SNAP.GROUP_STRUCTURE", st, core.PortSnapshot, seq, ch,
+					"SnapshotLevel with no open SnapshotBegin", rsn)
 				continue
 			}
 			if id := snapshotLevelSnapshotID(m); id != open.snapID {
@@ -528,9 +554,9 @@ func (e *Engine) finishMBPSnapshot(m wire.Message, ch uint8, seq uint64) {
 	open := e.mbp.open[ch]
 	instrID := snapshotEndInstrumentID(m)
 	if open == nil {
-		st := e.mbpGroupStatus(ch, nil)
+		st, rsn := e.mbpOrphanStatus(ch)
 		e.Emit("MBP.SNAP.GROUP_STRUCTURE", st, core.PortSnapshot, seq, ch, instrID,
-			"SnapshotEnd with no open SnapshotBegin", mbpReason(st))
+			"SnapshotEnd with no open SnapshotBegin", rsn)
 		return
 	}
 	delete(e.mbp.open, ch)

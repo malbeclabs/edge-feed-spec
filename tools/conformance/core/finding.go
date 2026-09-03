@@ -147,8 +147,15 @@ type Finding struct {
 	Port         Port
 	ChannelID    uint8
 	InstrumentID uint32 // 0 when not instrument-scoped
-	Seq          uint64
-	Detail       string // free-form, for logs only — NEVER a metric label (unbounded)
+	// NoInstrumentID is set when the finding's subject carries no Instrument ID at
+	// all — an orphan `SnapshotLevel` names none, and reporting 0 read as a real id
+	// and misattributed a capture's burst to it. A flag rather than a sentinel id
+	// because the spec reserves no `u32` value (market-by-price/spec.md, *Instrument
+	// IDs*), so any sentinel is a legal id and collides. Reporters render it
+	// "unknown"; false is the common case, so the zero value is right.
+	NoInstrumentID bool
+	Seq            uint64
+	Detail         string // free-form, for logs only — NEVER a metric label (unbounded)
 	// Reason is a bounded, low-cardinality code used for the unverifiable_total
 	// metric's `reason` label — one of the Reason* constants above. Empty is
 	// treated as ReasonUnspecified.

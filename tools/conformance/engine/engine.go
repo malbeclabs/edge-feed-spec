@@ -109,6 +109,16 @@ func (e *Engine) beginFrame(schemaVersion uint8) {
 // Prometheus label; at most one is used. Prefer the passed/unverified/inapplicable
 // helpers in denominator.go, which pick the status and reason together.
 func (e *Engine) Emit(ruleID string, st core.Status, port core.Port, seq uint64, ch uint8, inst uint32, detail string, reason ...string) {
+	e.emit(ruleID, st, port, seq, ch, inst, false, detail, reason...)
+}
+
+// emitNoInstrument is Emit for a finding whose subject carries no Instrument ID —
+// see core.Finding.NoInstrumentID.
+func (e *Engine) emitNoInstrument(ruleID string, st core.Status, port core.Port, seq uint64, ch uint8, detail string, reason ...string) {
+	e.emit(ruleID, st, port, seq, ch, 0, true, detail, reason...)
+}
+
+func (e *Engine) emit(ruleID string, st core.Status, port core.Port, seq uint64, ch uint8, inst uint32, noInst bool, detail string, reason ...string) {
 	meta, ok := core.Lookup(ruleID)
 	if !ok {
 		panic("unknown rule id: " + ruleID)
@@ -131,7 +141,8 @@ func (e *Engine) Emit(ruleID string, st core.Status, port core.Port, seq uint64,
 		rsn = reason[0]
 	}
 	e.rep.Record(core.Finding{RuleID: ruleID, Severity: sev, Status: st, Feed: e.cfg.Feed,
-		Port: port, Seq: seq, ChannelID: ch, InstrumentID: inst, Detail: detail, Reason: rsn, At: e.now()})
+		Port: port, Seq: seq, ChannelID: ch, InstrumentID: inst, NoInstrumentID: noInst,
+		Detail: detail, Reason: rsn, At: e.now()})
 }
 
 // maxChannelInstances bounds the tracker map. The source address is part of the
