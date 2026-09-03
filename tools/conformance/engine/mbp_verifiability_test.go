@@ -480,22 +480,32 @@ func TestMBPPostResetGroupTailStaysAViolation(t *testing.T) {
 
 // An orphan level names no instrument. Reporting 0 read as "instrument 0" and
 // misattributed a real capture's burst to SOL during phoenix#163's diagnosis (#53).
+// An orphan `SnapshotEnd` beside it *does* carry the field, so the flag has to
+// discriminate rather than blanket every orphan as unknown.
 func TestMBPOrphanLevelNamesNoInstrument(t *testing.T) {
 	steps := []mbpStep{
 		mbpFrame(core.PortSnapshot, 0, 0, 0, wire.TypeSnapshotLevel, 32, 1, mbpSnapLevel(7, 1000, 5, mbpClearSideBid)),
+		mbpFrame(core.PortSnapshot, 1, 0, 0, wire.TypeSnapshotEnd, 20, 1, mbpSnapEnd(42, 10, 7)),
 	}
 	_, fs := runMBPSteps(t, steps)
-	found := false
+	var without, with int
 	for _, f := range fs {
 		if f.RuleID != "MBP.SNAP.GROUP_STRUCTURE" {
 			continue
 		}
-		found = true
-		if f.InstrumentID != core.InstrumentUnknown {
-			t.Errorf("orphan level reported instrument %d, want the unknown sentinel", f.InstrumentID)
+		if f.NoInstrumentID {
+			without++
+			if f.InstrumentID != 0 {
+				t.Errorf("a finding carrying no instrument id still reports %d", f.InstrumentID)
+			}
+			continue
+		}
+		with++
+		if f.InstrumentID != 42 {
+			t.Errorf("orphan SnapshotEnd reported instrument %d, want 42 from its own field", f.InstrumentID)
 		}
 	}
-	if !found {
-		t.Fatal("the orphan level produced no GROUP_STRUCTURE finding at all")
+	if without != 1 || with != 1 {
+		t.Fatalf("got %d finding(s) with no id and %d with one, want 1 and 1", without, with)
 	}
 }

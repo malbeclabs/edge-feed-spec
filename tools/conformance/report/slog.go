@@ -134,7 +134,7 @@ func (s *SlogSink) Record(f core.Finding) {
 // for this (rule,status) were dropped since the previous logged line.
 func (s *SlogSink) emit(level slog.Level, f core.Finding, suppressed int) {
 	instrument := slog.Uint64("instrument_id", uint64(f.InstrumentID))
-	if f.InstrumentID == core.InstrumentUnknown {
+	if f.NoInstrumentID {
 		instrument = slog.String("instrument_id", "unknown")
 	}
 	attrs := []slog.Attr{

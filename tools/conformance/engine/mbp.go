@@ -512,7 +512,7 @@ func (e *Engine) checkMBPSnapshot(f *wire.Frame, ch uint8, seq uint64) {
 			open := e.mbp.open[ch]
 			if open == nil {
 				st, rsn := e.mbpOrphanStatus(ch)
-				e.Emit("MBP.SNAP.GROUP_STRUCTURE", st, core.PortSnapshot, seq, ch, core.InstrumentUnknown,
+				e.emitNoInstrument("MBP.SNAP.GROUP_STRUCTURE", st, core.PortSnapshot, seq, ch,
 					"SnapshotLevel with no open SnapshotBegin", rsn)
 				continue
 			}
