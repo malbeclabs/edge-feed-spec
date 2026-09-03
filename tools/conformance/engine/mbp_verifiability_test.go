@@ -327,7 +327,7 @@ func TestMBPLateDuplicateDoesNotRewindTracker(t *testing.T) {
 		t.Errorf("a dense series interrupted by a duplicate produced %d density violation(s)", viol)
 	}
 
-	in := e.mbp.get(mbpInstrKey{ch: 0, instrID: 1})
+	in := e.mbp.get(mbpInstrKey{ch: 0, instrID: 1}, e.curCaptureEpoch)
 	if in.lastSeq != 4 {
 		t.Errorf("tracker is at %d, want 4 (the duplicate must not move it)", in.lastSeq)
 	}

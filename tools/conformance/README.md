@@ -1,13 +1,13 @@
 # dz-conformance
 
-A conformance subscriber for edge-feed publishers. Subscribes to one feed (TOB, Midpoint, MBO, or MBP) — live multicast or pcap replay — validates the feed against its subset of an 88-rule catalog drawn from the [edge-feed-spec](../../) (this repo), and returns a CI-friendly exit code. The subset is 31 to 68 rules depending on the feed — see [Rule catalog](#rule-catalog).
+A conformance subscriber for edge-feed publishers. Subscribes to one feed (TOB, Midpoint, MBO, or MBP) — live multicast or capture replay, `pcap` or `pcapng` — validates the feed against its subset of an 88-rule catalog drawn from the [edge-feed-spec](../../) (this repo), and returns a CI-friendly exit code. The subset is 31 to 68 rules depending on the feed — see [Rule catalog](#rule-catalog).
 
 Unlike a production consumer — which is tolerant of publisher quirks (skipping unknown types, ignoring reserved bits, recovering silently from loss) — this tool is **strict by design**: it flags every structural, sequence, and semantic violation its catalog covers, and never excuses one as a quirk. `core/registry.go` is the in-code source of truth for the full rule set.
 
 ## What it does
 
 ```
-multicast group (or .pcap)
+multicast group (or .pcap / .pcapng)
   ├── mktdata port ──► frame decoder (strict, intolerant)
   ├── refdata port ──► frame decoder
   └── snapshot port ──► frame decoder (MBO and MBP)
@@ -34,7 +34,7 @@ Rules are partitioned into two tiers based on when they can fire:
 
 **Tier 2 — stateful / relational (verifiability-gated).** Require cross-message state: per-instrument sequence density, referential integrity, quantity conservation, the snapshot↔delta book oracle, refdata coverage. Before firing a Tier-2 rule the engine confirms that packet loss (or cold-start, reorder, bound-subset capture, or an in-flight transition) cannot explain the anomaly. If it can, the result is `Unverifiable` rather than a violation.
 
-This split is what makes lossless pcap replay yield near-100% verifiable coverage — the tool is strong in CI without producing false alarms on live feeds with normal multicast loss.
+This split is what makes lossless capture replay yield near-100% verifiable coverage — the tool is strong in CI without producing false alarms on live feeds with normal multicast loss.
 
 ## Sequencing keys on the channel instance
 
@@ -45,7 +45,7 @@ Keying any less finely merges the two series, and the merge is loud in one direc
 Three consequences worth stating:
 
 - **A source address that has not been seen before opens a new series, silently.** It is not a gap, not backward motion, and not a reset: no violation, no `transport_loss_total`, no tainted window. This matters because a publisher's address is not stable — a tunnel address is a lease that can be reassigned under a live host — and a reassignment must not page.
-- **Both inputs carry the source at the same fidelity.** Live capture takes it from the socket and pcap replay from the IP header, so an offline replay keys instances exactly as the live instance does. A capture whose link type carries no network layer yields the zero address, and every datagram in it then reads as one instance.
+- **Both inputs carry the source at the same fidelity.** Live capture takes it from the socket and capture replay from the IP header, so an offline replay keys instances exactly as the live instance does. A capture whose link type carries no network layer yields the zero address, and every datagram in it then reads as one instance.
 - **The tracker map is bounded** at `maxChannelInstances` (`engine/engine.go`), evicting the least-recently-seen instance. The source address is part of the key and nothing authorises it — an any-source join accepts datagrams from any sender — so the key space is not ours to trust. The cap is far above any real deployment; anything still buffered for an evicted instance is counted as transport loss rather than dropped quietly, and if the instance returns it starts a fresh series.
 
 ## Coverage vs. silence
@@ -61,7 +61,7 @@ So every such rule accounts for each opportunity it gets, with exactly one findi
 | `unverifiable` | the check could not run; `reason` names what stopped it |
 | `na` | the check does not apply to this opportunity at all |
 
-`checks_total{rule_id}` is therefore the rule's **denominator** and its `result="pass"` series the coverage actually achieved. `unverifiable_total{rule_id,reason}` breaks the shortfall down by cause, which is what separates a healthy run from a broken feed: 33 `cold_start` skips mean instruments still adopting their first baseline, while 33 `loss` skips mean a feed dropping frames.
+`checks_total{rule_id}` is therefore the rule's **denominator** and its `result="pass"` series the coverage actually achieved. `unverifiable_total{rule_id,reason}` breaks the shortfall down by cause, which is what separates a healthy run from a broken feed: 33 `cold_start` skips mean instruments still adopting their first baseline, 33 `loss` skips mean a feed dropping frames, and 33 `capture_loss` skips mean the recorder dropped them (see [Loss the capture admits to](#loss-the-capture-admits-to)).
 
 Read them together. On the bundled market-by-price capture the reconstruction oracle reports:
 
@@ -95,6 +95,38 @@ evaluate and are reported as na, NOT as passes. The exit code does not cover the
 ```
 
 **The exit code is deliberately unchanged.** A two-port run is legitimate and failing it would break anyone doing one on purpose; what matters is that exit 0 is not read as "those rules passed". `core.SnapshotDrivenRules` is the set, and `TestStarvedRulesAreExactlyTheSnapshotDrivenOnes` proves each member disappears when the port is dropped and reappears when it is restored — so the `na` is never a false claim.
+
+### Loss the capture admits to
+
+Replay reads **pcapng as well as legacy pcap**, chosen from the file's own magic under the one `--pcap` flag. That is not a convenience: pcapng is the format the recorder archives, and the point of keeping the bytes is to answer *did the publisher send what the spec says it must* later — hours later, or against a rule that did not exist when the traffic passed. Reading only legacy pcap put a conversion in front of every such answer, and the conversion is not lossless in the way that matters:
+
+```bash
+# what a replay used to require, and what it cost
+zstd -dqf -o seg.pcapng <object>.pcapng.zst
+tcpdump -r seg.pcapng --time-stamp-precision=nano -w seg.pcap   # drops epb_dropcount
+```
+
+`epb_dropcount` is a pcapng per-packet option carrying the number of datagrams **the recorder admits it failed to write** immediately before that packet. It is the only field in an archive that separates capture loss from publisher loss, and a converted file no longer has it — so a replay could charge the recorder's own drops to the publisher, which is the one error keeping the bytes was meant to prevent. (`gopacket`'s own pcapng reader discards per-packet options, which is why `input/pcapng.go` parses the blocks itself.)
+
+The misattribution does not stay proportional. One lost datagram breaks the per-instrument sequence chain of *every* instrument it carried, so a five-minute segment whose manifest declared **663 missing datagrams** produced **316 `must` violations** — roughly half a violation per lost datagram — where a clean control segment from the same feed produced zero.
+
+With the option visible, a gap the capture already owns is reported rather than graded:
+
+- Every instance on every port has its verifiability window tainted, because a drop at the recorder's interface was never parsed: its channel, its source address and even its destination port are unknowable. This is the same direction `taintPortWide` takes for a datagram too short to name its channel — the cost is a rule that grades `unverifiable` instead of `pass`, never a violation the publisher did not commit.
+- The cause is named `capture_loss` rather than `loss`, because the two want different investigations: `loss` sends an operator to the network, `capture_loss` sends them to the recorder.
+- **A drop accounts for the first gap each series shows after it and for nothing beyond that**, so neither of those outlives the drop. The `capture_loss` label is spent on the next frame classified on its series; the per-instrument excuse is spent on that instrument's next observed step. Without those bounds one admitted drop silences a `must` rule for the rest of the segment and renames every later network gap the recorder's, which is the same misattribution running in the opposite direction. The bound is per series and not the frame series going dense again: an instrument that updates once every few hundred frames shows its broken chain long after the frame series has recovered.
+- `MBP.DELTA.PERINSTR_DENSITY` — the rule the amplification runs through — is otherwise reported even on a channel with a frame gap, deliberately: at that layer a publisher's skip and a lost datagram look identical. An admitted capture drop is the one case that is not a judgement call, so it downgrades.
+- **A snapshot group still open at end of run is judged against the loss admitted after the last datagram**, which no datagram was left to carry. A `SnapshotEnd` the recorder never wrote leaves no snapshot-port gap to see — the group simply never closes — so the group is compared against the run's admission count rather than waiting for a frame that cannot arrive.
+- **Tier-1 structural rules are untouched**, as they are by any other loss. A malformed frame that *was* recorded is evidence about the publisher whatever else went missing: replaying `nonconformant_mbp.pcap` with drops injected leaves its 619 `FRAME.LENGTH_CONSISTENCY` and 6 `MSG.SNAPSHOT_FLAG_MATCHES_PORT` violations exactly where they were, and leaves its 38 clean snapshot groups counted as passes.
+
+The total is on stderr at the end of the run and in the JSON report's `capture_drops`, which is the only place a one-shot CI replay can carry it. **The exit code is deliberately unchanged**, for the same reason as above: a lossy segment is still worth replaying and the violations it confirms are real — but exit 0 over a capture that admits loss is not the same claim as exit 0 over one that does not.
+
+**A datagram the capture's snap length cut short is capture-owned too.** Both formats declare each packet's captured *and* original length, so a capture recorded with `-s` shorter than the feed's frames says so in the file. Those bytes are not the publisher's datagram: handing what survived to the decoder reads as a frame declaring a length past its own datagram, and as a payload that diverges from the same sequence number recorded whole — MUST violations for bytes that were never missing on the wire. The packet is counted as capture-owned loss and never decoded, and the count is named separately on stderr, because the remedy is to re-record rather than to look at the recorder's drops.
+
+A legacy pcap reports no *admitted* drop and means nothing by it: the format has nowhere to record `epb_dropcount`. That is an absence of accounting, not an assertion that nothing was lost. Two boundaries are worth stating plainly:
+
+- **`transport_loss_total` still counts a capture-owned gap.** The taint is on the window, not on the individual gap: at the point the frame-seq hole is seen, nothing can say whether *that* datagram was lost by the network or by the recorder. Findings are the surface that distinguishes them (`capture_loss` versus `loss`); the transport counter does not.
+- **A live socket admits nothing.** The kernel's own overflow accounting is not wired into the multicast source, so a live instance's `capture_drops` is always `0`. Loss there is visible only as the frame-seq gaps it causes — which is the pre-existing behaviour, and another reason to judge an archived segment from the archive.
 
 ## MBO snapshot oracle (headline capability)
 
@@ -198,7 +230,7 @@ Runs until SIGINT or SIGTERM.
 ```bash
 ./dz-conformance \
   --feed mbo \
-  --pcap capture.pcap \
+  --pcap segment.pcapng \
   --mktdata-port 7003 \
   --refdata-port 7004 \
   --snapshot-port 7005 \
@@ -206,7 +238,7 @@ Runs until SIGINT or SIGTERM.
 echo "exit: $?"
 ```
 
-With `--pcap`, the tool replays the capture in order and exits when the file is exhausted. On a lossless capture this gives near-100% rule coverage.
+With `--pcap`, the tool replays the capture in order and exits when the file is exhausted. On a lossless capture this gives near-100% rule coverage. Legacy `pcap` and `pcapng` are both accepted and told apart by the file's magic — prefer handing it the archived `pcapng` directly, because a conversion to legacy pcap strips the capture's own loss accounting (see [Loss the capture admits to](#loss-the-capture-admits-to)).
 
 ## CLI flags
 
@@ -218,7 +250,7 @@ With `--pcap`, the tool replays the capture in order and exits when the file is 
 | `--refdata-port` | `0` (off) | UDP port for reference-data frames |
 | `--snapshot-port` | `0` (off) | UDP port for snapshot frames (MBO and MBP) |
 | `--interface` | system default | Network interface for multicast join (e.g. `doublezero1`) |
-| `--pcap` | | Replay a `.pcap` file instead of live capture |
+| `--pcap` | | Replay a capture file instead of live capture — `.pcap` or `.pcapng`, detected from the file |
 | `--metrics-addr` | (off) | Serve Prometheus metrics on this address (e.g. `127.0.0.1:9100`). Bind to a non-public interface. |
 | `--source-registry` | embedded | Path to a source-registry JSON override (default: embedded pinned registry) |
 | `--strict` | `false` | Treat `should`-violations as exit-code failures (in addition to `must`) |
@@ -276,12 +308,14 @@ time=... level=ERROR msg=finding
 
 ### JSON report
 
-Pass `--json-report path` to write a machine-readable summary at the end of the run. The report is a JSON object with top-level `version`, `commit`, `strict` and `read_error`, plus a `rules` array; each entry has a `rule_id`, its `severity` and a `counts` map of status name → count (e.g. `{"rule_id": "FRAME.MAGIC_MISMATCH", "severity": "must", "counts": {"violation": 1}}`). A rule with `unverifiable` findings also carries `unverifiable_by_reason`, breaking that count down by cause — this is the only place a `--pcap` CI run reports it, since a one-shot replay has no Prometheus to scrape. See [Coverage vs. silence](#coverage-vs-silence) for how to read the two together.
+Pass `--json-report path` to write a machine-readable summary at the end of the run. The report is a JSON object with top-level `version`, `commit`, `strict`, `read_error` and `capture_drops`, plus a `rules` array; each entry has a `rule_id`, its `severity` and a `counts` map of status name → count (e.g. `{"rule_id": "FRAME.MAGIC_MISMATCH", "severity": "must", "counts": {"violation": 1}}`). A rule with `unverifiable` findings also carries `unverifiable_by_reason`, breaking that count down by cause — this is the only place a `--pcap` CI run reports it, since a one-shot replay has no Prometheus to scrape. See [Coverage vs. silence](#coverage-vs-silence) for how to read the two together.
 
 `version` and `commit` are the build labels (the same ones `build_info` carries), so a stored report can be attributed to the binary that produced it. `severity`, `strict` and `read_error` together are what make the [exit code](#exit-codes) recomputable from the report alone:
 
 - `read_error` non-empty → **2**. The run ended early on an input error (a truncated pcap, a dead socket), so the counts cover only the frames read before it. It is always present and empty on a run that consumed its input to the end, so a reader can tell a completed run from a binary that never recorded whether it completed.
 - otherwise **0** or **1** from the counts: only `must` and `should` violations move the code, and a `should` violation resolves to `0` or `1` depending on `--strict`, which the counts do not record.
+
+`capture_drops` does **not** move the exit code — it says how much of a clean result to believe. It is the datagram count the input failed to record: pcapng `epb_dropcount` summed, plus any packet whose captured length fell short of its length on the wire. `0` on a live socket means only that the input has nowhere to say it, and on a legacy pcap that it has nowhere to admit a drop. See [Loss the capture admits to](#loss-the-capture-admits-to).
 
 The remaining exit-2 paths — bad flags, an unbound `--metrics-addr`, no ports configured, an unreadable `--source-registry`, or a failure writing the report itself — abort before or during the write, so they leave no parseable report to misread.
 
@@ -296,7 +330,7 @@ All metrics are prefixed `dz_conformance_`.
 | Name | Type | Labels | Meaning |
 |------|------|--------|---------|
 | `violations_total` | counter | `feed`, `rule_id`, `severity` | Confirmed conformance violations |
-| `unverifiable_total` | counter | `feed`, `rule_id`, `reason` | Checks that could not be verified, by cause. `reason` is a closed enum (`core.Reason*`): `loss`, `cold_start`, `reorder`, `pending`, `overflow`, `truncated`, `insufficient_window`, `superseded`, `untrusted`, `bound_subset`, `transition`, `unspecified` |
+| `unverifiable_total` | counter | `feed`, `rule_id`, `reason` | Checks that could not be verified, by cause. `reason` is a closed enum (`core.Reason*`): `loss`, `capture_loss`, `cold_start`, `reorder`, `pending`, `overflow`, `truncated`, `insufficient_window`, `superseded`, `untrusted`, `bound_subset`, `transition`, `unspecified` |
 | `checks_total` | counter | `feed`, `rule_id`, `result` | All checks by result — the **denominator** for every rule, see [Coverage vs. silence](#coverage-vs-silence) |
 | `transport_loss_total` | counter | `port` | Transport packet-loss events by port (`mktdata`, `refdata`, `snapshot`) |
 | `transport_corruption_total` | counter | `port`, `reason` | Transport corruption events |
@@ -328,7 +362,7 @@ go build -ldflags "-X main.version=v0.1.0 -X main.commit=$(git rev-parse --short
 go test ./...
 ```
 
-Most tests use synthetic wire-format bytes (no network). `golden_test.go` builds conformant pcaps programmatically, runs them through `Run()`, and asserts exit code 0 with zero must-violations. A separate fixture drift guard (`TestGoldenPcapFixtures`) compares the generated pcap bytes against committed `testdata/*.pcap` files byte-for-byte; set `TESTDATA_UPDATE=1` to regenerate fixtures after an intentional protocol change. `input/multicast_test.go` contains a live UDP loopback test that skips automatically in short mode or environments where multicast on loopback is unavailable.
+Most tests use synthetic wire-format bytes (no network). `input/pcapng_test.go` assembles pcapng files block by block rather than with a writer library, because the field under test — `epb_dropcount` — is a per-packet option no Go pcapng writer emits, so a library-produced fixture could not carry it. `golden_test.go` builds conformant pcaps programmatically, runs them through `Run()`, and asserts exit code 0 with zero must-violations. A separate fixture drift guard (`TestGoldenPcapFixtures`) compares the generated pcap bytes against committed `testdata/*.pcap` files byte-for-byte; set `TESTDATA_UPDATE=1` to regenerate fixtures after an intentional protocol change. `input/multicast_test.go` contains a live UDP loopback test that skips automatically in short mode or environments where multicast on loopback is unavailable.
 
 ## CI usage
 
@@ -350,7 +384,7 @@ Run against a reference capture in your publisher's release pipeline:
 
 The tool has two operating modes:
 
-- **`--pcap` replay = one-shot / CI.** Reads the file to EOF, writes the report, and exits with the [exit code](#exit-codes) above. This is the batch gate shown under [CI usage](#ci-usage).
+- **`--pcap` replay = one-shot / CI.** Reads the file (`pcap` or `pcapng`) to EOF, writes the report, and exits with the [exit code](#exit-codes) above. This is the batch gate shown under [CI usage](#ci-usage).
 - **Live multicast = long-running daemon.** The read loop runs until `SIGINT`/`SIGTERM` (or a fatal read error), serving Prometheus metrics the whole time. This is the primary production deployment — a persistent per-feed monitor, e.g. on the host that already records the feed.
 
 For a 24/7 deployment:

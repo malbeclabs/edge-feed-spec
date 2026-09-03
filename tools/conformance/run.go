@@ -124,6 +124,47 @@ func reportStarvedRules(rep report.Reporter, opts RunOpts) {
 	}
 }
 
+// reportCaptureLoss returns what the input admitted it failed to record, and says
+// so on stderr when it is non-zero.
+//
+// **Why it is loud.** The engine already refuses to charge admitted capture loss
+// to the publisher — the affected windows grade `unverifiable`/`capture_loss`
+// instead of `violation` — so the danger is not a false failure but a quiet one:
+// the run exits 0 with a thin report and reads as a pass. That is the same trap
+// reportStarvedRules names, arriving by a different route, and it wants the same
+// answer. The exit code is deliberately unchanged: a lossy segment is still worth
+// replaying, and the violations it does confirm are real.
+//
+// Only pcapng carries the recorder's *admission*. A legacy pcap converted from
+// one has had the per-packet option stripped by the conversion, so it reports no
+// admitted drop and means nothing by it — which is the reason to replay the
+// archive directly. A packet the snap length cut short is counted in either
+// format, and named separately here: an operator fixes it by re-recording with a
+// snap length that holds the feed, which is not what they would do about a
+// dropped datagram.
+func reportCaptureLoss(src input.Source) uint64 {
+	cl, ok := src.(input.CaptureLossReporter)
+	if !ok {
+		return 0
+	}
+	n := cl.CaptureDrops()
+	if n == 0 {
+		return 0
+	}
+	fmt.Fprintf(os.Stderr,
+		"dz-conformance: WARNING the capture failed to record %d datagram(s), so checks over "+
+			"the windows they fall in are reported as capture_loss, NOT as passes. Violations "+
+			"remain trustworthy; an empty report does not mean the feed was clean.\n", n)
+	if t := cl.SnaplenTruncated(); t > 0 {
+		fmt.Fprintf(os.Stderr,
+			"dz-conformance: WARNING %d of those are datagrams the capture's snap length cut "+
+				"short, not datagrams it admits it never wrote. A partly-recorded datagram is "+
+				"not the publisher's bytes and is not decoded; re-record with a snap length "+
+				"that holds the feed's frames.\n", t)
+	}
+	return n
+}
+
 // Run wires the full pipeline and returns an OS exit code (0 = pass, 1 = violation,
 // 2 = the run errored; see the read-error note on report.Meta).
 func Run(opts RunOpts) int {
@@ -217,20 +258,39 @@ func Run(opts RunOpts) int {
 		if !ok {
 			break
 		}
+		// Before the frame, not after: the drops precede this datagram, so the
+		// windows they taint are the ones this frame is about to be judged against.
+		eng.ObserveCaptureLoss(dg.CaptureDrops)
 		frame, sf := wire.Decode(dg.Raw, magic)
 		eng.Process(dg.Src, frame, dg.Port, sf)
 	}
 	close(done)
 	signal.Stop(sigs)
 
+	// Loss the capture admitted after the last mapped datagram, which no
+	// datagram was left to carry. Handed over before the end-of-run findings are
+	// produced, because they are graded against the windows that loss falls in:
+	// flushOpenSnaps grades an unfinished snapshot group a Violation unless its
+	// window is tainted, and at EOF no later frame can arrive to taint it. Without
+	// this a report shows non-zero capture_drops beside end-of-run findings graded
+	// as though the capture were clean.
+	if cl, ok := src.(input.CaptureLossReporter); ok {
+		eng.ObserveCaptureLoss(cl.PendingDrops())
+	}
+
 	// --- end-of-run (always, even after a read error) ---
 	eng.Flush()
 	eng.EndRun()
 
+	// After the end-of-run findings, so the warning is the last thing an operator
+	// reads rather than the first thing the finding stream buries.
+	captureDrops := reportCaptureLoss(src)
+
 	// --- JSON report ---
 	var reportErr error
 	if opts.JSONReport != "" {
-		meta := report.Meta{Version: opts.Version, Commit: opts.Commit, Strict: opts.Cfg.Strict, ReadErr: readErr}
+		meta := report.Meta{Version: opts.Version, Commit: opts.Commit, Strict: opts.Cfg.Strict,
+			ReadErr: readErr, CaptureDrops: captureDrops}
 		if err := report.JSONReport(agg, opts.JSONReport, meta); err != nil {
 			fmt.Fprintf(os.Stderr, "dz-conformance: json report: %v\n", err)
 			reportErr = err

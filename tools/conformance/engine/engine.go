@@ -47,6 +47,18 @@ type Engine struct {
 	// The refdata state machine reads it to tell the shutdown ManifestSummary the
 	// spec mandates from a mid-service Valid drop; see resolveValidZero.
 	sessionEnd map[uint8]struct{}
+	// captureLossEpoch counts the admissions ObserveCaptureLoss has taken. A
+	// series that carries a stale value has had a drop admitted since its last
+	// message and so has one gap the drop can account for; one that carries the
+	// current value has already been given it. It is a counter rather than a flag
+	// because the excuse is per series and the series are not enumerable when the
+	// admission arrives — see ObserveCaptureLoss.
+	captureLossEpoch uint64
+	// curCaptureEpoch is the frame-being-classified's stamped epoch, the same
+	// per-frame context curUnknownSchema is. The per-instrument rules read it
+	// rather than captureLossEpoch: they run inside classify, where the engine's
+	// own counter may already have moved on for frames still in the buffer.
+	curCaptureEpoch uint64
 }
 
 // New constructs an Engine with the given config and reporter.
@@ -129,6 +141,17 @@ func (e *Engine) Emit(ruleID string, st core.Status, port core.Port, seq uint64,
 	var rsn string
 	if len(reason) > 0 {
 		rsn = reason[0]
+	}
+	// Name the owner of the loss. Every gated rule reports ReasonLoss for "a
+	// datagram that could have carried what I needed is missing", and on a replay
+	// that datagram may be one the recorder admits it never wrote (see
+	// ObserveCaptureLoss). The distinction is not cosmetic: `loss` sends an
+	// operator to the network and `capture_loss` sends them to the recorder, and
+	// the rules cannot each make the call — the taint is on the window, not on the
+	// individual gap. Substituting here, at the one point every finding passes
+	// through, keeps that knowledge in one place.
+	if st == core.Unverifiable && rsn == core.ReasonLoss && e.captureDirtyOn(port, ch) {
+		rsn = core.ReasonCaptureLoss
 	}
 	e.rep.Record(core.Finding{RuleID: ruleID, Severity: sev, Status: st, Feed: e.cfg.Feed,
 		Port: port, Seq: seq, ChannelID: ch, InstrumentID: inst, Detail: detail, Reason: rsn, At: e.now()})
@@ -270,6 +293,77 @@ func (e *Engine) taintPortWide(port core.Port) {
 	}
 }
 
+// ObserveCaptureLoss records datagrams the *capture* admits it failed to record
+// before the datagram about to be processed — pcapng's epb_dropcount, which is
+// the only place an archive says what it is missing.
+//
+// **Why it taints everything.** The recorder drops at its interface: what it
+// lost was never parsed, so its channel, its source address and even its
+// destination port are unknowable. Marking only the instance whose datagram
+// carried the admission would leave every other series reading a
+// capture-inflicted gap as the publisher's, which is precisely the error the
+// archive format was chosen to prevent — one lost datagram breaks the
+// per-instrument sequence chain of every instrument it carried, so the
+// misattribution amplifies rather than staying proportional. The direction is
+// the safe one taintPortWide already takes: the cost of tainting a series the
+// drop did not touch is a rule that grades Unverifiable instead of pass, never a
+// Violation the publisher did not commit.
+//
+// An instance first seen *after* the drop is deliberately not tainted. It seeds
+// its own sequence baseline from its first datagram, so loss that precedes it
+// declares no gap and is already reported as a mid-stream join (cold_start).
+//
+// **What it does not do is last.** A drop can account for the first gap each
+// series shows after it and for nothing beyond that, so the two things it sets
+// have bounded lifetimes rather than running to the end of the era:
+// captureDirty, which names the owner of a gap, is spent on the next frame
+// classified on its series (classify), and captureLossEpoch, which is what the
+// per-instrument density rule consults, is spent per instrument on that
+// instrument's next observed step (checkMBPSeq). Without those bounds one
+// admitted drop silences a MUST rule for the rest of the segment and relabels
+// every later network gap as the recorder's, which sends an operator to the
+// wrong machine.
+func (e *Engine) ObserveCaptureLoss(n uint64) {
+	if n == 0 {
+		return
+	}
+	e.captureLossEpoch++
+	for _, pt := range e.ports {
+		pt.dirtyWindow = true
+		pt.captureDirty = true
+	}
+	// A snapshot group in flight is not touched here, and cannot be: the reorder
+	// buffer means the group may not have been opened yet when its own loss is
+	// admitted. It reads the counter above against the epoch it opened at
+	// instead — see captureLossSince.
+}
+
+// captureLossSince reports whether the capture has admitted a drop since a
+// window opened at the given epoch.
+//
+// The counterpart of the per-frame comparison in classify, for a window that is
+// not a frame: an unclosed snapshot group at end of run has no next frame to be
+// judged against, and the drop that cost it its SnapshotEnd may have been
+// admitted after the last datagram the run yielded. Comparing epochs at the
+// point of judgement rather than tainting the group when the drop arrives is
+// what makes it work through the reorder buffer, which can open the group after
+// the admission that concerns it.
+func (e *Engine) captureLossSince(epoch uint64) bool {
+	return e.captureLossEpoch != epoch
+}
+
+// captureDirtyOn reports whether any instance of this (port, channel) has a
+// window that admitted capture loss. It ORs across the channel's instances for
+// the same reason dirtyOn does, and is read only to label a finding's cause.
+func (e *Engine) captureDirtyOn(port core.Port, ch uint8) bool {
+	for k, pt := range e.ports {
+		if k.port == port && k.ch == ch && pt.captureDirty {
+			return true
+		}
+	}
+	return false
+}
+
 // mktdataPending reports whether any mktdata reorder buffer on this channel still
 // holds unclassified frames. Cross-port snapshot checks that compare a snapshot against
 // mktdata-derived state (SNAP.ANCHOR_IS_MKTDATA_SEQ, SNAP.LAST_INSTRUMENT_SEQ_
@@ -300,7 +394,7 @@ func (e *Engine) snapPortDirty(ch uint8) bool {
 // buffer in seq order.
 func (e *Engine) Process(src netip.Addr, f *wire.Frame, port core.Port, sf []wire.StructFinding) {
 	pt := e.instanceTrack(src, port, f.Header.ChannelID)
-	tuple := intakeTuple{frame: f, port: port, structFindings: sf}
+	tuple := intakeTuple{frame: f, port: port, structFindings: sf, captureEpoch: e.captureLossEpoch}
 
 	res := pt.enqueue(tuple, e.cfg.ReorderWindow)
 	if res.quarantine {
@@ -404,6 +498,20 @@ func (e *Engine) classify(item *bufferItem, pt *portTracker) {
 	// and new-era items are classified after. So seq tracking is always active.
 	e.beginFrame(f.Header.SchemaVersion)
 
+	// Whether an admitted capture drop can own what this frame shows: one
+	// arrived between the previous frame on this series and this one. Recomputed
+	// per frame rather than left standing from ObserveCaptureLoss, because a drop
+	// explains the first gap after it and nothing later — a taint that ran to the
+	// end of the era renamed every subsequent network gap `capture_loss` and sent
+	// an operator to the recorder for loss the wire caused.
+	//
+	// Read off the frame's own stamped epoch, not the engine's current one: the
+	// reorder buffer means frames are classified after later ones have arrived,
+	// and an admission that landed while this frame was buffered belongs to the
+	// frame behind it, not to this one.
+	pt.captureDirty = item.tuple.captureEpoch > pt.captureEpochSeen
+	e.curCaptureEpoch = item.tuple.captureEpoch
+
 	// Channel-wide reset bookkeeping for MBP, driven by every accepted frame on any
 	// port rather than by the per-series era advance in Process.
 	e.mbpObserveEra(port, f.Header.ChannelID, item.era)
@@ -501,6 +609,20 @@ func (e *Engine) classify(item *bufferItem, pt *portTracker) {
 	}
 	if port == core.PortSnapshot && e.cfg.Feed == core.FeedMBP {
 		e.checkMBPSnapshot(f, f.Header.ChannelID, f.Header.Sequence)
+	}
+
+	// The admissions up to this frame's arrival are now spent on this series: the
+	// next frame's own stamp is what decides whether a drop can own what *it*
+	// shows. Only a frame that advanced the series counts — a backward or
+	// duplicate frame shows nothing about what follows a gap. Last in the
+	// function, after everything that reads the flag above.
+	//
+	// dirtyWindow is deliberately not spent with it: that flag answers "could a
+	// gap explain this?", which stays true for the rest of the era once a gap has
+	// been seen (see taintOn), while this one answers the narrower "was the
+	// recorder's admitted drop what that gap was?".
+	if pt.lastSeq != nil && *pt.lastSeq == f.Header.Sequence {
+		pt.captureEpochSeen = item.tuple.captureEpoch
 	}
 }
 

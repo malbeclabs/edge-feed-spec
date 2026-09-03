@@ -74,6 +74,12 @@ type mbpInstr struct {
 	// sawSnapshotSinceDelta tracks whether a snapshot completed since the last
 	// delta, so a delta restarting at 1 across that boundary is attributable.
 	sawSnapshotSinceDelta bool
+	// captureEpoch is the arrival-time capture-loss epoch of the last delta that
+	// established or advanced this instrument's numbering. Behind the epoch
+	// stamped on the delta in hand, it means the capture admitted a drop between
+	// the two, so this instrument's gap is one the drop can account for; equal,
+	// the drop has already been spent on it. See mbpDensityStatus.
+	captureEpoch uint64
 	// base is the last adopted snapshot's ladder, as of baseK; journal holds every
 	// delta applied since, in arrival order. Together they reconstruct the
 	// consumer's state at any seq in the window.
@@ -165,11 +171,17 @@ func newMBPState() *mbpState {
 	}
 }
 
-func (s *mbpState) get(k mbpInstrKey) *mbpInstr {
+// get returns one instrument's tracker, creating it at the caller's current
+// capture-loss epoch: a series that starts after a drop cannot show a gap the
+// drop explains, which is the same reason ObserveCaptureLoss does not taint an
+// instance first seen after it. Seeding a new tracker at zero instead would hand
+// the excuse to every instrument that appears after any drop — including the
+// whole set rebuilt behind a Reset Count.
+func (s *mbpState) get(k mbpInstrKey, captureEpoch uint64) *mbpInstr {
 	if in, ok := s.instr[k]; ok {
 		return in
 	}
-	in := &mbpInstr{book: newMBPBook()}
+	in := &mbpInstr{book: newMBPBook(), captureEpoch: captureEpoch}
 	s.instr[k] = in
 	return in
 }
@@ -253,7 +265,7 @@ func (e *Engine) checkMBP(f *wire.Frame, ch uint8) {
 				continue // MSG.LENGTH_PER_TYPE already fired
 			}
 			k := mbpInstrKey{ch: ch, instrID: levelUpdateInstrumentID(m)}
-			in := e.mbp.get(k)
+			in := e.mbp.get(k, e.curCaptureEpoch)
 			qty := levelUpdateQuantity(m)
 			action := levelUpdateAction(m)
 
@@ -284,7 +296,7 @@ func (e *Engine) checkMBP(f *wire.Frame, ch uint8) {
 				continue
 			}
 			k := mbpInstrKey{ch: ch, instrID: bookClearInstrumentID(m)}
-			in := e.mbp.get(k)
+			in := e.mbp.get(k, e.curCaptureEpoch)
 			side, scope := bookClearClearSide(m), bookClearScope(m)
 
 			// One price cannot bound both sides, so `Scope = 1` with
@@ -318,7 +330,7 @@ func (e *Engine) checkMBP(f *wire.Frame, ch uint8) {
 				continue
 			}
 			k := mbpInstrKey{ch: ch, instrID: instrResetInstrumentID(m)}
-			in := e.mbp.get(k)
+			in := e.mbp.get(k, e.curCaptureEpoch)
 			// The reset discards level state and requires a recovery snapshot
 			// before deltas resume, so the reconstruction restarts from there.
 			in.book = newMBPBook()
@@ -350,6 +362,7 @@ func (e *Engine) checkMBPSeq(in *mbpInstr, k mbpInstrKey, got uint32, seq uint64
 
 	if !in.lastSeqSet {
 		in.lastSeq, in.lastSeqSet = got, true
+		in.captureEpoch = e.curCaptureEpoch
 		return true
 	}
 
@@ -376,8 +389,11 @@ func (e *Engine) checkMBPSeq(in *mbpInstr, k mbpInstrKey, got uint32, seq uint64
 
 	switch {
 	case got == in.lastSeq+1:
-		// Dense, as required.
+		// Dense, as required — and a dense step is proof this instrument's chain
+		// survived whatever the capture admitted losing, so the excuse below is
+		// spent rather than held for a gap this drop cannot have caused.
 		in.lastSeq = got
+		in.captureEpoch = e.curCaptureEpoch
 		return true
 	case got > in.lastSeq+1:
 		// A forward gap. Publishers MUST emit densely, but loss is
@@ -386,8 +402,10 @@ func (e *Engine) checkMBPSeq(in *mbpInstr, k mbpInstrKey, got uint32, seq uint64
 		// snapshot rather than blamed for a later mismatch. The tracker advances to
 		// the number actually on the wire: the following delta is dense against
 		// *this* one, not against the number the gap skipped.
-		e.Emit("MBP.DELTA.PERINSTR_DENSITY", core.Violation, core.PortMktData, seq, ch, k.instrID,
-			fmt.Sprintf("Per-Instrument Seq jumped %d -> %d (expected %d)", in.lastSeq, got, in.lastSeq+1))
+		st, reason := e.mbpDensityStatus(in)
+		e.Emit("MBP.DELTA.PERINSTR_DENSITY", st, core.PortMktData, seq, ch, k.instrID,
+			fmt.Sprintf("Per-Instrument Seq jumped %d -> %d (expected %d)", in.lastSeq, got, in.lastSeq+1),
+			reason)
 		in.gapped = true
 		in.lastSeq = got
 		return true
@@ -425,6 +443,41 @@ func (e *Engine) mbpGroupStatus(ch uint8, open *mbpOpenSnap) core.Status {
 		return core.Unverifiable
 	}
 	return core.Violation
+}
+
+// mbpDensityStatus grades a per-instrument sequence gap.
+//
+// The gap above is graded a Violation even on a channel whose *frame* series has
+// a hole, and that is deliberate: at this layer a publisher's skip and a lost
+// datagram look identical, and the rule reports the gap rather than staying
+// silent and letting a later reconstruction mismatch carry the blame for it.
+//
+// Admitted capture loss is the one case that is not a judgement call. The
+// recorder says, in the file, that it failed to write datagrams in this window —
+// so the missing numbers belong to the archive and not to the publisher, and
+// grading them is how a replay comes to charge its own recorder's drops to the
+// feed. One lost datagram breaks the per-instrument chain of every instrument it
+// carried, so the misattribution amplifies: a segment admitting 663 drops earned
+// 238 findings on this rule alone.
+//
+// **The excuse is per instrument and it is spent once.** A drop can account for
+// the first gap each chain shows after it, and for nothing after that: the chain
+// is proven intact again the moment the instrument takes one dense step. Gating
+// on the port-wide window instead read every later gap in the segment as the
+// recorder's too, which silences a MUST rule for the rest of the era on one
+// admission — and the frame series going dense again is not the bound either,
+// because an instrument that trades once a minute shows the break hundreds of
+// frames after the drop that caused it.
+//
+// Consuming the epoch here rather than in the caller keeps the two halves of
+// the decision — who owns this gap, and that nobody may own the next one —
+// where they can only be read together.
+func (e *Engine) mbpDensityStatus(in *mbpInstr) (core.Status, string) {
+	if in.captureEpoch != e.curCaptureEpoch {
+		in.captureEpoch = e.curCaptureEpoch
+		return core.Unverifiable, core.ReasonCaptureLoss
+	}
+	return core.Violation, ""
 }
 
 // mbpReason renders the bounded metric reason that pairs with the status above.
@@ -590,7 +643,7 @@ func (e *Engine) finishMBPSnapshot(m wire.Message, ch uint8, seq uint64) {
 	e.passed("MBP.SNAP.GROUP_STRUCTURE", core.PortSnapshot, seq, ch, open.key.instrID,
 		fmt.Sprintf("group (Snapshot ID %d) well-formed: %d level(s) between Begin and End", open.snapID, open.count))
 
-	in := e.mbp.get(open.key)
+	in := e.mbp.get(open.key, e.curCaptureEpoch)
 	db := open.depth
 	in.book.depthBound = &db
 
