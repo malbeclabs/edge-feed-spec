@@ -566,7 +566,7 @@ func (rs *refdataState) onManifestSummary(ch uint8, valid uint8, seq uint16, cou
 	// window, or the next period inherits the previous one's readiness and is
 	// credited with the wall-clock time the channel spent invalid.
 	if !s.valid && s.firstSendTSSet {
-		rs.e.decideNeverReachesReady(ch, s, true)
+		rs.e.decideNeverReachesReady(ch, s, frameSeq, true)
 		s.everReady = false
 		s.readySendTS = 0
 		s.readySendTSSet = false
@@ -831,6 +831,6 @@ func (e *Engine) processRefdataFrame(f *wire.Frame, pt *portTracker) {
 	// a runt decoding to the all-zero header, or a Heartbeat — and EndRun would then
 	// report a cold-start Unverified for it.
 	if s, ok := e.refdata.channels[ch]; ok {
-		e.decideNeverReachesReady(ch, s, false)
+		e.decideNeverReachesReady(ch, s, f.Header.Sequence, false)
 	}
 }

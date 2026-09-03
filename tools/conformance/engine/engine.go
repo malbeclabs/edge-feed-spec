@@ -622,7 +622,8 @@ func (e *Engine) EndRun() {
 	e.refdata.resolveShutdownVerdicts()
 
 	for ch, s := range e.refdata.channels {
-		e.decideNeverReachesReady(ch, s, true)
+		// Seq 0: end of stream is not a datagram, so there is nothing to point at.
+		e.decideNeverReachesReady(ch, s, 0, true)
 	}
 }
 
@@ -659,8 +660,18 @@ func (e *Engine) EndRun() {
 // the readiness timestamp, not the span: the span ends at the last Valid=1 summary, so
 // where none lands between the window closing and a late readiness there is no span
 // past the window to catch it.
-func (e *Engine) decideNeverReachesReady(ch uint8, s *channelRefdataState, final bool) {
+func (e *Engine) decideNeverReachesReady(ch uint8, s *channelRefdataState, frameSeq uint64, final bool) {
 	if s.neverReadyDecided {
+		return
+	}
+	// An unknown (higher) schema version downgrades every non-envelope rule for the
+	// datagram being classified, and neverReadyDecided would latch that downgrade for
+	// the whole serving period: one datagram from a mid-upgrade publisher, landing at
+	// the moment the window closes, would record the Violation as NA/Info and no later
+	// datagram could restate it. Defer instead, so a clean one decides the period.
+	// Not when final: EndRun and a closed period are the last word, and deferring
+	// there would trade the downgrade for the silence this whole change exists to fix.
+	if e.curUnknownSchema && !final {
 		return
 	}
 	if e.cfg.ExpectManifestCadence == 0 || e.cfg.ExpectDefinitionCycle == 0 {
@@ -680,12 +691,12 @@ func (e *Engine) decideNeverReachesReady(ch uint8, s *channelRefdataState, final
 					st = core.Unverifiable
 					reason = core.ReasonLoss
 				}
-				e.Emit("REFDATA.NEVER_REACHES_READY", st, core.PortRefData, 0, ch, 0,
+				e.Emit("REFDATA.NEVER_REACHES_READY", st, core.PortRefData, frameSeq, ch, 0,
 					fmt.Sprintf("channel %d reached ready after %v, past the %v window", ch, elapsed, window), reason)
 				return
 			}
 		}
-		e.passed("REFDATA.NEVER_REACHES_READY", core.PortRefData, 0, ch, 0,
+		e.passed("REFDATA.NEVER_REACHES_READY", core.PortRefData, frameSeq, ch, 0,
 			fmt.Sprintf("channel %d reached ready state", ch))
 		return
 	}
@@ -694,7 +705,7 @@ func (e *Engine) decideNeverReachesReady(ch uint8, s *channelRefdataState, final
 			return
 		}
 		s.neverReadyDecided = true
-		e.unverified("REFDATA.NEVER_REACHES_READY", core.ReasonColdStart, core.PortRefData, 0, ch, 0,
+		e.unverified("REFDATA.NEVER_REACHES_READY", core.ReasonColdStart, core.PortRefData, frameSeq, ch, 0,
 			fmt.Sprintf("channel %d: no ManifestSummary observed, so the observation span is unknown", ch))
 		return
 	}
@@ -705,7 +716,7 @@ func (e *Engine) decideNeverReachesReady(ch uint8, s *channelRefdataState, final
 			return
 		}
 		s.neverReadyDecided = true
-		e.unverified("REFDATA.NEVER_REACHES_READY", core.ReasonSuperseded, core.PortRefData, 0, ch, 0,
+		e.unverified("REFDATA.NEVER_REACHES_READY", core.ReasonSuperseded, core.PortRefData, frameSeq, ch, 0,
 			fmt.Sprintf("channel %d: wire timestamps regressed, so the span is not measurable (FRAME.SEND_TS_MONOTONIC reports it)", ch))
 		return
 	}
@@ -715,7 +726,7 @@ func (e *Engine) decideNeverReachesReady(ch uint8, s *channelRefdataState, final
 			return
 		}
 		s.neverReadyDecided = true
-		e.unverified("REFDATA.NEVER_REACHES_READY", core.ReasonInsufficientWindow, core.PortRefData, 0, ch, 0,
+		e.unverified("REFDATA.NEVER_REACHES_READY", core.ReasonInsufficientWindow, core.PortRefData, frameSeq, ch, 0,
 			fmt.Sprintf("channel %d: observed %v, less than the %v a publisher needs to reach ready", ch, span, window))
 		return
 	}
@@ -728,7 +739,7 @@ func (e *Engine) decideNeverReachesReady(ch uint8, s *channelRefdataState, final
 		reason = core.ReasonLoss
 	}
 	s.neverReadyDecided = true
-	e.Emit("REFDATA.NEVER_REACHES_READY", st, core.PortRefData, 0, ch, 0,
+	e.Emit("REFDATA.NEVER_REACHES_READY", st, core.PortRefData, frameSeq, ch, 0,
 		fmt.Sprintf("channel %d: observed %v (≥ window %v) but never reached ready state",
 			ch, span, window), reason)
 }
