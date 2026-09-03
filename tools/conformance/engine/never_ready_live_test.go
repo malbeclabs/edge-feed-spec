@@ -257,3 +257,35 @@ func TestNeverReachesReadyDoesNotLatchASchemaDowngrade(t *testing.T) {
 		t.Error("REFDATA.NEVER_REACHES_READY: the period is stuck on the downgrade one datagram forced; a later clean datagram must still decide it")
 	}
 }
+
+// TestNeverReachesReadyHalfConfiguredIsNotSilent: the second silence path, the same
+// shape as #50 reached through the config. Config.Configured used to call the rule
+// configured on ExpectDefinitionCycle alone, so a run with --expect-definition-cycle
+// and no --expect-manifest-cadence kept a Must rule in scope while the guard returned
+// without a word for every channel. The two agree now, and the run says what it could
+// not measure instead of saying nothing.
+func TestNeverReachesReadyHalfConfiguredIsNotSilent(t *testing.T) {
+	e, ac := newCadenceEngine(Config{
+		Feed:                  core.FeedTOB,
+		ExpectDefinitionCycle: 1 * time.Second,
+	})
+
+	manifestAt(e, 1, 0, 2)
+	processFrame(e, buildInstrDefFrameWithTS(nsPerSec/10, 100, 1, 1), wire.MagicTOB, core.PortRefData, 2)
+	manifestAt(e, 3, 10*nsPerSec, 2)
+	e.Flush()
+	e.EndRun()
+
+	found := findingsFor(ac, "REFDATA.NEVER_REACHES_READY")
+	if len(found) == 0 {
+		t.Fatal("REFDATA.NEVER_REACHES_READY: no verdict at all with only one --expect-* set — silence is the #50 failure, in a different disguise")
+	}
+	for _, f := range found {
+		if f.Status == core.Violation {
+			t.Errorf("REFDATA.NEVER_REACHES_READY: violated on a window it cannot measure: %s", f.Detail)
+		}
+		if f.Severity != core.Info {
+			t.Errorf("REFDATA.NEVER_REACHES_READY: severity %v, want Info — the rule is not configured, so it must not claim Must coverage", f.Severity)
+		}
+	}
+}
