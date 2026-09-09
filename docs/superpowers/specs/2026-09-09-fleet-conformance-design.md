@@ -1,7 +1,10 @@
 # Fleet conformance: continuous validation of every edge feed in testnet and mainnet-beta
 
 **Date:** 2026-09-09
-**Status:** Design — not yet reviewed
+**Status:** Design — revised 2026-09-09 after reading the venue conformance suites. §1.3, §7 and
+§9 previously called the venue suites duplicates of this tool and proposed deleting one. They are a
+different layer and nothing is deleted; that is corrected here. §4 moves the port table out of this
+public repository. §10 is new.
 **Branch:** `specs/fleet-conformance`
 **Plan:** not yet written
 
@@ -36,6 +39,8 @@ Four failures must be caught, in this order of priority:
   the latency question.
 - **No new host fleet.** §3 reuses the `multicast_recorders` hosts that already exist in both
   environments.
+- **No venue test suite is deleted.** §7 explains why the publisher-side suites and this tool are
+  two layers rather than two implementations of one.
 - **No replacement for the venue capture recorders.** Publisher-side conformance stays where it is.
   This adds a subscriber-side view; it does not remove the publisher-side one.
 
@@ -67,8 +72,8 @@ register later. The design in §4 requires no work when they do.
 | --- | --- | --- | --- | --- |
 | binance | yes, `malbeclabs/binance:scripts/conformance.sh` in CI | no | no | no |
 | kalshi | no; an example script no workflow runs | 3 of 30 metros | no | no |
-| hyperliquid | its own Rust crate, not this tool | recorder hosts | no | no |
-| phoenix | Rust tests, own harness | no | no | no |
+| hyperliquid | publisher-side suite, no shared-tool gate | recorder hosts | no | no |
+| phoenix | publisher-side suite, emits a pcap nothing reads | no | no | no |
 | solana-shreds-full | no | no | no | no |
 | edge-builder | no | no | no | no |
 
@@ -91,12 +96,31 @@ publisher writes. It does not grade what a subscriber in a distant metro receive
 The second is the product, and it is the one with the tunnel, the access pass, the group join and
 the network path in it.
 
-### 1.3 Four venues grew four conformance implementations
+### 1.3 Two layers exist and neither is named as a layer
 
-The shared tool (binance), a shell example (kalshi), a separate Rust crate
-(`malbeclabs/hyperliquid:app/publisher/conformance/`) and Rust integration tests (phoenix). A rule
-fixed in one is not fixed in the others, and the fleet has no single answer to "is this feed
-conformant".
+Read quickly, the venues look like four implementations of one thing: the shared tool (binance), a
+shell example (kalshi), a Rust crate (`malbeclabs/hyperliquid:app/publisher/conformance/`) and Rust
+integration tests (phoenix). They are not. There are two layers here, and the confusion comes from
+both being called conformance.
+
+**Publisher-side, white box.** Hyperliquid and phoenix test their own encoder. Hyperliquid's crate
+drives the real encoder with crafted state, replays recorded fixtures through the real pipeline, and
+runs mutation sensitivity over hand-authored byte vectors: flip a byte at a field's offset, assert
+exactly that field's decoded value moves. That is what proves a test is not echoing the encoder it
+tests, and it audits 21 of 21 emitted message types for offset, size, endianness and signedness.
+
+**Subscriber-side, black box.** `dz-conformance` sees datagrams and grades them against a rule
+catalog. It never sees an encoder, so it cannot do any of the above.
+
+Neither layer can replace the other. What is genuinely missing is the join between them, and phoenix
+has already designed it:
+
+> Setting `DZ_CONFORMANCE_PCAP_OUT` additionally writes the capture as a pcap for
+> `edge-feed-spec/tools/conformance`. The tests never invoke that checker: a Rust test binary that
+> shells out to Go is a test that fails on machines where the sibling repo is absent.
+
+Phoenix emits the pcap and has no CI step reading it. Binance has the CI step. Nobody has both, and
+nobody has written the handoff down as the standard. §7 does that.
 
 ## 2. The blocking prerequisite: a multi-schema decoder
 
@@ -191,12 +215,17 @@ than a check.
 `MulticastGroup` carries `multicast_ip` and no port. The mktdata, refdata and snapshot split is a
 convention from the reference-data spec, not onchain state.
 
-**Change.** Extend the embedded registry the tool already ships. `tools/conformance/` already
-embeds a pinned source registry with a `--source-registry` override. Add a feed-to-ports table by
-the same mechanism, keyed by feed code, giving the port for each role.
+**Change.** The tool gains a `--feed-ports` flag reading a table keyed by feed code, giving the port
+for each role. **The table lives in `malbeclabs/infra`, which is private, and not in this
+repository, which is public.** See §10.
 
-No ledger change and no migration across 306 accounts. A venue launch adds a registry row in a pull
-request, reviewed here, alongside the Source ID claim it already makes.
+An earlier draft embedded the table here, alongside the pinned source registry the tool already
+ships. That was wrong on disclosure grounds: a venue-keyed port table in a public repository names
+every venue in it, including any that has not announced. The code stays public because it names no
+venue. The table that names them stays private, next to the deploy configuration that already does.
+
+No ledger change and no migration across 306 accounts. A venue launch adds a row to the private
+table, reviewed in `infra`.
 
 **The cost, stated.** A feed registered onchain with no registry row cannot be checked. That is a
 silent gap of exactly the kind §1.1 objects to, so it must not be silent: fleet mode counts feeds it
@@ -255,21 +284,35 @@ analysis. That is a different question from latency, and it should be built when
 
 ## 7. Layer 2: one pcap gate, everywhere
 
-Binance already replays a generated capture through `dz-conformance` in CI
-(`malbeclabs/binance:scripts/conformance.sh`). That is the shape. It spreads:
+**Nothing is deleted.** §1.3 establishes that the publisher-side suites and this tool are two
+layers. Every venue keeps its suite. What spreads is the handoff between the layers, which phoenix
+already built and nobody standardised.
 
+**The convention.** A venue's publisher-side suite writes its capture to a pcap. CI runs
+`dz-conformance --pcap` over that capture and fails the pull request on a violation. The suite never
+shells out to the checker, for the reason phoenix gives: a Rust test binary that calls a Go tool in
+a sibling repository fails on any machine without that repository.
+
+Per venue:
+
+- **binance** — has the CI step (`malbeclabs/binance:scripts/conformance.sh`). It is the reference.
+- **phoenix** — emits the pcap already, via `DZ_CONFORMANCE_PCAP_OUT`. Add the CI step that reads it.
+- **hyperliquid** — keeps `app/publisher/conformance/` in full. Add a pcap emission and the CI step.
 - **kalshi** — promote `app/publisher/crates/kalshi-publisher/examples/tob_conformance.sh` from an
   example nothing runs into a CI job.
-- **phoenix** — replace the bespoke `conformance.rs` and `mbp_conformance.rs` tests with the shared
-  tool against a generated capture.
-- **hyperliquid** — retire `app/publisher/conformance/`. Its `GAPS.md` and `TESTING-LIMITATIONS.md`
-  are inputs to the shared tool's rule catalog before the crate is deleted, not after.
 - **edge-builder** — add the gate before its first feed registers.
-- **edge-publisher-template** — add the gate to the template, so a new venue inherits it, and add the
-  registry row from §4 to the Playbook's Phase 1 Source ID step.
+- **edge-publisher-template** — add both halves to the template, so a new venue inherits the suite
+  shape and the gate. Add the §4 port-table row to the Playbook's Phase 1 Source ID step.
 
-A venue-specific rule that the shared catalog cannot express is a finding against the catalog. It is
-raised here as a rule proposal, not kept as a private checker.
+**Where a venue rule outgrows the venue.** A check a publisher-side suite performs that the shared
+catalog cannot express is a rule proposal against the catalog, raised here. Hyperliquid's `GAPS.md`
+and `TESTING-LIMITATIONS.md` are the first inputs, and `TESTING-LIMITATIONS.md` is the more useful
+of the two: it records rules that are true of the spec but undrivable in-process, which is exactly
+the class a live subscriber-side checker can reach and a white-box suite cannot. The shutdown
+`Valid = 0` ManifestSummary is one such rule.
+
+That direction is the point. The two layers cover each other's blind spots, so a gap found in one is
+a candidate rule for the other.
 
 ## 8. Phases
 
@@ -308,6 +351,60 @@ untested. Phase A measures it on one host before the fleet rollout.
 unresolved-feed alert is what keeps it honest. If that alert is ever silenced, §4 has quietly become
 §1.1.
 
-**Retiring hyperliquid's crate loses coverage if done in the wrong order.** Its `GAPS.md` documents
-what it checks that the shared tool may not. The crate is deleted after those rules land in the
-shared catalog, and phase B states that order.
+**The two layers can drift into one.** §7 keeps both. The failure mode is a later reading of this
+document that sees two things called conformance and consolidates them, deleting the mutation
+sensitivity and field-level audit that only a white-box suite can do. §1.3 and §7 say why that is a
+loss, and the non-goals say it outright.
+
+**The private port table can go stale where the public code cannot.** §4 splits the code from the
+table that configures it, across a repository boundary and a visibility boundary. The
+unresolved-feed alert in §4 is the only thing making that split safe. If it is ever silenced, §4 has
+become §1.1 with an extra repository in the way.
+
+## 10. Repository split and disclosure
+
+Some venues are not publicly associated with DoubleZero. Half the repositories here are public, so
+where a thing lives decides what it discloses.
+
+| public | private |
+| --- | --- |
+| `doublezero`, `edge-feed-spec`, `edge-multicast-ref`, `doublezero-edge-connect`, `lake` | `infra`, `binance`, `kalshi`, `hyperliquid`, `phoenix`, `miax`, `edge-builder`, `edge-publisher-template` |
+
+The split follows one rule: **code that names no venue is public, and anything that names a venue is
+private.**
+
+- **Fleet mode** (§3) is public, here. It hardcodes no venue. It reads whatever the ledger returns
+  and grades it by feed type.
+- **The port table** (§4) is private, in `infra`. It is keyed by feed code, so it names venues.
+- **Per-venue pcap gates** (§7) stay in the venue repositories, which are already private.
+- **Deploy configuration and alerts** stay in `infra`, where they already are.
+- **The canary** (§5) publishes recorded data under a synthetic feed code, so it names nobody.
+
+Discovery from the ledger turns out to be the disclosure-safe design as well as the
+low-maintenance one. A hand-written list has to name each venue somewhere; a discovered one names
+none. That is a second argument for §3 that the first draft did not notice.
+
+### 10.1 What is already public, and the limit of any obfuscation here
+
+Deciding what this document may name requires knowing what is already disclosed. As of 2026-09-09:
+
+- **The ledger is public.** All 306 mainnet-beta `Feed` accounts, with codes such as
+  `edge-binance-usdsm-tob`, `kalshi-perps-tob` and `phoenix-tob`, were read from a public RPC
+  endpoint with no credentials.
+- **The Source ID registry is public and names venues.** `sources/spec.md`, in this repository,
+  carries Hyperliquid (`1`), Phoenix (`2`), Kalshi (`3`), Setai (`4`, `5`) and Binance USD-Margined
+  Futures (`6`). The Binance row names the operator of record and its regulatory status.
+- **A venue-named design already sits in this public repository.**
+  `docs/superpowers/specs/2026-08-19-kalshi-conformance-deploy-design.md`.
+
+So obfuscating a venue in this document alone changes nothing while the registry beside it names
+that venue. The registry is the disclosure; this document would only be a second copy of it.
+
+**The codename mechanism exists and works, at the registry.** The Kalshi row records it: *"Registered
+under the codename `Lashay` until the venue launched."* The retired codename is still visible today
+as the `lashay1-feed` and `lashay2-feed` accounts in the testnet ledger, which is a fair illustration
+of the Playbook's warning that codename retirement is sequenced rather than a search and replace.
+
+**Open decision.** Whether Hyperliquid and Binance should be codenamed is a question about
+`sources/spec.md` and the ledger, not about this document. Recorded here as open; it does not block
+any phase.
