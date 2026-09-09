@@ -405,6 +405,33 @@ under the codename `Lashay` until the venue launched."* The retired codename is 
 as the `lashay1-feed` and `lashay2-feed` accounts in the testnet ledger, which is a fair illustration
 of the Playbook's warning that codename retirement is sequenced rather than a search and replace.
 
-**Open decision.** Whether Hyperliquid and Binance should be codenamed is a question about
-`sources/spec.md` and the ledger, not about this document. Recorded here as open; it does not block
-any phase.
+**Decision: nothing is renamed.** Codenaming Hyperliquid or Binance was considered on 2026-09-09 and
+rejected. The surfaces are not comparable, and neither argues for a rename.
+
+**Hyperliquid is in a shipped public contract.** `malbeclabs/doublezero-edge-connect` is public, has
+an install one-liner at `get.doublezero.xyz`, and its `PROTOCOL.md` is by its own statement the only
+contract a consumer codes against. The venue name is a value in that contract and a subscription
+filter key:
+
+```json
+{"type":"quote","venue":"Hyperliquid","source_name":"Hyperliquid","source_id":1,"symbol":"SOL"}
+{"method":"subscribe","subscription":{"venue":"Hyperliquid","symbol":"SOL"}}
+```
+
+Renaming stops every existing subscription filter matching, with no error raised. That is a breaking
+change to a public API, and a silent one. Beyond it: 62 references in that repository including
+`src/products.rs`, `src/model.rs` and `src/metrics.rs`; 22 in `malbeclabs/lake`; 8 in
+`malbeclabs/edge-multicast-ref`; and two in this repository's `GLOSSARY.md`, where Hyperliquid is
+the worked example for both **Venue** and **Matching engine**.
+
+**Binance is cheap to rename and pointless to rename.** It appears only in this repository (the ID 6
+row, a revision string in `tools/conformance/engine/source_ids.json`, one out-of-scope mention in
+`perp-stats/spec.md`) and in the ledger, as `edge-binance-usdsm-tob` across 31 metros with their
+group codes. No public consumer carries it. But the disclosure already happened when those accounts
+were registered and that row landed, so a rename now would cost a sequenced onchain migration to
+close a door that is already open.
+
+**The mechanism still works, at registration time.** A venue that has not announced gets a codename
+when its Source ID is claimed, as Kalshi did with `Lashay`. It does not work retroactively. Phase B
+of §8 adds the codename question to the template's Phase 1 step so a future venue gets it right
+before anything is public.
