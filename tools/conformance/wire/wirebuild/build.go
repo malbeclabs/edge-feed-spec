@@ -41,10 +41,11 @@ type frame struct {
 }
 
 // Frame starts a conformant frame for the given feed's magic. The schema
-// version defaults to the value that feed's spec mandates (see
-// wire.ExpectedSchemaVersion); override with Schema to forge a violation.
+// version defaults to the highest version that feed's validator supports (see
+// wire.SupportedSchemas); override with Schema to forge a violation.
 func Frame(magic uint16) *frame {
-	return &frame{magic: magic, schemaVer: wire.ExpectedSchemaVersion(magic)}
+	supported := wire.SupportedSchemas(magic)
+	return &frame{magic: magic, schemaVer: supported[len(supported)-1]}
 }
 
 func (f *frame) Schema(v uint8) *frame       { f.schemaVer = v; return f }

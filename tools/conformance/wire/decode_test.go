@@ -55,6 +55,66 @@ func TestDecodeMagicMismatch_NoWalkCascade(t *testing.T) {
 	}
 }
 
+func TestSchemaSupported(t *testing.T) {
+	cases := []struct {
+		name  string
+		magic uint16
+		ver   uint8
+		want  bool
+	}{
+		{"tob schema 3 is current", wire.MagicTOB, 3, true},
+		{"tob schema 1 is the hyperliquid publisher", wire.MagicTOB, 1, true},
+		{"tob schema 2 was never deployed", wire.MagicTOB, 2, false},
+		{"tob schema 0 is not a version", wire.MagicTOB, 0, false},
+		{"tob schema 4 does not exist yet", wire.MagicTOB, 4, false},
+		{"mbo schema 1", wire.MagicMBO, 1, true},
+		{"mbo schema 3", wire.MagicMBO, 3, true},
+		{"mbp schema 3", wire.MagicMBP, 3, true},
+		{"midpoint kept its 64-byte variant at 1", wire.MagicMid, 1, true},
+		{"midpoint never widened to 3", wire.MagicMid, 3, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := wire.SchemaSupported(tc.magic, tc.ver); got != tc.want {
+				t.Fatalf("SchemaSupported(0x%04X, %d) = %v, want %v", tc.magic, tc.ver, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDecodeAcceptsSchema1TOB(t *testing.T) {
+	raw := wb.Frame(wire.MagicTOB).Schema(1).Channel(0).Seq(1).
+		Msg(wire.TypeHeartbeat, 16, func(b *wb.Body) { b.U8(0).Pad(11) }).
+		Bytes()
+
+	_, fs := wire.Decode(raw, wire.MagicTOB)
+	for _, f := range fs {
+		if f.RuleID == "FRAME.SCHEMA_VERSION" {
+			t.Fatalf("schema 1 must not raise FRAME.SCHEMA_VERSION: %s", f.Detail)
+		}
+	}
+}
+
+func TestDecodeRejectsSchema2TOB(t *testing.T) {
+	raw := wb.Frame(wire.MagicTOB).Schema(2).Channel(0).Seq(1).
+		Msg(wire.TypeHeartbeat, 16, func(b *wb.Body) { b.U8(0).Pad(11) }).
+		Bytes()
+
+	_, fs := wire.Decode(raw, wire.MagicTOB)
+	var found bool
+	for _, f := range fs {
+		if f.RuleID == "FRAME.SCHEMA_VERSION" {
+			found = true
+			if f.Transport {
+				t.Fatal("an unsupported schema is a publisher fault, not transport corruption")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("schema 2 must raise FRAME.SCHEMA_VERSION")
+	}
+}
+
 func has(fs []wire.StructFinding, id string) bool {
 	for _, f := range fs {
 		if f.RuleID == id {
