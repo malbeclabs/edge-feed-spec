@@ -6,7 +6,7 @@
 different layer and nothing is deleted; that is corrected here. §4 moves the port table out of this
 public repository. §10 is new.
 **Branch:** `specs/fleet-conformance`
-**Plan:** not yet written
+**Plan:** §2 is `docs/superpowers/plans/2026-09-09-fleet-conformance-a1-multi-schema-decoder.md` (phase A1). The rest of phase A (§3, §4, deploy) is phase A2, not yet planned.
 
 **Repositories.** Bare paths (`tools/conformance/...`) are `malbeclabs/edge-feed-spec`. Everything
 else is repo-qualified. The Ansible role, inventory and Grafana alerts live in `malbeclabs/infra`.
