@@ -51,6 +51,21 @@ tests:
               summary: "Rule GONE_QUIET is no longer verifying anything"
               description: "Rule GONE_QUIET on feed mbp was handed work but produced no passing check in the last 15 minutes, so its clean result proves nothing. Check dz_conformance_unverifiable_total{rule_id=\"GONE_QUIET\"} for which cause is blocking it.\n"
 
+  # FRAME.SCHEMA_VERSION_SUPERSEDED is the one rule whose correct steady state is
+  # violations forever and no pass: it fires once per frame on a publisher running a
+  # supported-but-not-current MAJOR. Without the exclusion in the expr, every
+  # schema-1 venue holds this warning permanently. The GONE_QUIET case above is the
+  # same metric shape and must still alert, so the two cases together pin that the
+  # carve-out is narrow rather than a hole.
+  - interval: 1m
+    input_series:
+      - series: 'dz_conformance_checks_total{feed="tob",rule_id="FRAME.SCHEMA_VERSION_SUPERSEDED",result="violation"}'
+        values: "0+40x30"
+    promql_expr_test:
+      - expr: ALERTS{alertname="ConformanceRuleNoLongerVerifying"}
+        eval_time: 25m
+        exp_samples: []
+
   # A rule reporting only `na` is not owed coverage, so it must not alert: an
   # instrument set that declares no price bounds has nothing to bound-check.
   - interval: 1m

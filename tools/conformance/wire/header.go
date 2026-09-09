@@ -13,19 +13,65 @@ const (
 	MaxFrameLen    = 1232
 )
 
-// ExpectedSchemaVersion returns the frame Schema Version byte a conformant
-// publisher of the given feed must emit.
+// SupportedSchemas returns the frame Schema Version bytes this validator decodes
+// for the given feed, identified by magic.
 //
-// Per VERSIONING.md the byte equals the spec's MAJOR version, so it is
-// per-feed, not global. The midpoint feed kept its slimmed 64-byte
-// InstrumentDefinition when the other five widened Symbol to char[64], so it
-// remains at spec 1.x while its siblings are at 3.x. Keying on magic rather
-// than core.Feed avoids an import cycle and is exact: magic identifies the feed.
-func ExpectedSchemaVersion(magic uint16) uint8 {
+// Per VERSIONING.md the byte equals the spec's MAJOR version, so the set is
+// per-feed. Midpoint kept its slimmed 64-byte InstrumentDefinition when the
+// other five widened Symbol to char[64], so it is still at spec 1.x while its
+// siblings are at 3.x. Keying on magic rather than core.Feed avoids an import
+// cycle and is exact: magic identifies the feed.
+//
+// **This validator accepts more than one MAJOR version, and that is deliberate.**
+// VERSIONING.md requires a decoder to reject a Schema Version it was not built
+// for. A fleet validator grades every venue at once, and venues sit on different
+// MAJOR versions, so a single-version binary forces a per-venue build pin —
+// exactly the failure this set removes. The exception is scoped to this tool and
+// recorded in VERSIONING.md. Production consumers keep the reject rule.
+//
+// Schema 2 is absent on purpose. It widened Symbol to char[64] (80 -> 128 bytes)
+// and no publisher ever deployed it, so there is no capture to test a schema-2
+// layout against. A layout nobody has seen on the wire is a guess, and a guess
+// that silently decodes is worse than a rejection.
+func SupportedSchemas(magic uint16) []uint8 {
+	if magic == MagicMid {
+		return []uint8{1}
+	}
+	return []uint8{1, 3}
+}
+
+// CurrentSchema returns the Schema Version a publisher of this feed SHOULD be
+// emitting today: the MAJOR of the feed's current spec line.
+//
+// Distinct from SupportedSchemas on purpose. Supported is what this validator can
+// decode; current is what the spec says to emit. A feed on a supported-but-not-
+// current version is readable and behind, and that is a fact an operator wants
+// reported rather than silently tolerated — see FRAME.SCHEMA_VERSION_SUPERSEDED.
+func CurrentSchema(magic uint16) uint8 {
 	if magic == MagicMid {
 		return 1
 	}
 	return 3
+}
+
+// DefaultSchema is the version hand-built test fixtures carry unless they forge
+// another. It is CurrentSchema by definition: a fixture with no opinion about its
+// version should look like a conformant publisher of today's spec.
+//
+// Named rather than derived from SupportedSchemas' ordering, because indexing that
+// slice makes every fixture in the suite change meaning the day a version is
+// appended or the slice is reordered — with no compile error and no failing test.
+func DefaultSchema(magic uint16) uint8 { return CurrentSchema(magic) }
+
+// SchemaSupported reports whether this validator decodes ver for the feed
+// identified by magic.
+func SchemaSupported(magic uint16, ver uint8) bool {
+	for _, v := range SupportedSchemas(magic) {
+		if v == ver {
+			return true
+		}
+	}
+	return false
 }
 
 // Message type IDs (shared + per-feed).
