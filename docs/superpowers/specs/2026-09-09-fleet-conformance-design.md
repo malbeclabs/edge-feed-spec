@@ -1,7 +1,10 @@
 # Fleet conformance: continuous validation of every edge feed in testnet and mainnet-beta
 
 **Date:** 2026-09-09
-**Status:** Design — revised twice on 2026-09-09. Second revision, after operator review: §3's
+**Status:** Design — revised three times on 2026-09-09. Third revision, after the operator thread:
+§7 relocates the white-box harness out of the hyperliquid repository, §8 answers the CI-first
+sequencing question, and §13 is new — the dashboard is the deliverable, and it needs an owner.
+Earlier revisions: Second revision, after operator review: §3's
 "reuse the recorder hosts" is withdrawn (§12 replaces it), and §11 adds the second pipeline. First
 revision, after reading the venue conformance suites: §1.3, §7 and
 §9 previously called the venue suites duplicates of this tool and proposed deleting one. They are a
@@ -306,12 +309,37 @@ Per venue:
 
 - **binance** — has the CI step (`malbeclabs/binance:scripts/conformance.sh`). It is the reference.
 - **phoenix** — emits the pcap already, via `DZ_CONFORMANCE_PCAP_OUT`. Add the CI step that reads it.
-- **hyperliquid** — keeps `app/publisher/conformance/` in full. Add a pcap emission and the CI step.
+- **hyperliquid** — keeps `app/publisher/conformance/` in full, **and it moves.** See §7.1. Add a
+  pcap emission and the CI step.
 - **kalshi** — promote `app/publisher/crates/kalshi-publisher/examples/tob_conformance.sh` from an
   example nothing runs into a CI job.
 - **edge-builder** — add the gate before its first feed registers.
 - **edge-publisher-template** — add both halves to the template, so a new venue inherits the suite
   shape and the gate. Add the §4 port-table row to the Playbook's Phase 1 Source ID step.
+
+### 7.1 The white-box harness leaves the hyperliquid repository
+
+Steve Shaw, who built it, says the crate is "mostly protocol agnostic" and "can be moved wherever
+since it's not meant to be hyperliquid specific". Take him at his word: it is fleet infrastructure
+sitting in one venue's repository, where only someone who already knows it exists can find it.
+
+The Playbook has already made this exact argument about the exact same directory tree, for the
+Wireshark dissectors under `app/publisher/spec/`:
+
+> **That is the wrong home** — a fleet-wide verification asset inside one venue's repository is
+> discoverable only by someone who already knows it exists, and it belongs alongside the
+> specifications it implements.
+
+Two assets, one repository, the same diagnosis. Both move to the same place, and the natural home is
+here, beside the specs they check: `dz-conformance` already lives in `tools/`, and a publisher-side
+harness and a subscriber-side checker of the same specs belong in one place.
+
+**What moving actually requires**, and the reason this is a phase and not an afternoon: the crate
+drives the *real encoder*, so its worked vectors and mutation-sensitivity layers are generic while
+its Driver A and Driver B fixtures are bound to hyperliquid's publisher. Moving it means separating
+the harness from those bindings and giving each venue a way to supply its own — which is the work
+that makes it usable by phoenix, kalshi, binance and edge-builder at all. A move that carries
+hyperliquid's fixtures along has relocated a file, not shared a tool.
 
 **Where a venue rule outgrows the venue.** A check a publisher-side suite performs that the shared
 catalog cannot express is a rule proposal against the catalog, raised here. Hyperliquid's `GAPS.md`
@@ -336,8 +364,20 @@ subscriber hosts, and §12 rule 4 gates any rollout on a before-and-after captur
 metro. The §2 decoder work is independent of all of this and ships regardless: it is a change to what
 one binary can decode, with no deployment topology in it.
 
-**Phase B — layer 2.** §7. Every venue gates on the shared tool in CI. Hyperliquid's crate is
-retired. The template carries the gate forward.
+**Phase B — layer 2.** §7. Every venue gates on the shared checker in CI, and §7.1 moves the
+white-box harness to a shared home so every venue can adopt it. Nothing is retired. The template
+carries both halves forward.
+
+**On running B before A.** Steve's suggestion is to get the non-hyperliquid publishers onto these
+tests in CI "before doing the other stuff", and the case for it is good: a CI gate needs no host, no
+access pass and no capacity argument, so it ships while §12's measurements are still being taken.
+The case against reordering wholesale is that phase A's §2 decoder is the prerequisite for a single
+shared binary, and it is already done.
+
+So they are not a sequence. **§2 is finished; B and the rest of A run in parallel from here**, and B
+is the one to start on Monday because §12 rule 4 blocks A's rollout behind a capture-loss baseline
+that has to be measured first. The layer-1 dashboard lands when the hosts are proven, and CI
+coverage does not wait for it.
 
 **Phase C — layer 3.** §3.1 join, liveness and tunnel series. §5 testnet canary, and the break table
 run end to end. This is where the monitor is proven.
@@ -587,3 +627,73 @@ These need answers from whoever owns the fleet; the design does not assume them.
 - **There are open issues on exactly this.** The inventory cites #1980 ("recorder-role membership
   stays decoupled from feed-capture/conformance") and a #1984 cutover, with `tyo` still co-hosting
   tenants until then. This section should be reconciled with that work rather than run beside it.
+
+
+## 13. The dashboard, and who owns it
+
+The operator ask is not "a checker exists". It is a dashboard someone watches, and an owner. Recorded
+here so the phases are judged against it.
+
+> **My ask: someone volunteer to own this.** … We need to build up our muscles around this and care
+> deeply about the quality and correctness of the feeds we're publishing.
+
+**Ownership is the gap this document does not close.** Every section above describes machinery. A
+dashboard with no name against it is how the Playbook's Phase 11 got written and never staffed. The
+first thing that should happen after this design is approved is a name, not a commit.
+
+### 13.1 Publishers
+
+| Panel | Where it comes from |
+| --- | --- |
+| Every publisher we operate, across all ecosystems, and its status | Feed accounts on the ledger (§3), joined to the venue's operator record |
+| Whether it is actually up and publishing | §3.1 liveness — time since last datagram, per channel instance |
+| **What spec version it is publishing** | The frame header's `Schema Version` byte |
+| Liveness and gap detection per tuple | The checker's existing per-instance sequence state |
+| Instrument count per tuple | `ManifestSummary`'s `Instrument Count`, already parsed |
+
+**The spec-version panel is a thing the fleet cannot show today**, and it is worth naming why. A
+binary pinned to one schema cannot report what a publisher on a different schema is emitting — it
+grades the frame as a version violation and stops. §2's multi-schema decoder is what makes "what
+version is this publisher on" an observable per-publisher fact rather than a deployment assumption
+recorded in a group_vars comment. That panel is a direct output of phase A1.
+
+**One reconciliation before the panels are built.** The ask names the tuple as
+`(source_ip, dst_ip, channel_id)`. The checker keys its sequence state on
+`(source IP, Channel ID, destination port)` — port, not destination address — because one process
+binds one multicast group, so `dst_ip` is constant within an instance while the port distinguishes
+`mktdata` from `refdata` from `snapshot`.
+
+Both are right about their own scope and neither is sufficient for a fleet view. The full identity is
+**`(source_ip, dst_ip, dst_port, channel_id)`**: the group says which feed, the port says which
+stream of it, the source says which publisher, the channel says which series. Fleet mode must export
+all four as labels. Dropping `dst_port` merges three sequence series that advance independently, and
+that merge is loud in one direction and silent in the other — the checker's own README documents
+exactly this failure. Dropping `dst_ip` merges every feed a host watches.
+
+### 13.2 Receivers
+
+The ask lists three receiver populations, in a few regions each: **Edge Connect instances**,
+**conformance testers**, and **parser plus ClickHouse loaders**. That is a wider surface than this
+document covers, and the split matters:
+
+- Conformance testers are §3, and §12 governs where they may run.
+- Edge Connect instances are pipeline B (§11), which needs its own checker against `PROTOCOL.md` and
+  is not built by phases A through D.
+- Parser and ClickHouse loaders are the `dz_recorder` path, on the same hosts as the pcap recorders
+  and the validators, whose group_vars already notes that "every one of these hosts evicts
+  continuously" — a receiver population that is already under pressure before this document adds to
+  it. §12 is the constraint on all three.
+
+**A receiver dashboard has to distinguish "the feed is bad" from "our receiver is bad."** Three
+populations watching the same feeds means three ways to be wrong about it, and an operator paged at
+3am needs the panel to say which. The label set in §13.1 is what makes that possible: same feed
+identity across all three, so a green publisher row beside a red receiver row is a legible answer
+rather than a contradiction.
+
+### 13.3 Runbooks
+
+Always-on monitoring of the Edge Connect and conformance infrastructure itself. The self-referential
+part matters most: a conformance tester that has silently died reports exactly what a clean feed
+reports. §3.1's join-and-liveness series and §4's unresolved-feed count are the checker's answer to
+that for itself; Edge Connect needs its own equivalent, and neither is optional once someone is on
+call for the dashboard.
