@@ -1,7 +1,9 @@
 # Fleet conformance: continuous validation of every edge feed in testnet and mainnet-beta
 
 **Date:** 2026-09-09
-**Status:** Design — revised 2026-09-09 after reading the venue conformance suites. §1.3, §7 and
+**Status:** Design — revised twice on 2026-09-09. Second revision, after operator review: §3's
+"reuse the recorder hosts" is withdrawn (§12 replaces it), and §11 adds the second pipeline. First
+revision, after reading the venue conformance suites: §1.3, §7 and
 §9 previously called the venue suites duplicates of this tool and proposed deleting one. They are a
 different layer and nothing is deleted; that is corrected here. §4 moves the port table out of this
 public repository. §10 is new.
@@ -18,7 +20,11 @@ the rule severities that decide what pages are defined here.
 
 Every feed registered onchain is validated continuously, from a subscriber's vantage, in both
 testnet and mainnet-beta. A venue gets coverage by registering its feed, not by anyone editing a
-list.
+list. **Never at the cost of a dropped packet on a capture host — see §12.**
+
+There are two end-to-end pipelines, not one (§11). This document covers the first, which ends at the
+wire specs. The second ends at Edge Connect's JSON contract and needs its own checker and its own
+design.
 
 Four failures must be caught, in this order of priority:
 
@@ -37,8 +43,11 @@ Four failures must be caught, in this order of priority:
   without one, deliberately.
 - **No book-builder and no ClickHouse.** §6 says why the Playbook's Phase 9 harness is not needed for
   the latency question.
-- **No new host fleet.** §3 reuses the `multicast_recorders` hosts that already exist in both
-  environments.
+- **Pipeline B is not in scope.** §11 records the Edge Connect path and says why it needs a
+  separate checker; phases A through D do not build it.
+- **Nothing here is worth a dropped capture.** §12 makes the pcap recorders' loss budget the binding
+  constraint on where and how validators run, and withdraws the earlier draft's assumption that the
+  recorder hosts were spare capacity.
 - **No venue test suite is deleted.** §7 explains why the publisher-side suites and this tool are
   two layers rather than two implementations of one.
 - **No replacement for the venue capture recorders.** Publisher-side conformance stays where it is.
@@ -181,10 +190,10 @@ feed still gets the §3.1 liveness and join series, which is the part of the che
 depend on the wire format, and it raises no conformance alert. The coverage table in §1 marks shreds
 as unchecked because nothing watches it at all today, not because the rule catalog is missing.
 
-**Where it runs.** On the `multicast_recorders` hosts, which already exist as an Ansible group in
-**both** the testnet and mainnet-beta inventories, are already attached to the DZ network, and
-already join multicast groups. The sentinel is a service added to those hosts. No new fleet, no new
-access pass, no new tunnel.
+**Where it runs.** An earlier draft said: put it on the `multicast_recorders` hosts, they already
+exist and already join the groups, so the sentinel is just another service. **That is withdrawn.**
+Those hosts write the pcaps, the pcaps are the lifeline, and they are not free capacity. §12 sets
+the placement rule and the evidence behind it. Read §12 before deploying anything from this section.
 
 **Filtering.** A recorder in one metro should check the feeds joinable from that metro, not all 306.
 `Feed.exchange` names the metro, so the host filters the catalog by its own exchange. That is the
@@ -319,9 +328,13 @@ a candidate rule for the other.
 Each phase is independently shippable and leaves the fleet better than it found it. Each phase gets
 its own implementation plan; this document is too broad for one.
 
-**Phase A — layer 1.** §2 multi-schema decoder. §4 port registry. §3 fleet mode. Deploy on the
-mainnet-beta `multicast_recorders`. Delete the per-venue pins. Every registered mainnet-beta feed is
-checked continuously from a subscriber host.
+**Phase A — layer 1.** §2 multi-schema decoder. §4 port registry. §3 fleet mode. Delete the
+per-venue pins. Every registered mainnet-beta feed is checked continuously from a subscriber host.
+
+**Phase A does not deploy onto the recorder fleet.** §12 rule 1 puts validators on separate
+subscriber hosts, and §12 rule 4 gates any rollout on a before-and-after capture-loss baseline in one
+metro. The §2 decoder work is independent of all of this and ships regardless: it is a change to what
+one binary can decode, with no deployment topology in it.
 
 **Phase B — layer 2.** §7. Every venue gates on the shared tool in CI. Hyperliquid's crate is
 retired. The template carries the gate forward.
@@ -343,9 +356,17 @@ violation. Alerting must read `unverifiable_total` by reason, not just violation
 network will read as a clean feed. This is the same trap the tool's README describes, arriving from
 a new direction.
 
-**One process, many checkers.** 30 feeds per metro in one process is a new resource profile.
-Bounded per-feed state exists already (`maxChannelInstances`), but the per-process total is
-untested. Phase A measures it on one host before the fleet rollout.
+**One process, many checkers, on hosts that already drop packets when one core saturates.** This
+was written as a resource-profile curiosity and it is not. A metro carries roughly nine gradeable
+feeds against the two or three validator instances a host runs today, and §12.2 documents an
+observed loss path — GRE from one tunnel endpoint hashes to a single RX queue, that core saturates,
+the NIC ring drops. Bounded per-feed state exists (`maxChannelInstances`); a bound on what the
+process does to its host does not. §12 is the mitigation and it is a precondition, not a follow-up.
+
+**Grading one pipeline and reporting it as coverage.** §11: a clean pipeline-A result says the bytes
+on the wire were right. It says nothing about what Edge Connect served, which is what most consumers
+actually read. The risk is not the gap, which is known; it is a dashboard that shows green and does
+not say which surface it graded.
 
 **The registry becomes a second catalog.** §4 accepts a per-feed table outside the ledger. The
 unresolved-feed alert is what keeps it honest. If that alert is ever silenced, §4 has quietly become
@@ -435,3 +456,134 @@ close a door that is already open.
 when its Source ID is claimed, as Kalshi did with `Lashay`. It does not work retroactively. Phase B
 of §8 adds the codename question to the template's Phase 1 step so a future venue gets it right
 before anything is public.
+
+
+## 11. The second pipeline: Edge Connect
+
+There are two end-to-end paths from a venue to a consumer, and §1–§10 only cover the first.
+
+```
+venue feed ──► publisher ──► DZ network ──┬──► reference crates (feed capture recorders) ──► conformance vs the wire specs
+                                          │
+                                          └──► doublezero-edge-connect ──► normalized JSON WebSocket ──► conformance vs PROTOCOL.md
+```
+
+**Pipeline A** is what the rest of this document describes. It grades the binary multicast against
+`edge-feed-spec`, and its checker is `dz-conformance`.
+
+**Pipeline B** ends at `malbeclabs/doublezero-edge-connect`, the bridge most consumers actually run.
+It decodes the binary multicast, drives the reference-data state machine, and re-serves everything as
+one normalized JSON WebSocket. Its own README is explicit that this, not the multicast, is the
+contract a consumer codes against:
+
+> The binary multicast, the two-port split, and the manifest/precision handshake all stay on this
+> side of the bridge. The **only** contract a consumer codes against is the WebSocket JSON, fully
+> specified in **PROTOCOL.md**.
+
+**Pipeline A passing does not imply pipeline B passing.** A conformant feed can still reach a
+subscriber wrong, because everything between the two is unchecked: the decode, the refdata state
+machine that supplies exponents, the venue and symbol tagging, the four latency timestamps, the
+subscription filter matching. A `tick_size` misapplied on the bridge produces a well-formed JSON
+quote with a wrong price, and pipeline A grades that feed clean because the bytes on the wire were
+clean.
+
+**These are different checkers against different specs.** `dz-conformance` reads datagrams against
+the wire specs; nothing today reads `PROTOCOL.md` against a live WebSocket. Pipeline B needs its own
+checker — a subscribing client that validates the JSON contract — and it should not be bolted into
+`dz-conformance`, whose entire rule catalog is framed in datagrams, ports, sequence series and reset
+counts. A second tool with its own rule catalog, sharing only the venue and metro labels so the two
+results line up per feed.
+
+The one place they must meet is reporting: a per-feed dashboard has to show the same feed graded on
+both surfaces, or an operator cannot tell "the publisher is wrong" from "the bridge is wrong". That
+shared axis is the feed code plus the metro, which §3 already derives from the ledger.
+
+**Scope.** Pipeline B is out of scope for phases A through D and gets its own design. It is recorded
+here because a plan that says "e2e coverage for the feeds" while covering only pipeline A would read
+as finished when it is half done.
+
+## 12. Recording capacity and isolation
+
+**The pcaps come first.** They are the basis of trading research and an eventual product, they cannot
+be regenerated, and a datagram dropped on the capture host is gone. Every other workload on a
+recorder host, this document's validators included, is subordinate to lossless capture. Where the two
+conflict, capture wins and the validator is what moves.
+
+### 12.1 The risk is live today, not hypothetical
+
+Read from `malbeclabs/infra`'s mainnet-beta inventory on 2026-09-09:
+
+- **`multicast_recorders`**: `aws-cmh-mn-recorder1`, `aws-tyo-mn-recorder1`, `aws-was-mn-recorder1`,
+  `aws-fra-mn-recorder1`, `aws-dub-mn-recorder1`. Baremetal: `chi-mn-recorder1`, `nyc-mn-recorder1`.
+- **`dz_conformance`** resolves to `hyperliquid_feed_capture_mainnet_recorders` plus
+  `kalshi_feed_capture`, and **every host in both is a recorder host.** `kalshi_feed_capture` is
+  `aws-cmh-mn-recorder1`, `aws-was-mn-recorder1`, `aws-dub-mn-recorder1`; the inventory comment calls
+  it "a SECOND capture service co-located on the shared multicast recorders".
+- **`dz_recorder`** is "the same three hosts" again, and its group_vars notes that "every one of these
+  hosts evicts continuously".
+
+So the validators already run on the capture machines. This document's fleet mode would have
+multiplied them: today a host runs two or three validator instances; a metro carries roughly nine
+gradeable feeds, so §3 as first drafted was a three- to fourfold increase in validator instances on
+exactly those hosts.
+
+### 12.2 The failure mode is documented and already observed
+
+`malbeclabs/infra`'s `nic_rx_tuning` role does not describe a theoretical risk. It describes one that
+happened:
+
+> the edge feed arrives GRE-encapsulated from a single tunnel endpoint, so hardware RSS hashes the
+> outer IP to ONE queue/core and that core saturates (`time_squeeze`) -> NIC ring drops
+> (`rx_no_buffer`). RPS spreads that queue's softirq across cores in software.
+
+Three things follow. The loss path is a **single saturated core**, not aggregate host load, so a
+host at 40% CPU can still be dropping. RPS, the mitigation, is **off by default** and opt-in per
+host. And a validator scheduled onto the core servicing that queue's softirq competes directly with
+the thing that must not lose packets.
+
+The `dz-conformance` systemd unit as deployed carries **no resource limits at all** — no `CPUQuota`,
+no `CPUAffinity`, no `MemoryMax`, no IO weight. Each feed is a separate templated instance, so the
+count scales with coverage and nothing bounds the total.
+
+### 12.3 Rules
+
+1. **Validators do not share a host with a pcap recorder by default.** Fleet mode's subscriber hosts
+   are separate instances that join the same groups. A subscriber is cheap; a lost capture is not.
+2. **Where co-location is unavoidable, it is bounded in the unit file, not by convention.** Pin
+   validators with `CPUAffinity` off the cores servicing the capture NIC's RX softirq, cap them with
+   `CPUQuota`, bound them with `MemoryMax` so a leak cannot OOM the recorder, and set `IOWeight` below
+   the recorder so pcap writes and S3 uploads win contention. An unbounded `Type=simple` unit beside
+   the recorder is the current state and is not good enough for a fleet-sized instance count.
+3. **Capture loss is measured and alerted independently of conformance**, because a validator
+   reporting a clean feed while the recorder drops frames is the worst reading available. The
+   counters are per-interface `rx_no_buffer` and `rx_missed_errors`, `/proc/net/softnet_stat`'s
+   `time_squeeze`, UDP receive-buffer drops, and the recorder's own drop and gap counters. Alert on
+   the recorder's loss, not on the validator's.
+4. **Measure before adding a single instance.** Phase A's rollout is gated on a per-host baseline of
+   those counters, taken before and after, on one metro. A rollout that cannot show capture loss
+   unchanged does not proceed.
+5. **Enable RPS on the hosts with the GRE single-queue problem** before adding validator load, not
+   after. It is opt-in today, so a host that needs it and has not been given it is one saturated core
+   away from dropping.
+6. **Size per metro, not uniformly.** The inventory already differentiates: `was` is on the same
+   `c6i.2xlarge` as `cmh` deliberately so the two differ in location and not in spec, and it also
+   records the Solana shreds groups, while `dub` is a smaller box. Fleet mode's per-metro feed count
+   varies the same way and the instance sizing has to follow it.
+
+### 12.4 Open questions for the hardware owner
+
+These need answers from whoever owns the fleet; the design does not assume them.
+
+- **What produces the pcap timestamps today, and to what accuracy?** Kernel `SO_TIMESTAMPING`, or NIC
+  hardware timestamping? This matters for both the research value of the captures and §6's latency
+  histogram, and the answer likely differs between the AWS hosts and the `chi`/`nyc` baremetal ones.
+  If hardware timestamping is available on the baremetal hosts and not on the AWS ones, the captures
+  are not comparable across metros and that limitation belongs in the data, not in folklore.
+- **Is capture loss currently zero, and how do we know?** Rule 3 assumes counters exist to read. If
+  the recorder does not already expose a drop and gap count, adding one is a prerequisite for phase A,
+  not a follow-up.
+- **What headroom do the existing hosts actually have?** Rule 1's default is separate hosts precisely
+  because nobody has measured this. A measurement showing real headroom can relax it per metro.
+- **There are open issues on exactly this.** The inventory cites #1980 ("recorder-role membership
+  stays decoupled from feed-capture/conformance") and a #1984 cutover, with `tyo` still co-hosting
+  tenants until then. This section should be reconciled with that work rather than run beside it.
