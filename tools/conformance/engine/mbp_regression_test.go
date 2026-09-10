@@ -58,6 +58,10 @@ func TestSnapshotPortRequiresTheFlagSet(t *testing.T) {
 // `Depth Bound` appended. A shared length table would have accepted the sibling's
 // size and silently passed a truncated message.
 func TestSnapshotBeginLengthIsFeedSpecific(t *testing.T) {
+	// The literal 3 is inert here: the TypeSnapshotBegin arm in expectedMsgLen
+	// doesn't branch on schema, so any accepted schema value gives the same
+	// answer (see TestExpectedMsgLenIsSchemaAware, which pins that for every
+	// type except InstrumentDefinition).
 	if got := expectedMsgLen(core.FeedMBP, 3, wire.TypeSnapshotBegin); got != 40 {
 		t.Fatalf("MBP SnapshotBegin length = %d, want 40", got)
 	}

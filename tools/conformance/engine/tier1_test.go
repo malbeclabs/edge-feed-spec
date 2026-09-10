@@ -548,16 +548,29 @@ func TestExpectedMsgLenIsSchemaAware(t *testing.T) {
 	if got := expectedMsgLen(core.FeedTOB, 2, wire.TypeInstrumentDef); got != 0 {
 		t.Errorf("tob schema 2 instrdef = %d, want 0", got)
 	}
-	// Every other type is schema-invariant across 1 and 3.
-	for _, typ := range []uint8{
-		wire.TypeHeartbeat, wire.TypeQuote, wire.TypeTrade, wire.TypeEndOfSession,
-		wire.TypeManifest, wire.TypeOrderAdd, wire.TypeOrderCancel, wire.TypeOrderExecute,
-		wire.TypeBatchBoundary, wire.TypeInstrReset,
-	} {
-		one := expectedMsgLen(core.FeedTOB, 1, typ)
-		three := expectedMsgLen(core.FeedTOB, 3, typ)
-		if one != three {
-			t.Errorf("type 0x%02X: schema 1 = %d, schema 3 = %d; only InstrumentDefinition may differ", typ, one, three)
+	// Every other type is schema-invariant across 1 and 3. Sweep the full uint8
+	// type space rather than hand-listing the types expectedMsgLen currently
+	// knows about: a hand-picked array stops covering a type the day someone
+	// adds a new arm to the switch, and it does so silently — the same
+	// coverage-vs-silence failure this tool exists to catch in the feeds it
+	// validates (see "Coverage vs. silence" in README.md). A type value with no
+	// arm in expectedMsgLen returns 0 for both schemas and compares equal; that
+	// is expected and asserts nothing about that type.
+	//
+	// Run per non-midpoint feed because expectedMsgLen's switch branches on
+	// feed as well as type (e.g. TypeQuote, TypeLiquidation, TypeLevelUpdate).
+	// Midpoint is excluded: it supports only schema 1, so "schema 1 vs schema
+	// 3" isn't a meaningful comparison for it.
+	for _, feed := range []core.Feed{core.FeedTOB, core.FeedMBO, core.FeedMBP} {
+		for typ := 0; typ <= 0xFF; typ++ {
+			if typ == wire.TypeInstrumentDef {
+				continue // pinned separately above: 0x02 is expected to differ.
+			}
+			one := expectedMsgLen(feed, 1, uint8(typ))
+			three := expectedMsgLen(feed, 3, uint8(typ))
+			if one != three {
+				t.Errorf("%s type 0x%02X: schema 1 = %d, schema 3 = %d; only InstrumentDefinition may differ", feed, typ, one, three)
+			}
 		}
 	}
 }
