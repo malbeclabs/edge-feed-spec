@@ -121,3 +121,18 @@ func TestInstrDefAllFieldsMBPExcludesPriceBound(t *testing.T) {
 		t.Errorf("priceBound = %d, want 0 (MBP does not read Price Bound)", bound)
 	}
 }
+
+// Default Method is a midpoint-only field: non-midpoint layouts carry
+// DefaultMethod: -1, so instrDefAllFields never reads one for them. This pins
+// the zero return directly, the other half of the exclusion tests above — a
+// zero here must mean "not carried", not "read as zero by accident".
+func TestInstrDefAllFieldsNonMidpointDefaultMethodIsZero(t *testing.T) {
+	m := instrDefMsg(t, wire.MagicMBO, 3, 130, 1, 123, 124, 2, 9)
+	_, _, method, _, ok := instrDefAllFields(core.FeedMBO, 3, m)
+	if !ok {
+		t.Fatal("schema 3 must resolve")
+	}
+	if method != 0 {
+		t.Errorf("defaultMethod = %d, want 0 (non-midpoint feeds do not carry Default Method)", method)
+	}
+}

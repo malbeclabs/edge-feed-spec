@@ -240,9 +240,15 @@ func instrDefAllFields(feed core.Feed, schema uint8, m wire.Message) (instrID ui
 		return 0, 0, 0, 0, false
 	}
 	if l.DefaultMethod >= 0 {
+		// ok discarded: safe because ManifestSeq sits at a higher body offset than
+		// DefaultMethod in every layout row, so the ManifestSeq bounds check above
+		// already proved the body reaches this offset. TestInstrDefLayoutManifestSeqIsLast
+		// pins that ordering; if a future row breaks it, that test must fail.
 		defaultMethod, _ = bodyU8At(m, l.DefaultMethod)
 	}
 	if (feed == core.FeedMBO || feed == core.FeedMidpoint) && l.PriceBound >= 0 {
+		// ok discarded: same reasoning as DefaultMethod above — ManifestSeq is
+		// always the higher offset, pinned by the same test.
 		priceBound, _ = bodyU8At(m, l.PriceBound)
 	}
 	return instrID, manifestSeq, defaultMethod, priceBound, true

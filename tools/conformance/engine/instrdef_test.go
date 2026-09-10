@@ -81,6 +81,47 @@ func TestSchema1And3DifferByFiftyBytesAfterSymbol(t *testing.T) {
 	}
 }
 
+// TestInstrDefLayoutManifestSeqIsLast pins the invariant that lets
+// instrDefAllFields discard bodyU8At's ok for DefaultMethod and PriceBound:
+// ManifestSeq sits at a higher body offset than both fields in every layout row,
+// so the ManifestSeq bounds check already proves the body is long enough to read
+// them too. If this ever fails, the discard sites in fields.go are no longer
+// safe and must go back to checking ok.
+//
+// The rows are not a hand-maintained list: a layout only matters if
+// instrDefLayoutFor can return it, so this sweeps every core.Feed against
+// schema versions 0-7 (the same pattern as TestLayoutTableAgreesWithWire below)
+// and collects whatever comes back ok. A row added to instrDefLayoutFor is
+// covered the moment it becomes reachable, with nothing else to update.
+func TestInstrDefLayoutManifestSeqIsLast(t *testing.T) {
+	seen := map[instrDefLayout]bool{}
+	for _, feed := range []core.Feed{core.FeedTOB, core.FeedMidpoint, core.FeedMBO, core.FeedMBP} {
+		for ver := uint8(0); ver < 8; ver++ {
+			l, ok := instrDefLayoutFor(feed, ver)
+			if !ok {
+				continue
+			}
+			seen[l] = true
+		}
+	}
+
+	// A sweep that silently collects nothing would pass every check below
+	// vacuously. Pin a floor so a refactor that makes instrDefLayoutFor return
+	// false everywhere fails loudly instead of passing over an empty set.
+	if len(seen) < 3 {
+		t.Fatalf("collected %d distinct layouts, want at least 3 (schema 1, schema 3, midpoint)", len(seen))
+	}
+
+	for l := range seen {
+		if l.PriceBound >= 0 && l.ManifestSeq <= l.PriceBound {
+			t.Errorf("layout (MsgLen %d): ManifestSeq (%d) must be > PriceBound (%d)", l.MsgLen, l.ManifestSeq, l.PriceBound)
+		}
+		if l.DefaultMethod >= 0 && l.ManifestSeq <= l.DefaultMethod {
+			t.Errorf("layout (MsgLen %d): ManifestSeq (%d) must be > DefaultMethod (%d)", l.MsgLen, l.ManifestSeq, l.DefaultMethod)
+		}
+	}
+}
+
 // The layout table and wire's accepted set must agree. A frame wire accepts but
 // the layout table cannot resolve would reach the field accessors with no offsets,
 // and a layout for a version wire rejects is dead code.
