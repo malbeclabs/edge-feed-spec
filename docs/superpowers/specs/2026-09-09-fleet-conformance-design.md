@@ -1,7 +1,9 @@
 # Fleet conformance: continuous validation of every edge feed in testnet and mainnet-beta
 
 **Date:** 2026-09-09
-**Status:** Design — revised three times on 2026-09-09. Third revision, after the operator thread:
+**Status:** Design — revised 2026-09-10 after the team's milestone review: §4 is rewritten around
+the existing feed registry rather than a table this design would have invented, and §4.1 adds the
+ledger-versus-registry cross-check. Revised three times on 2026-09-09. Third revision, after the operator thread:
 §7 relocates the white-box harness out of the hyperliquid repository, §8 answers the CI-first
 sequencing question, and §13 is new — the dashboard is the deliverable, and it needs an owner.
 Earlier revisions: Second revision, after operator review: §3's
@@ -227,25 +229,71 @@ than a check.
 `MulticastGroup` carries `multicast_ip` and no port. The mktdata, refdata and snapshot split is a
 convention from the reference-data spec, not onchain state.
 
-**Change.** The tool gains a `--feed-ports` flag reading a table keyed by feed code, giving the port
-for each role. **The table lives in `malbeclabs/infra`, which is private, and not in this
-repository, which is public.** See §10.
+**This already has an answer, and it is not the one two earlier drafts of this section gave.**
 
-An earlier draft embedded the table here, alongside the pinned source registry the tool already
-ships. That was wrong on disclosure grounds: a venue-keyed port table in a public repository names
-every venue in it, including any that has not announced. The code stays public because it names no
-venue. The table that names them stays private, next to the deploy configuration that already does.
+Draft one embedded a port table in this repository. Draft two moved it to `malbeclabs/infra` on
+disclosure grounds. Both were wrong, for the same reason: they invented a second source of truth for
+a fact the organisation had already decided how to publish.
 
-No ledger change and no migration across 306 accounts. A venue launch adds a row to the private
-table, reviewed in `infra`.
+**The answer is the feed registry.** Each publisher repository renders a fragment from the same
+Ansible variables that configure its running publisher, validates it offline, and publishes it to
+`s3://doublezero-install/feeds/` behind `get.doublezero.xyz`. An aggregator turns per-venue fragments
+into the one document consumers fetch:
 
-**The cost, stated.** A feed registered onchain with no registry row cannot be checked. That is a
-silent gap of exactly the kind §1.1 objects to, so it must not be silent: fleet mode counts feeds it
-discovered but could not resolve, and an alert fires on a non-zero count. Discovering an unknown
-feed is then a page, not a shrug.
+```
+https://get.doublezero.xyz/feeds/doublezero-edge-feeds-latest.json
+```
 
-Putting ports onchain is the better end state and is out of scope here. It needs a serviceability
-program change and an account migration, and it would block every layer behind it.
+`malbeclabs/binance` PR #5 built and merged the producer half; `malbeclabs/infra`'s
+`docs/plans/2026-08-30-feed-registry-aggregator-design.md` proposes the aggregator.
+
+**Fleet mode reads that aggregate.** No `--feed-ports` table, no private copy. As Andrew put it:
+Edge Connect already needs to know the UDP destination ports, and there should not be two solutions
+to one problem. A conformance checker resolving ports from somewhere other than the document
+consumers read is a checker validating a feed nobody can reach the same way.
+
+The disclosure argument in draft two is moot rather than overridden: the fragments are published to a
+world-readable CloudFront path by design, so ports are public whatever this document says. §10's rule
+still holds for *code* — the checker names no venue and stays public — but the port data was never
+this design's call to place.
+
+### 4.1 The two catalogs disagree, and nobody is checking
+
+The ledger and the feed registry describe the same feeds and are maintained by different mechanisms.
+Comparing them is a check that exists nowhere today, and the live example is in the aggregator
+design's own problem statement:
+
+> A publisher can be healthy, live and correct and still be undiscoverable, which is the state the
+> Binance USDS-M feed is in today: emitting to `233.84.178.23` on `mainnet-beta` since 2026-08-30,
+> and absent from the registry.
+
+Binance holds 31 feed accounts onchain. The aggregate holds three rows, all Kalshi, hand-written on
+2026-08-11. So a feed can be onchain, healthy and conformant, and still unreachable by any consumer
+using the documented discovery path.
+
+Fleet mode is the only component that sees both sides, because §3 already reads the ledger and §4
+now reads the aggregate. It should report the difference:
+
+- **Onchain, not in the aggregate** — published but undiscoverable. This is the Binance case, and it
+  is invisible to every other layer.
+- **In the aggregate, not onchain** — a row pointing at a feed nobody can hold an access pass for.
+- **In both, disagreeing** — the registry's group or ports differ from the `MulticastGroup` account.
+  This one is the most dangerous, because a checker following the registry would grade a different
+  stream than the ledger says the feed is.
+
+That replaces the "unresolved-feed count" the earlier draft proposed. Same purpose — a feed nobody
+configured must page rather than pass silently — but it measures the real gap instead of a gap in a
+table this design would have had to invent.
+
+**The aggregator catches what neither catalog can.** Per its design, only a central process sees
+every feed at once, so only it can catch two feeds claiming one `code`, two feeds sharing a group
+with overlapping ports, or two engines claiming one Source ID. A group and port collision crosses two
+live feeds into each other and is silent at every other layer. That is the aggregator's job, not this
+one's, and this section depends on it existing.
+
+Putting ports onchain would collapse both catalogs into one and is the better end state. It is out of
+scope here: it needs a serviceability program change and a migration across 306 accounts.
+
 
 ## 5. The testnet canary
 
@@ -436,7 +484,10 @@ private.**
 
 - **Fleet mode** (§3) is public, here. It hardcodes no venue. It reads whatever the ledger returns
   and grades it by feed type.
-- **The port table** (§4) is private, in `infra`. It is keyed by feed code, so it names venues.
+- **Port data** is public, and not because of this design: each publisher repository publishes a
+  feed registry fragment to a world-readable CloudFront path so consumers can discover its feeds
+  (§4). The rule below governs code and configuration this design places; it does not reach a
+  publication decision the organisation already made.
 - **Per-venue pcap gates** (§7) stay in the venue repositories, which are already private.
 - **Deploy configuration and alerts** stay in `infra`, where they already are.
 - **The canary** (§5) publishes recorded data under a synthetic feed code, so it names nobody.
@@ -465,6 +516,10 @@ that venue. The registry is the disclosure; this document would only be a second
 under the codename `Lashay` until the venue launched."* The retired codename is still visible today
 as the `lashay1-feed` and `lashay2-feed` accounts in the testnet ledger, which is a fair illustration
 of the Playbook's warning that codename retirement is sequenced rather than a search and replace.
+
+**Note.** The feed registry fragments (§4) publish venue-keyed feed data to a public bucket, which
+settles the practical question for ports regardless of what follows. The discussion below is about
+whether the *names* in the Source ID registry should change.
 
 **Decision: nothing is renamed.** Codenaming Hyperliquid or Binance was considered on 2026-09-09 and
 rejected. The surfaces are not comparable, and neither argues for a rename.
