@@ -495,10 +495,10 @@ func tier1Cases() []struct {
 // that either leaves the non-midpoint v3 definition at 128 bytes or changes
 // Midpoint's independent 64-byte layout with it.
 func TestInstrumentDefinitionLengthIsFeedSpecific(t *testing.T) {
-	if got := expectedMsgLen(core.FeedTOB, wire.TypeInstrumentDef); got != 130 {
+	if got := expectedMsgLen(core.FeedTOB, 3, wire.TypeInstrumentDef); got != 130 {
 		t.Fatalf("TOB InstrumentDefinition length = %d, want 130", got)
 	}
-	if got := expectedMsgLen(core.FeedMidpoint, wire.TypeInstrumentDef); got != 64 {
+	if got := expectedMsgLen(core.FeedMidpoint, 1, wire.TypeInstrumentDef); got != 64 {
 		t.Fatalf("Midpoint InstrumentDefinition length = %d, want 64", got)
 	}
 }
@@ -528,6 +528,36 @@ func TestEveryTier1RuleHasCase(t *testing.T) {
 	for _, r := range core.Rules {
 		if r.Tier == 1 && !covered[r.ID] {
 			t.Errorf("Tier-1 rule %s has no test case", r.ID)
+		}
+	}
+}
+
+func TestExpectedMsgLenIsSchemaAware(t *testing.T) {
+	// InstrumentDefinition is the only type whose length moves.
+	if got := expectedMsgLen(core.FeedTOB, 3, wire.TypeInstrumentDef); got != 130 {
+		t.Errorf("tob schema 3 instrdef = %d, want 130", got)
+	}
+	if got := expectedMsgLen(core.FeedTOB, 1, wire.TypeInstrumentDef); got != 80 {
+		t.Errorf("tob schema 1 instrdef = %d, want 80", got)
+	}
+	if got := expectedMsgLen(core.FeedMidpoint, 1, wire.TypeInstrumentDef); got != 64 {
+		t.Errorf("midpoint instrdef = %d, want 64", got)
+	}
+	// An unsupported pair returns 0, which the callers already treat as
+	// "no canonical length known" and skip. It must not fall back to 130.
+	if got := expectedMsgLen(core.FeedTOB, 2, wire.TypeInstrumentDef); got != 0 {
+		t.Errorf("tob schema 2 instrdef = %d, want 0", got)
+	}
+	// Every other type is schema-invariant across 1 and 3.
+	for _, typ := range []uint8{
+		wire.TypeHeartbeat, wire.TypeQuote, wire.TypeTrade, wire.TypeEndOfSession,
+		wire.TypeManifest, wire.TypeOrderAdd, wire.TypeOrderCancel, wire.TypeOrderExecute,
+		wire.TypeBatchBoundary, wire.TypeInstrReset,
+	} {
+		one := expectedMsgLen(core.FeedTOB, 1, typ)
+		three := expectedMsgLen(core.FeedTOB, 3, typ)
+		if one != three {
+			t.Errorf("type 0x%02X: schema 1 = %d, schema 3 = %d; only InstrumentDefinition may differ", typ, one, three)
 		}
 	}
 }

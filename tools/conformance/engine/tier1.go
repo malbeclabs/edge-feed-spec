@@ -17,18 +17,21 @@ import (
 	"github.com/malbeclabs/edge-feed-spec/tools/conformance/wire"
 )
 
-// expectedMsgLen returns the canonical wire length (including the 4-byte
-// header) for message types that have a fixed size in the current spec version.
-// Returns 0 for types that are not defined in a given feed (caller must check).
-func expectedMsgLen(feed core.Feed, typ uint8) uint8 {
+// expectedMsgLen returns the canonical wire length (including the 4-byte header)
+// for message types that have a fixed size at the given feed and schema version.
+// Returns 0 for types not defined in a feed, and for a (feed, schema) pair this
+// validator does not decode — the callers already skip a zero rather than
+// asserting a length.
+func expectedMsgLen(feed core.Feed, schema uint8, typ uint8) uint8 {
 	switch typ {
 	case wire.TypeHeartbeat:
 		return 16
 	case wire.TypeInstrumentDef:
-		if feed == core.FeedMidpoint {
-			return 64
+		l, ok := instrDefLayoutFor(feed, schema)
+		if !ok {
+			return 0
 		}
-		return 130
+		return l.MsgLen
 	case wire.TypeQuote: // 0x03: Quote (TOB) or Midpoint
 		if feed == core.FeedTOB {
 			return 60
@@ -248,7 +251,7 @@ func (e *Engine) checkTier1(f *wire.Frame, port core.Port) {
 		}
 
 		// MSG.LENGTH_PER_TYPE: message length must match the canonical fixed size.
-		if exp := expectedMsgLen(e.cfg.Feed, m.Type); exp != 0 && m.Length != exp {
+		if exp := expectedMsgLen(e.cfg.Feed, f.Header.SchemaVersion, m.Type); exp != 0 && m.Length != exp {
 			e.Emit("MSG.LENGTH_PER_TYPE", core.Violation, port, seq, ch, 0,
 				fmt.Sprintf("type 0x%02X: length %d, expected %d", m.Type, m.Length, exp))
 		}
@@ -289,7 +292,7 @@ func (e *Engine) checkTier1(f *wire.Frame, port core.Port) {
 // The length-based STRUCT_LEN_TYPE rules (Quote/Midpoint) are the exception — they
 // fire precisely on a wrong length — and are handled inside the TOB/Mid sub-checks.
 func (e *Engine) checkTier1Message(f *wire.Frame, m wire.Message, port core.Port, ch uint8, seq uint64) {
-	exp := expectedMsgLen(e.cfg.Feed, m.Type)
+	exp := expectedMsgLen(e.cfg.Feed, f.Header.SchemaVersion, m.Type)
 	lengthOK := exp == 0 || m.Length == exp
 
 	if lengthOK {

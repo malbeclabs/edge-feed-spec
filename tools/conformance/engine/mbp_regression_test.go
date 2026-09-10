@@ -58,10 +58,10 @@ func TestSnapshotPortRequiresTheFlagSet(t *testing.T) {
 // `Depth Bound` appended. A shared length table would have accepted the sibling's
 // size and silently passed a truncated message.
 func TestSnapshotBeginLengthIsFeedSpecific(t *testing.T) {
-	if got := expectedMsgLen(core.FeedMBP, wire.TypeSnapshotBegin); got != 40 {
+	if got := expectedMsgLen(core.FeedMBP, 3, wire.TypeSnapshotBegin); got != 40 {
 		t.Fatalf("MBP SnapshotBegin length = %d, want 40", got)
 	}
-	if got := expectedMsgLen(core.FeedMBO, wire.TypeSnapshotBegin); got != 36 {
+	if got := expectedMsgLen(core.FeedMBO, 3, wire.TypeSnapshotBegin); got != 36 {
 		t.Fatalf("MBO SnapshotBegin length = %d, want 36", got)
 	}
 }
