@@ -231,6 +231,17 @@ func tier1Cases() []struct {
 			good:  wb.Frame(wire.MagicMid).Schema(1).Msg(wire.TypeHeartbeat, 16, heartbeatBody(0)).Bytes(),
 		},
 		{
+			// Schema 1 is decodable and behind: the feed's spec line is at 3, so a
+			// publisher still emitting 1 is readable and stale. This is the signal
+			// that replaces what rejecting the older MAJOR used to give for free.
+			rule:  "FRAME.SCHEMA_VERSION_SUPERSEDED",
+			feed:  core.FeedTOB,
+			magic: wire.MagicTOB,
+			port:  core.PortMktData,
+			bad:   wb.Frame(wire.MagicTOB).Schema(1).Msg(wire.TypeHeartbeat, 16, heartbeatBody(0)).Bytes(),
+			good:  wb.Frame(wire.MagicTOB).Schema(3).Msg(wire.TypeHeartbeat, 16, heartbeatBody(0)).Bytes(),
+		},
+		{
 			rule:  "FRAME.MSG_COUNT_RANGE",
 			feed:  core.FeedTOB,
 			magic: wire.MagicTOB,

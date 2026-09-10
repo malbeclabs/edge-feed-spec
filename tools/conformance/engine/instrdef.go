@@ -10,6 +10,12 @@ import "github.com/malbeclabs/edge-feed-spec/tools/conformance/core"
 // The InstrumentDefinition layout is the only part of the wire format that moves
 // between the schema versions this tool accepts, which is why one table covers
 // multi-schema support for the whole engine.
+//
+// **The table says where a field is, not whether a feed reads it.** A row gives
+// the offsets for its (feed, schema) pair; which of those fields a given feed
+// actually consumes is the caller's decision, in instrDefAllFields. So a valid
+// offset here is not a promise that anything reads it — PriceBound is 123 for
+// every non-midpoint feed, and only MBO consumes it.
 type instrDefLayout struct {
 	MsgLen        uint8 // canonical Message Length, header included
 	InstrumentID  int
@@ -23,7 +29,7 @@ type instrDefLayout struct {
 //
 // **Schema 1's layout is not in the current spec files.** The 80-byte
 // InstrumentDefinition was retired by the 2.0.0 and 3.0.0 MAJOR releases, and
-// tools/../top-of-book/spec.md now documents only the 130-byte form. These offsets
+// top-of-book/spec.md now documents only the 130-byte form. These offsets
 // are transcribed from tag `top-of-book/v1.0.0`, section "0x02
 // InstrumentDefinition (80 bytes)". Verify against that tag, not against HEAD.
 //

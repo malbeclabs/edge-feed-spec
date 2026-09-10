@@ -40,6 +40,29 @@ func SupportedSchemas(magic uint16) []uint8 {
 	return []uint8{1, 3}
 }
 
+// CurrentSchema returns the Schema Version a publisher of this feed SHOULD be
+// emitting today: the MAJOR of the feed's current spec line.
+//
+// Distinct from SupportedSchemas on purpose. Supported is what this validator can
+// decode; current is what the spec says to emit. A feed on a supported-but-not-
+// current version is readable and behind, and that is a fact an operator wants
+// reported rather than silently tolerated — see FRAME.SCHEMA_VERSION_SUPERSEDED.
+func CurrentSchema(magic uint16) uint8 {
+	if magic == MagicMid {
+		return 1
+	}
+	return 3
+}
+
+// DefaultSchema is the version hand-built test fixtures carry unless they forge
+// another. It is CurrentSchema by definition: a fixture with no opinion about its
+// version should look like a conformant publisher of today's spec.
+//
+// Named rather than derived from SupportedSchemas' ordering, because indexing that
+// slice makes every fixture in the suite change meaning the day a version is
+// appended or the slice is reordered — with no compile error and no failing test.
+func DefaultSchema(magic uint16) uint8 { return CurrentSchema(magic) }
+
 // SchemaSupported reports whether this validator decodes ver for the feed
 // identified by magic.
 func SchemaSupported(magic uint16, ver uint8) bool {

@@ -34,6 +34,12 @@ func instrDefMsg(t *testing.T, magic uint16, schema uint8, msgLen uint8,
 
 	f, fs := wire.Decode(raw, magic)
 	for _, sf := range fs {
+		// A deliberately schema-1 fixture is supported and behind, so the decoder
+		// reports FRAME.SCHEMA_VERSION_SUPERSEDED. That is the fixture being what it
+		// says it is, not the fixture being malformed.
+		if sf.RuleID == "FRAME.SCHEMA_VERSION_SUPERSEDED" {
+			continue
+		}
 		if !sf.Transport {
 			t.Fatalf("fixture frame is not clean: %s %s", sf.RuleID, sf.Detail)
 		}
@@ -134,5 +140,34 @@ func TestInstrDefAllFieldsNonMidpointDefaultMethodIsZero(t *testing.T) {
 	}
 	if method != 0 {
 		t.Errorf("defaultMethod = %d, want 0 (non-midpoint feeds do not carry Default Method)", method)
+	}
+}
+
+// A body that is too LONG for the resolved layout must not be read as data.
+//
+// The case is the one VERSIONING.md names: "Publishers MUST NOT emit a Schema
+// Version other than the one their frames actually conform to." A publisher
+// emitting the 130-byte schema-3 InstrumentDefinition while leaving a stale
+// Schema Version = 1 in the frame header resolves to instrDefSchema1, whose
+// Manifest Seq offset of 74 sits well inside a 126-byte body — in the middle of
+// Symbol. Every bounds check passes and a fabricated Manifest Seq reaches
+// onInstrumentDef, which then reports STALE_SEQ_TAG_AFTER_BUMP (a must rule)
+// against a publisher whose only real fault is the header byte.
+//
+// Bounds-checking the offsets is not enough; the length has to match exactly.
+func TestInstrDefAllFieldsRejectsOversizedBody(t *testing.T) {
+	// A schema-3-sized message (130) carrying a schema-1 header claim.
+	m := instrDefMsg(t, wire.MagicMBO, 1, 130, 0x11223344, 123, 124, 1, 0x0777)
+	if _, _, _, _, ok := instrDefAllFields(core.FeedMBO, 1, m); ok {
+		t.Fatal("a 130-byte body under the 80-byte schema-1 layout must not resolve; " +
+			"bounds checks pass and Manifest Seq is read out of the middle of Symbol")
+	}
+}
+
+// The mirror: a body shorter than the layout was already rejected, and stays so.
+func TestInstrDefAllFieldsRejectsUndersizedBody(t *testing.T) {
+	m := instrDefMsg(t, wire.MagicMBO, 3, 80, 0x11223344, 73, 74, 1, 0x0777)
+	if _, _, _, _, ok := instrDefAllFields(core.FeedMBO, 3, m); ok {
+		t.Fatal("an 80-byte body under the 130-byte schema-3 layout must not resolve")
 	}
 }

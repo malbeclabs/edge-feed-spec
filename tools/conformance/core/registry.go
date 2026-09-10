@@ -32,6 +32,7 @@ var Rules = []RuleMeta{
 	// --- Frame & message structure (shared header rules apply to all feeds by magic) ---
 	{"FRAME.MAGIC_MISMATCH", Must, 1, StateNone, allFeeds, false},
 	{"FRAME.SCHEMA_VERSION", Info, 1, StateNone, allFeeds, false},
+	{"FRAME.SCHEMA_VERSION_SUPERSEDED", Info, 1, StateNone, allFeeds, false},
 	{"FRAME.MSG_COUNT_RANGE", Must, 1, StateNone, allFeeds, false},
 	{"FRAME.LENGTH_CONSISTENCY", Must, 1, StateNone, allFeeds, false},
 	{"MSG.LENGTH_PER_TYPE", Must, 1, StateNone, allFeeds, false},

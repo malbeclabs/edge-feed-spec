@@ -231,6 +231,18 @@ func instrDefAllFields(feed core.Feed, schema uint8, m wire.Message) (instrID ui
 	if !ok {
 		return 0, 0, 0, 0, false
 	}
+	// Exact length, not just "long enough". A body SHORTER than the layout fails
+	// the bounds checks below, but a LONGER one passes every one of them and is
+	// read as data — the case VERSIONING.md names when it says a publisher MUST
+	// NOT emit a Schema Version other than the one its frames conform to. A
+	// 130-byte schema-3 definition tagged Schema Version = 1 resolves to the
+	// 80-byte layout, and Manifest Seq at body 74 is read out of the middle of
+	// Symbol. checkTier1 has already reported the real fault as
+	// MSG.LENGTH_PER_TYPE; extracting anyway only adds fabricated must-severity
+	// findings on top of it.
+	if int(m.Length) != int(l.MsgLen) {
+		return 0, 0, 0, 0, false
+	}
 	instrID, ok = bodyU32LEAt(m, l.InstrumentID)
 	if !ok {
 		return 0, 0, 0, 0, false

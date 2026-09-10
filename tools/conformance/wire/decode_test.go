@@ -132,3 +132,48 @@ func hasTransport(fs []wire.StructFinding, id string) bool {
 	}
 	return false
 }
+
+// A supported-but-not-current MAJOR must be reported, not silently tolerated.
+//
+// Accepting a set of versions is what lets one binary grade the whole fleet, and
+// it is also what removes the signal that used to come for free from rejecting an
+// older one. On the bundled schema-1 market-by-price capture, losing
+// FRAME.SCHEMA_VERSION was the entire observable difference between the old
+// single-schema binary and this one — a net loss of the version-drift view. The
+// per-venue build pins deleted alongside this change were themselves the record
+// of who was behind, so without this rule nothing in the fleet says so.
+func TestSupersededSchemaIsReported(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		magic uint16
+		ver   uint8
+		want  string // "" = neither schema rule fires
+	}{
+		{"tob at current 3 is silent", wire.MagicTOB, 3, ""},
+		{"tob at supported-but-old 1", wire.MagicTOB, 1, "FRAME.SCHEMA_VERSION_SUPERSEDED"},
+		{"mbp at supported-but-old 1", wire.MagicMBP, 1, "FRAME.SCHEMA_VERSION_SUPERSEDED"},
+		{"midpoint at its own current 1 is silent", wire.MagicMid, 1, ""},
+		{"tob at unsupported 2 is the other rule", wire.MagicTOB, 2, "FRAME.SCHEMA_VERSION"},
+		{"tob at unsupported 4 is the other rule", wire.MagicTOB, 4, "FRAME.SCHEMA_VERSION"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := wb.Frame(tc.magic).Schema(tc.ver).Channel(0).Seq(1).
+				Msg(wire.TypeHeartbeat, 16, func(b *wb.Body) { b.U8(0).Pad(11) }).
+				Bytes()
+			_, fs := wire.Decode(raw, tc.magic)
+
+			var got string
+			for _, f := range fs {
+				if f.RuleID == "FRAME.SCHEMA_VERSION" || f.RuleID == "FRAME.SCHEMA_VERSION_SUPERSEDED" {
+					if got != "" {
+						t.Fatalf("both schema rules fired (%s and %s); they are mutually exclusive", got, f.RuleID)
+					}
+					got = f.RuleID
+				}
+			}
+			if got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

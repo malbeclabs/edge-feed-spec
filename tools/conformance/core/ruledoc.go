@@ -76,6 +76,7 @@ var ruleDocs = map[string]RuleDoc{
 	// VERSIONING.md, "One documented exception"); keep the set named here in
 	// sync with wire.SupportedSchemas so the two cannot drift apart.
 	"FRAME.SCHEMA_VERSION":                         {"Schema Version is one this validator decodes for the feed: 1 and 3, except midpoint, which accepts only 1; any other value is flagged."},
+	"FRAME.SCHEMA_VERSION_SUPERSEDED":              {"Schema Version is one this validator decodes but not the feed spec's current MAJOR; the publisher is readable and behind."},
 	"FRAME.MSG_COUNT_RANGE":                        {"Message Count is 1–255 and equals the messages actually present in the frame."},
 	"FRAME.LENGTH_CONSISTENCY":                     {"Declared Frame Length is 24–1232 bytes and equals 24 + the sum of contained message lengths."},
 	"FRAME.SEQ_DUP_DIVERGENT":                      {"A frame re-using a port sequence number carries identical payload; a divergent duplicate is non-conformant."},
