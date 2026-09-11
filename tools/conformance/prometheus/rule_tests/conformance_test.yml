@@ -94,3 +94,23 @@ tests:
             exp_annotations:
               summary: "Conformance coverage loss on mbp feed"
               description: "Rule ORACLE became unverifiable (reason=loss) on feed mbp. Check feed health and instrument definitions.\n"
+
+  # Loss the *recorder* admits to counts the same way. It reaches a scrape only
+  # from a replay run with --metrics-addr, and the alert set must not omit a cause
+  # that means something is wrong upstream.
+  - interval: 1m
+    input_series:
+      - series: 'dz_conformance_unverifiable_total{feed="mbp",rule_id="ORACLE",reason="capture_loss"}'
+        values: "0+10x30"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: ConformanceCoverageLoss
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              feed: mbp
+              rule_id: ORACLE
+              reason: capture_loss
+            exp_annotations:
+              summary: "Conformance coverage loss on mbp feed"
+              description: "Rule ORACLE became unverifiable (reason=capture_loss) on feed mbp. The recorder admits it failed to record the datagrams, so the coverage was lost between the wire and the archive: check the recorder host and its own drop counters, not the feed.\n"

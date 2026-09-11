@@ -39,6 +39,17 @@ type Meta struct {
 	// reconstruct 0 or 1 from the frames it did read, so without this a run that died
 	// on a truncated capture reads as a clean pass.
 	ReadErr error
+	// CaptureDrops is what the input admits it failed to record: the sum of the
+	// pcapng per-packet epb_dropcount options over the replayed file, and 0 for any
+	// input that has nowhere to say it (a legacy pcap, a live socket).
+	//
+	// It is in the report because it is the number that says how much of a clean
+	// result to believe. Findings in a window the capture lost datagrams from are
+	// downgraded to `unverifiable`/`capture_loss` rather than graded, so the
+	// violation count is never inflated by the recorder's own drops — but the
+	// coverage behind an empty report is lower than it looks, and reading the
+	// figure out of the segment manifest by hand was the only check there was.
+	CaptureDrops uint64
 }
 
 // JSONReport marshals the aggregator's per-rule status counts to the given file path.
@@ -71,12 +82,14 @@ func JSONReport(agg *Aggregator, path string, meta Meta) error {
 	}
 
 	report := struct {
-		Version   string             `json:"version"`
-		Commit    string             `json:"commit"`
-		Strict    bool               `json:"strict"`
-		ReadError string             `json:"read_error"`
-		Rules     []ruleStatusCounts `json:"rules"`
-	}{Version: meta.Version, Commit: meta.Commit, Strict: meta.Strict, ReadError: readErr, Rules: rows}
+		Version      string             `json:"version"`
+		Commit       string             `json:"commit"`
+		Strict       bool               `json:"strict"`
+		ReadError    string             `json:"read_error"`
+		CaptureDrops uint64             `json:"capture_drops"`
+		Rules        []ruleStatusCounts `json:"rules"`
+	}{Version: meta.Version, Commit: meta.Commit, Strict: meta.Strict, ReadError: readErr,
+		CaptureDrops: meta.CaptureDrops, Rules: rows}
 
 	data, err := json.MarshalIndent(report, "", "  ")
 	if err != nil {

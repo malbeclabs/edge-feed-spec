@@ -47,6 +47,13 @@ type intakeTuple struct {
 	frame          *wire.Frame
 	port           core.Port
 	structFindings []wire.StructFinding
+	// captureEpoch is Engine.captureLossEpoch as it stood when this frame
+	// arrived. Stamped at intake and not read until the frame is classified,
+	// because the reorder buffer separates the two: an admission that arrives
+	// while a frame is buffered would otherwise be attributed to the frame ahead
+	// of it in the window, which arrived before the drop and cannot be the one
+	// the drop explains.
+	captureEpoch uint64
 }
 
 // bufferItem wraps an intakeTuple for the per-series min-heap.
@@ -135,6 +142,25 @@ type portTracker struct {
 	// dirtyWindow is set when a gap was declared while the reorder window was
 	// non-empty (consumed by Task 18 gate.go).
 	dirtyWindow bool
+	// captureDirty is set when the *capture* admitted losing datagrams while this
+	// instance's window was open (see Engine.ObserveCaptureLoss). It never gates
+	// anything on its own: the taint that stops a gated rule from grading a
+	// Violation is dirtyWindow, and this only names the owner of the loss so the
+	// finding reports capture_loss rather than loss.
+	//
+	// Shorter-lived than dirtyWindow, and it has to be. dirtyWindow answers "could
+	// a gap explain this?", which stays true for the era once a gap is seen;
+	// this answers "is the recorder's admitted drop what that gap was?", and the
+	// drop can only be the answer for the first frame after it. classify
+	// recomputes it per frame from captureEpochSeen, so a network gap later in
+	// the same era is reported as the network's. ObserveCaptureLoss also sets it
+	// directly, for the end-of-run findings that no further frame follows.
+	captureDirty bool
+	// captureEpochSeen is the arrival-time capture-loss epoch of the last frame
+	// that advanced this series (intakeTuple.captureEpoch). A frame stamped
+	// higher arrived after an admission this series has not yet been given a gap
+	// for; a frame stamped equal has already spent it.
+	captureEpochSeen uint64
 	// lastHbSendTS is the SendTS of this instance's most-recent Heartbeat, the
 	// baseline for HEARTBEAT.CADENCE. Per instance because each publisher
 	// heartbeats on its own schedule: one baseline for a port let one arm's
@@ -268,6 +294,7 @@ func (t *portTracker) advanceEra(newEra uint8) {
 	// prevents stale gap signals from a prior era from suppressing violations
 	// that are clearly observable in the new era.
 	t.dirtyWindow = false
+	t.captureDirty = false
 }
 
 // enqueueResult is the structured result of enqueue. The caller must process
