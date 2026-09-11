@@ -4,7 +4,7 @@ The DoubleZero Market-by-Order Feed is a wire format for market-by-order (MBO) b
 
 This is a sibling protocol to the DoubleZero Top-of-Book & Trades Feed and the DoubleZero Midpoint Feed, not a layer on top. Where the top-of-book feed carries two-sided BBO data and trades and the midpoint feed carries a single derived price per instrument, this feed carries the full resting-order population of each instrument, plus a continuous in-band snapshot mechanism that lets subscribers bootstrap and recover from packet loss over multicast alone.
 
-This document specifies version **3.2.0**: the frame header, application message header, the message types sufficient to operate a working publisher and subscriber, and the sequence-number-anchored snapshot/delta recovery model that is the core of the design.
+This document specifies version **3.3.0**: the frame header, application message header, the message types sufficient to operate a working publisher and subscriber, and the sequence-number-anchored snapshot/delta recovery model that is the core of the design.
 
 ---
 
@@ -218,6 +218,7 @@ Maps a numeric Instrument ID to human-readable metadata. Carried on the `refdata
 | 2 | Prediction Binary |
 | 3 | Prediction Scalar |
 | 4 | Prediction Categorical |
+| 5 | Perpetual Future |
 
 Publishers SHOULD use the most accurate value available; receivers MUST accept any `u8` value and treat unknown values as `0` (Unknown).
 
@@ -781,7 +782,7 @@ The format is fixed-size and binary; parsing requires no allocation, no string h
 
 ## Versioning and Forward Compatibility
 
-This document is version **3.2.0**, versioned independently of the sibling specs. The Schema Version byte in the frame header is `3` and equals this spec's MAJOR version, so it stays `3` for every `3.x.y` release and changes only on a breaking wire change. See the [Versioning Policy](../VERSIONING.md) for the full rule, the change classification, and the tag scheme.
+This document is version **3.3.0**, versioned independently of the sibling specs. The Schema Version byte in the frame header is `3` and equals this spec's MAJOR version, so it stays `3` for every `3.x.y` release and changes only on a breaking wire change. See the [Versioning Policy](../VERSIONING.md) for the full rule, the change classification, and the tag scheme.
 
 Future `3.x` versions of this specification MAY, without a Schema Version bump:
 
@@ -798,6 +799,8 @@ Existing field layouts and semantics will not change within the `3.x` line. The 
 A subscriber MUST reject a frame whose Schema Version it does not implement rather than attempt a best-effort parse.
 
 ### Changes
+
+**3.3.0** — added Asset Class value `5` (Perpetual Future) to the value table, which this spec omitted while top-of-book and market-by-price carried it. Additive: receivers already MUST accept any `u8` and treat unknown values as `0`. No wire-layout change; Schema Version remains `3`.
 
 **3.2.0** — scoped the snapshot non-interleaving rule to the channel rather than the `snapshot` port, adopting the market-by-price wording and matching what the conformance checker has always enforced. This relaxes a publisher constraint and adds a subscriber one: a subscriber MUST now track the open snapshot group per `Channel ID` rather than per port, so a subscriber built to `3.1.0` reports false interleaving against a conformant sharded publisher. It is therefore a `MINOR` release rather than editorial. No wire-layout change; Schema Version remains `3`.
 
