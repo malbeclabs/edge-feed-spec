@@ -73,6 +73,26 @@ Within a `MAJOR` line:
 
 Across a `MAJOR` boundary there is no promise at all. A subscriber MUST validate `Schema Version` and discard frames carrying a version it does not implement, rather than attempting a best-effort parse. A `Schema Version` bump is the explicit signal that field offsets can no longer be trusted.
 
+### One documented exception: the conformance validator
+
+`tools/conformance` (`dz-conformance`) decodes more than one `MAJOR` version per
+feed, and is the only implementation permitted to. It is a validator, not a
+consumer: its job is to grade whatever a publisher emits, and the fleet it grades
+runs several `MAJOR` versions at once. A single-version build would need one
+pinned binary per venue, and a wrong pin misreads field offsets and reports a
+`must` violation on every affected message — a false alarm caused by the checker,
+which is worse than the drift it exists to catch.
+
+The versions it accepts are `wire.SupportedSchemas`, and the per-version field
+offsets are `tools/conformance/engine/instrdef.go`. It accepts only versions with a layout
+transcribed from a released tag; it rejects every other version exactly as this
+section requires, including `2`, which no publisher deployed.
+
+This exception does not extend to production consumers. A subscriber decoding
+market data MUST still reject a `Schema Version` it does not implement, because a
+best-effort parse of a moved field yields plausible wrong prices rather than an
+error.
+
 Publishers MUST NOT emit a `Schema Version` other than the one their frames actually conform to.
 
 ---

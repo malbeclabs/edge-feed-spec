@@ -783,7 +783,13 @@ func (e *Engine) processRefdataFrame(f *wire.Frame, pt *portTracker) {
 			e.refdata.onManifestSummary(ch, valid, seq, count, sendTS, dirty, frameSeq)
 
 		case wire.TypeInstrumentDef:
-			instrID, manifestSeq, defaultMethod, priceBound := instrDefAllFields(e.cfg.Feed, m)
+			instrID, manifestSeq, defaultMethod, priceBound, ok := instrDefAllFields(e.cfg.Feed, f.Header.SchemaVersion, m)
+			if !ok {
+				// No layout for this (feed, schema), or the body is short. The frame
+				// already raised FRAME.SCHEMA_VERSION or MSG.LENGTH_PER_TYPE; reading
+				// on would grade zero values as published data.
+				continue
+			}
 			e.refdata.onInstrumentDef(ch, instrID, manifestSeq, defaultMethod, priceBound, sendTS, dirty, frameSeq)
 		}
 	}

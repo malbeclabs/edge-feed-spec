@@ -677,5 +677,65 @@ func TestGoldenCommittedFixtures(t *testing.T) {
 	}
 }
 
+// TestSchema1TOBStreamRaisesNoMustViolation runs a hand-built schema-1 TOB
+// stream — two InstrumentDefinition (0x02) frames in the retired 80-byte
+// schema-1 layout — through the real decoder and engine together.
+//
+// Before the per-schema layout table (Task 2), a binary built for schema 3
+// read a 130-byte InstrumentDefinition out of this 80-byte message and fired
+// MSG.LENGTH_PER_TYPE — a must rule — on every definition, which is why a
+// fleet grading both a schema-1 and a schema-3 venue needed two separate
+// pinned builds. This test is the assertion that no longer happens: no
+// manifest is sent (so the refdata state machine stays not-valid and stays
+// silent), isolating the check to the Tier-1 length rule the bug lived in.
+//
+// The message body field layout below is checked against engine/instrdef.go's
+// instrDefSchema1 (PriceBound at body offset 73, ManifestSeq at 74, MsgLen 80)
+// and against the tagged spec top-of-book/v1.0.0 "0x02 InstrumentDefinition
+// (80 bytes)"; both agree with it byte for byte.
+func TestSchema1TOBStreamRaisesNoMustViolation(t *testing.T) {
+	gc := &goldenCapture{}
+	eng := engine.New(goldenEngineConfig(core.FeedTOB), gc)
+
+	def := func(instrID uint32, manifestSeq uint16) []byte {
+		return wb.Frame(wire.MagicTOB).Schema(1).Channel(0).Seq(uint64(instrID)).
+			Msg(wire.TypeInstrumentDef, 80, func(b *wb.Body) {
+				b.U32(instrID)         // body 0..3   Instrument ID
+				b.Char("BTC-USDT", 16) // body 4..19  Symbol char[16]
+				b.Char("BTC", 8)       // body 20..27 Leg1
+				b.Char("USDT", 8)      // body 28..35 Leg2
+				b.U8(1)                // body 36     Asset Class = Crypto Spot
+				b.U8(0xFE)             // body 37     Price Exponent = -2
+				b.U8(0xFE)             // body 38     Qty Exponent = -2
+				b.U8(0)                // body 39     Market Model
+				b.U64(100)             // body 40..47 Tick Size
+				b.U64(1)               // body 48..55 Lot Size
+				b.U64(0)               // body 56..63 Contract Value
+				b.U64(0)               // body 64..71 Expiry
+				b.U8(0)                // body 72     Settle Type
+				b.U8(0)                // body 73     Price Bound
+				b.U16(manifestSeq)     // body 74..75 Manifest Seq
+			}).Bytes()
+	}
+
+	for _, raw := range [][]byte{def(1, 1), def(2, 1)} {
+		f, sf := wire.Decode(raw, wire.MagicTOB)
+		for _, s := range sf {
+			if s.RuleID == "FRAME.SCHEMA_VERSION" || s.RuleID == "FRAME.LENGTH_CONSISTENCY" {
+				t.Fatalf("clean schema-1 frame raised %s: %s", s.RuleID, s.Detail)
+			}
+		}
+		eng.Process(testSrc, f, core.PortRefData, sf)
+	}
+	eng.Flush()
+	eng.EndRun()
+
+	for _, fi := range gc.findings {
+		if fi.Severity == core.Must && fi.Status == core.Violation {
+			t.Errorf("must-rule violation on a clean schema-1 stream: %s %s", fi.RuleID, fi.Detail)
+		}
+	}
+}
+
 // Ensure goldenCapture satisfies report.Reporter at compile time.
 var _ report.Reporter = (*goldenCapture)(nil)

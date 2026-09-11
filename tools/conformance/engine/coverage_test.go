@@ -26,14 +26,15 @@ import (
 // Value: test function or descriptive reference (for human reference only).
 var testedRules = map[string]string{
 	// --- Frame & message structure ---
-	"FRAME.MAGIC_MISMATCH":           "TestTier1Rules/FRAME.MAGIC_MISMATCH (tier1_test.go)",
-	"FRAME.SCHEMA_VERSION":           "TestTier1Rules/FRAME.SCHEMA_VERSION (tier1_test.go)",
-	"FRAME.MSG_COUNT_RANGE":          "TestTier1Rules/FRAME.MSG_COUNT_RANGE (tier1_test.go)",
-	"FRAME.LENGTH_CONSISTENCY":       "TestTier1Rules/FRAME.LENGTH_CONSISTENCY (tier1_test.go)",
-	"MSG.LENGTH_PER_TYPE":            "TestTier1Rules/MSG.LENGTH_PER_TYPE (tier1_test.go)",
-	"MSG.WRONG_PORT_PLACEMENT":       "TestTier1Rules/MSG.WRONG_PORT_PLACEMENT (tier1_test.go)",
-	"MSG.UNKNOWN_TYPE_SKIPPED":       "TestTier1Rules/MSG.UNKNOWN_TYPE_SKIPPED (tier1_test.go)",
-	"MSG.SNAPSHOT_FLAG_MATCHES_PORT": "TestTier1Rules/MSG.SNAPSHOT_FLAG_MATCHES_PORT (tier1_test.go)",
+	"FRAME.MAGIC_MISMATCH":            "TestTier1Rules/FRAME.MAGIC_MISMATCH (tier1_test.go)",
+	"FRAME.SCHEMA_VERSION":            "TestTier1Rules/FRAME.SCHEMA_VERSION (tier1_test.go)",
+	"FRAME.SCHEMA_VERSION_SUPERSEDED": "TestSupersededSchemaIsReported (wire/decode_test.go)",
+	"FRAME.MSG_COUNT_RANGE":           "TestTier1Rules/FRAME.MSG_COUNT_RANGE (tier1_test.go)",
+	"FRAME.LENGTH_CONSISTENCY":        "TestTier1Rules/FRAME.LENGTH_CONSISTENCY (tier1_test.go)",
+	"MSG.LENGTH_PER_TYPE":             "TestTier1Rules/MSG.LENGTH_PER_TYPE (tier1_test.go)",
+	"MSG.WRONG_PORT_PLACEMENT":        "TestTier1Rules/MSG.WRONG_PORT_PLACEMENT (tier1_test.go)",
+	"MSG.UNKNOWN_TYPE_SKIPPED":        "TestTier1Rules/MSG.UNKNOWN_TYPE_SKIPPED (tier1_test.go)",
+	"MSG.SNAPSHOT_FLAG_MATCHES_PORT":  "TestTier1Rules/MSG.SNAPSHOT_FLAG_MATCHES_PORT (tier1_test.go)",
 	// --- Market-by-price consumer ---
 	"MBP.DELTA.PERINSTR_DENSITY":                   "TestMBPPerInstrDensity (mbp_consumer_test.go)",
 	"MBP.DELTA.PERINSTR_NO_SNAPSHOT_RESET":         "TestMBPPerInstrSeqSurvivesASnapshotBoundary (mbp_consumer_test.go)",

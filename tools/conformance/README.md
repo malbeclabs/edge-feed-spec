@@ -1,6 +1,6 @@
 # dz-conformance
 
-A conformance subscriber for edge-feed publishers. Subscribes to one feed (TOB, Midpoint, MBO, or MBP) — live multicast or pcap replay — validates the feed against its subset of an 88-rule catalog drawn from the [edge-feed-spec](../../) (this repo), and returns a CI-friendly exit code. The subset is 31 to 68 rules depending on the feed — see [Rule catalog](#rule-catalog).
+A conformance subscriber for edge-feed publishers. Subscribes to one feed (TOB, Midpoint, MBO, or MBP) — live multicast or pcap replay — validates the feed against its subset of an 89-rule catalog drawn from the [edge-feed-spec](../../) (this repo), and returns a CI-friendly exit code. The subset is 32 to 69 rules depending on the feed — see [Rule catalog](#rule-catalog).
 
 Unlike a production consumer — which is tolerant of publisher quirks (skipping unknown types, ignoring reserved bits, recovering silently from loss) — this tool is **strict by design**: it flags every structural, sequence, and semantic violation its catalog covers, and never excuses one as a quirk. `core/registry.go` is the in-code source of truth for the full rule set.
 
@@ -102,16 +102,16 @@ For the MBO feed the engine reconstructs the order book independently from both 
 
 ## Rule catalog
 
-The full 88-rule catalog — rule ID, severity, tier, applicable feeds — is defined in `core/registry.go` (the in-code source of truth), with one-line per-rule summaries in `core/ruledoc.go`. `core/registry_test.go` and `core/ruledoc_test.go` guarantee the set stays complete and documented.
+The full 89-rule catalog — rule ID, severity, tier, applicable feeds — is defined in `core/registry.go` (the in-code source of truth), with one-line per-rule summaries in `core/ruledoc.go`. `core/registry_test.go` and `core/ruledoc_test.go` guarantee the set stays complete and documented.
 
-**No feed sees all 88.** Each rule carries the feeds it applies to, and a run reports only its own feed's subset — `rule_info` publishes exactly that subset at startup, so the denominator is visible before a frame arrives. The split today:
+**No feed sees all 89.** Each rule carries the feeds it applies to, and a run reports only its own feed's subset — `rule_info` publishes exactly that subset at startup, so the denominator is visible before a frame arrives. The split today:
 
 | Feed | Feed-specific rules | Shared rules | Total |
 |------|--------------------:|-------------:|------:|
-| `mbo` | 43 | 25 | 68 |
-| `tob` | 8 | 25 | 33 |
-| `mbp` | 7 | 25 | 32 |
-| `midpoint` | 6 | 25 | 31 |
+| `mbo` | 44 | 25 | 69 |
+| `tob` | 9 | 25 | 34 |
+| `mbp` | 8 | 25 | 33 |
+| `midpoint` | 7 | 25 | 32 |
 
 `TestFeedRuleCounts` pins these numbers against `core.Rules`, so a new feed-scoped rule fails the build until this table is updated with it. The 25 shared rules are the frame/message structural set and the reference-data supplement, which every feed carries identically; `RESET.ANCHOR_SEQ_IS_CURRENT_FRAME` is counted feed-specific for both `mbo` and `mbp`, which is where the totals overlap. The market-by-order asymmetry is real rather than an artifact of counting: that feed's rules were written first and its per-order state model admits checks a price-aggregated book has no analogue for (dangling order IDs, overfill, duplicate live adds). What the gap does *not* mean is that the missing market-by-price checks are unwritable — see [Known limitations](#known-limitations).
 
@@ -139,7 +139,7 @@ echo "exit: $?"   # 1
 
 `nonconformant_mbp.pcap` is different in kind: a real capture from a live publisher on venue data, on ports `31000`/`41000`/`51000`, taken **before** its defects were fixed. It carries oversized frames and the snapshot flag set on refdata, so it exits 1 by design — it is a regression fixture for the market-by-price rules, not a conformant sample. It is also two orders of magnitude larger than the hand-built captures, which is the cost of covering a feed whose snapshot stream is most of its bytes. That cost bought something: three defects in the consumer survived the synthetic tests and were found only by running against this data.
 
-It was captured before the market-by-price spec went to `2.0.0`, so it carries `Schema Version = 1` and now also reports `FRAME.SCHEMA_VERSION` on every frame. That is correct — it is a `1.x` capture being judged against the current `3.x` rules — and it does not diminish the fixture's value: the original defects still fire, and the snapshot oracle still reaches the same pass counts. Read past the schema rows when using it.
+It was captured before the market-by-price spec went to `2.0.0`, so it carries `Schema Version = 1` and reports `FRAME.SCHEMA_VERSION_SUPERSEDED` (info) on every frame — 2001 of them. That is correct and it is the point: schema 1 is a version this validator decodes, so the capture is graded properly against the `1.x` layout rather than misread against `3.x`, and the rule records that the publisher is behind. It does not diminish the fixture's value: the original defects still fire (`MSG.SNAPSHOT_FLAG_MATCHES_PORT` 6, `FRAME.LENGTH_CONSISTENCY` 619) and the snapshot oracle still reaches the same pass counts. Read past the schema rows when using it.
 
 ```bash
 # Exits 1: the capture's known defects are reported.

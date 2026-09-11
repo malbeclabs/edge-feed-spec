@@ -204,63 +204,88 @@ func manifestFields(m wire.Message) (valid uint8, seq uint16, count uint32) {
 	return manifestValid(m), manifestSeqField(m), manifestCount(m)
 }
 
-// --- InstrumentDefinition (0x02) — feed-dependent layout ---
+// --- InstrumentDefinition (0x02) — feed- and schema-dependent layout ---
 //
-// Instrument ID is at spec offset 4 → Body[0] for all feeds.
+// Every offset lives in instrdef.go, keyed by (feed, schema). Nothing here
+// hardcodes one, because the whole point of that table is that a reader looking
+// for "where is Manifest Seq" finds one answer.
 //
-// Manifest Seq placement is feed-specific:
-//
-//	TOB/MBO: 130-byte message; spec offset 128 → Body[124]
-//	Midpoint: 64-byte message; spec offset 60 → Body[56]
-//
-// Midpoint InstrumentDefinition additional fields (64-byte message):
-//
-//	Default Method at spec offset 42 → Body[38]
-//	Price Bound    at spec offset 43 → Body[39]
-//
-// MBO/TOB InstrumentDefinition additional fields (130-byte message):
-//
-//	Price Bound at spec offset 127 → Body[123]
-//
-// The non-midpoint offsets moved again at spec 3.0.0, which inserted Source ID
-// after Instrument ID and shifted every later field by two bytes. Midpoint kept
-// its 64-byte variant and is unchanged.
-func instrDefInstrumentID(m wire.Message) uint32 { return bodyU32LE(m, 0) }
+// bodyU8At and bodyU16LEAt bounds-check, because a wrong layout must read as
+// absent rather than as zero: a zero Manifest Seq is a legal value and would be
+// graded as data.
 
-func instrDefManifestSeqTOBMBO(m wire.Message) uint16 { return bodyU16LE(m, 124) }
-func instrDefManifestSeqMid(m wire.Message) uint16    { return bodyU16LE(m, 56) }
-
-// instrDefDefaultMethodMid returns the Default Method for a Midpoint InstrumentDefinition.
-// spec offset 42 → Body[38].
-func instrDefDefaultMethodMid(m wire.Message) uint8 { return bodyU8(m, 38) }
-
-// instrDefPriceBoundMid returns the Price Bound for a Midpoint InstrumentDefinition.
-// spec offset 43 → Body[39].
-func instrDefPriceBoundMid(m wire.Message) uint8 { return bodyU8(m, 39) }
-
-// instrDefPriceBoundMBO returns the Price Bound for an MBO/TOB InstrumentDefinition.
-// spec offset 127 → Body[123].
-func instrDefPriceBoundMBO(m wire.Message) uint8 { return bodyU8(m, 123) }
-
-// instrDefAllFields extracts (instrumentID, manifestSeq, defaultMethod, priceBound)
-// from an InstrumentDefinition, choosing feed-correct offsets.
-// defaultMethod is only meaningful for FeedMidpoint.
-// priceBound is extracted for FeedMidpoint (Body[39]) and FeedMBO (Body[123]);
-// it is zero for FeedTOB.
-func instrDefAllFields(feed core.Feed, m wire.Message) (instrID uint32, manifestSeq uint16, defaultMethod, priceBound uint8) {
-	instrID = instrDefInstrumentID(m)
-	switch feed {
-	case core.FeedMidpoint:
-		manifestSeq = instrDefManifestSeqMid(m)
-		defaultMethod = instrDefDefaultMethodMid(m)
-		priceBound = instrDefPriceBoundMid(m)
-	case core.FeedMBO:
-		manifestSeq = instrDefManifestSeqTOBMBO(m)
-		priceBound = instrDefPriceBoundMBO(m)
-		// defaultMethod remains zero (not present in MBO InstrumentDefinition)
-	default: // FeedTOB and others
-		manifestSeq = instrDefManifestSeqTOBMBO(m)
-		// defaultMethod and priceBound remain zero for TOB
+// instrDefAllFields extracts (instrumentID, manifestSeq, defaultMethod,
+// priceBound) from an InstrumentDefinition at the given feed and schema version.
+//
+// ok is false when the (feed, schema) pair has no layout, or when the message is
+// shorter than its layout requires. The caller MUST skip the message on false and
+// MUST NOT treat the zero values as read data.
+//
+// defaultMethod is only present on midpoint. priceBound is read for MBO and
+// midpoint only: TOB never carries it, and MBP is deliberately excluded here
+// because the switch this replaces never read Price Bound for MBP either.
+// Whether MBP should start reporting Price Bound is a separate decision, not a
+// side effect of adding schema support.
+func instrDefAllFields(feed core.Feed, schema uint8, m wire.Message) (instrID uint32, manifestSeq uint16, defaultMethod, priceBound uint8, ok bool) {
+	l, ok := instrDefLayoutFor(feed, schema)
+	if !ok {
+		return 0, 0, 0, 0, false
 	}
-	return instrID, manifestSeq, defaultMethod, priceBound
+	// Exact length, not just "long enough". A body SHORTER than the layout fails
+	// the bounds checks below, but a LONGER one passes every one of them and is
+	// read as data — the case VERSIONING.md names when it says a publisher MUST
+	// NOT emit a Schema Version other than the one its frames conform to. A
+	// 130-byte schema-3 definition tagged Schema Version = 1 resolves to the
+	// 80-byte layout, and Manifest Seq at body 74 is read out of the middle of
+	// Symbol. checkTier1 has already reported the real fault as
+	// MSG.LENGTH_PER_TYPE; extracting anyway only adds fabricated must-severity
+	// findings on top of it.
+	if int(m.Length) != int(l.MsgLen) {
+		return 0, 0, 0, 0, false
+	}
+	instrID, ok = bodyU32LEAt(m, l.InstrumentID)
+	if !ok {
+		return 0, 0, 0, 0, false
+	}
+	manifestSeq, ok = bodyU16LEAt(m, l.ManifestSeq)
+	if !ok {
+		return 0, 0, 0, 0, false
+	}
+	if l.DefaultMethod >= 0 {
+		// ok discarded: safe because ManifestSeq sits at a higher body offset than
+		// DefaultMethod in every layout row, so the ManifestSeq bounds check above
+		// already proved the body reaches this offset. TestInstrDefLayoutManifestSeqIsLast
+		// pins that ordering; if a future row breaks it, that test must fail.
+		defaultMethod, _ = bodyU8At(m, l.DefaultMethod)
+	}
+	if (feed == core.FeedMBO || feed == core.FeedMidpoint) && l.PriceBound >= 0 {
+		// ok discarded: same reasoning as DefaultMethod above — ManifestSeq is
+		// always the higher offset, pinned by the same test.
+		priceBound, _ = bodyU8At(m, l.PriceBound)
+	}
+	return instrID, manifestSeq, defaultMethod, priceBound, true
+}
+
+// bodyU8At, bodyU16LEAt and bodyU32LEAt read at a body offset, reporting whether
+// the body is long enough. The unchecked bodyU8/bodyU16LE/bodyU32LE helpers above
+// are for fixed-length messages whose length checkTier1 already gated.
+func bodyU8At(m wire.Message, off int) (uint8, bool) {
+	if off < 0 || off >= len(m.Body) {
+		return 0, false
+	}
+	return m.Body[off], true
+}
+
+func bodyU16LEAt(m wire.Message, off int) (uint16, bool) {
+	if off < 0 || off+2 > len(m.Body) {
+		return 0, false
+	}
+	return binary.LittleEndian.Uint16(m.Body[off:]), true
+}
+
+func bodyU32LEAt(m wire.Message, off int) (uint32, bool) {
+	if off < 0 || off+4 > len(m.Body) {
+		return 0, false
+	}
+	return binary.LittleEndian.Uint32(m.Body[off:]), true
 }

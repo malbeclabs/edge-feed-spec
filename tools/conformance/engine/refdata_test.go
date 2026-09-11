@@ -152,7 +152,10 @@ func TestInstrumentDefinitionV3FieldOffsets(t *testing.T) {
 	if len(findings) != 0 {
 		t.Fatalf("unexpected decode findings: %+v", findings)
 	}
-	instrID, manifestSeq, _, priceBound := instrDefAllFields(core.FeedMBO, f.Messages[0])
+	instrID, manifestSeq, _, priceBound, ok := instrDefAllFields(core.FeedMBO, 3, f.Messages[0])
+	if !ok {
+		t.Fatal("schema 3 MBO must resolve")
+	}
 	if instrID != 42 || manifestSeq != 9 || priceBound != 2 {
 		t.Fatalf("fields = (%d, %d, %d), want (42, 9, 2)", instrID, manifestSeq, priceBound)
 	}

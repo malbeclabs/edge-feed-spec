@@ -34,9 +34,19 @@ func Decode(raw []byte, expectMagic uint16) (*Frame, []StructFinding) {
 		// from walking non-frame bytes.
 		return f, fs
 	}
-	if want := ExpectedSchemaVersion(expectMagic); h.SchemaVersion != want {
+	switch {
+	case !SchemaSupported(expectMagic, h.SchemaVersion):
 		fs = append(fs, StructFinding{"FRAME.SCHEMA_VERSION", 2,
-			fmt.Sprintf("schema version %d, expected %d", h.SchemaVersion, want), false})
+			fmt.Sprintf("schema version %d, supported %v", h.SchemaVersion, SupportedSchemas(expectMagic)), false})
+	case h.SchemaVersion != CurrentSchema(expectMagic):
+		// Decodable, and behind. Accepting several MAJORs is what lets one binary
+		// grade the whole fleet, but it also removes the signal that used to come
+		// for free from rejecting the older one — and the per-venue build pins this
+		// change deletes were themselves the record of who was behind. Without this
+		// the fleet has nothing that says a publisher is on a superseded line.
+		fs = append(fs, StructFinding{"FRAME.SCHEMA_VERSION_SUPERSEDED", 2,
+			fmt.Sprintf("schema version %d is supported but not current (%d)",
+				h.SchemaVersion, CurrentSchema(expectMagic)), false})
 	}
 	// Frame length: publisher-invalid (self-inconsistent / out of range) vs transport truncation.
 	switch {
