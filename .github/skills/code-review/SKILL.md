@@ -36,6 +36,14 @@ Check every line that the pull request adds or rewrites:
 Leave unchanged lines alone. A banned word that this change does not touch is
 out of scope for this review.
 
+Do not judge `GLOSSARY.md` against itself. It lists every banned word in its
+tables and explains each one, so checking it reports the vocabulary back as a
+wall of findings. Review a change to it against the Versioning rules above
+instead.
+
+Skip a quoted definition elsewhere, for the same reason. Naming a banned word to
+explain that it is banned is correct use, and the glossary does this itself.
+
 ## What to flag
 
 Flag an added or rewritten line when it does one of these:
