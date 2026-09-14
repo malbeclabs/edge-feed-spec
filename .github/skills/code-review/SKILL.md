@@ -19,10 +19,20 @@ Read `GLOSSARY.md` before you review. Do not review from memory. The banned-word
 table and the notes below it carry exceptions, and a review that misses an
 exception reports a false finding.
 
-A change to `GLOSSARY.md` itself is in scope for a different reason. Check that
-the change follows the Versioning section: an editorial change is a `PATCH`, a
-new term or a new exception is a `MINOR`, and a redefinition that makes
-conforming text wrong is a `MAJOR`. Check that the Changes list records it.
+A change to `GLOSSARY.md` itself is in scope for a different reason. The
+Versioning section is the authority on the level, and it names more cases than a
+summary usually carries, so check the change against all three classes:
+
+- `PATCH` for rationale, a note, an example, or wording, with no change to what
+  the rules require.
+- `MINOR` to define a new term, to ban a new word, to record a new exception, or
+  to refine guidance that no conforming pass has applied yet.
+- `MAJOR` to redefine a term, or to change a replacement that conforming text
+  already follows, so that text becomes wrong.
+
+Banning a new word is a `MINOR`, not a `PATCH`. Changing a replacement that text
+already follows is a `MAJOR`, not a `MINOR`. Check that the Changes list records
+the release.
 
 ## Scope
 
@@ -41,8 +51,10 @@ tables and explains each one, so checking it reports the vocabulary back as a
 wall of findings. Review a change to it against the Versioning rules above
 instead.
 
-Skip a quoted definition elsewhere, for the same reason. Naming a banned word to
-explain that it is banned is correct use, and the glossary does this itself.
+Outside that file, a banned word survives only where the sentence is about the
+word itself: naming it to say it is banned, or quoting a glossary row to explain
+a replacement. A definition quoted as cover for ordinary use is still a finding,
+and so is a quoted identifier, config key or metric name.
 
 ## What to flag
 
