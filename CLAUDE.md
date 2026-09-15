@@ -16,6 +16,26 @@ Wire-format specifications for the DoubleZero Edge multicast feeds, and the tool
 
 Do not rotate synonyms — one word for one thing. A **venue** is not a **matching engine**; a **channel instance** is `(source IP, Channel ID, destination port)` and nothing looser. A `Source ID` names a matching engine, not a venue.
 
+## How to write
+
+Write in ASD-STE100 Simplified Technical English (skill: `asd-ste100`).
+
+- Short sentences. One idea per sentence.
+- Active voice. Simple tenses.
+- One word for one meaning. Pick a verb for an action and reuse it. Do not rotate synonyms.
+
+This covers the specifications, `GLOSSARY.md`, this file, code comments, commit
+messages, pull request descriptions, and **review comments**. A review is prose
+another person must act on, so it follows the same rule as the text it reviews.
+
+The reason is the product. Other teams write decoders from these documents. A
+sentence that needs a second reading produces a wrong decoder.
+
+`GLOSSARY.md` and this rule do different jobs. The glossary picks the word. This
+picks the sentence. Both apply.
+
+`.github/skills/code-review/SKILL.md` is written this way. Read it as the example.
+
 ## Versioning is the load-bearing discipline
 
 - Every change classifies as **PATCH** (editorial), **MINOR** (additive) or **MAJOR** (breaking). `VERSIONING.md`'s class table decides this, not judgement. Read it before classifying.
@@ -68,6 +88,22 @@ Go version: 1.25.x.
 - Do not add "Co-Authored-By" lines to commit messages
 - Use the format `component: short description` (e.g. `conformance: key the canonical message length on schema version`, `docs: record the validator's multi-schema exception`)
 - Keep the description lowercase (except proper nouns) and concise
+
+## Before opening a pull request
+
+Four checks. Each one has already missed a defect in this repository, so each one
+is cheap next to what it costs a reviewer.
+
+1. **Read the code before you state what it does.** Not from memory, and not from
+   what it did last week.
+2. **After you rewrite a section, search for what it withdrew.** Other passages
+   may still depend on it.
+3. **After you change a summary, a constraint or a table, read the steps that
+   implement it.** They do not follow on their own.
+4. **After you add or change a rule or a metric, search `prometheus/` for anything
+   that reads it.** An alert can key on the shape you changed.
+
+Every one of these is mechanical. None of them replaces review.
 
 ## Pull Requests
 
