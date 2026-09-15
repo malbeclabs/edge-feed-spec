@@ -231,6 +231,17 @@ func tier1Cases() []struct {
 			good:  wb.Frame(wire.MagicMid).Schema(1).Msg(wire.TypeHeartbeat, 16, heartbeatBody(0)).Bytes(),
 		},
 		{
+			// Schema 1 is decodable and behind: the feed's spec line is at 3, so a
+			// publisher still emitting 1 is readable and stale. This is the signal
+			// that replaces what rejecting the older MAJOR used to give for free.
+			rule:  "FRAME.SCHEMA_VERSION_SUPERSEDED",
+			feed:  core.FeedTOB,
+			magic: wire.MagicTOB,
+			port:  core.PortMktData,
+			bad:   wb.Frame(wire.MagicTOB).Schema(1).Msg(wire.TypeHeartbeat, 16, heartbeatBody(0)).Bytes(),
+			good:  wb.Frame(wire.MagicTOB).Schema(3).Msg(wire.TypeHeartbeat, 16, heartbeatBody(0)).Bytes(),
+		},
+		{
 			rule:  "FRAME.MSG_COUNT_RANGE",
 			feed:  core.FeedTOB,
 			magic: wire.MagicTOB,
@@ -495,10 +506,10 @@ func tier1Cases() []struct {
 // that either leaves the non-midpoint v3 definition at 128 bytes or changes
 // Midpoint's independent 64-byte layout with it.
 func TestInstrumentDefinitionLengthIsFeedSpecific(t *testing.T) {
-	if got := expectedMsgLen(core.FeedTOB, wire.TypeInstrumentDef); got != 130 {
+	if got := expectedMsgLen(core.FeedTOB, 3, wire.TypeInstrumentDef); got != 130 {
 		t.Fatalf("TOB InstrumentDefinition length = %d, want 130", got)
 	}
-	if got := expectedMsgLen(core.FeedMidpoint, wire.TypeInstrumentDef); got != 64 {
+	if got := expectedMsgLen(core.FeedMidpoint, 1, wire.TypeInstrumentDef); got != 64 {
 		t.Fatalf("Midpoint InstrumentDefinition length = %d, want 64", got)
 	}
 }
@@ -528,6 +539,49 @@ func TestEveryTier1RuleHasCase(t *testing.T) {
 	for _, r := range core.Rules {
 		if r.Tier == 1 && !covered[r.ID] {
 			t.Errorf("Tier-1 rule %s has no test case", r.ID)
+		}
+	}
+}
+
+func TestExpectedMsgLenIsSchemaAware(t *testing.T) {
+	// InstrumentDefinition is the only type whose length moves.
+	if got := expectedMsgLen(core.FeedTOB, 3, wire.TypeInstrumentDef); got != 130 {
+		t.Errorf("tob schema 3 instrdef = %d, want 130", got)
+	}
+	if got := expectedMsgLen(core.FeedTOB, 1, wire.TypeInstrumentDef); got != 80 {
+		t.Errorf("tob schema 1 instrdef = %d, want 80", got)
+	}
+	if got := expectedMsgLen(core.FeedMidpoint, 1, wire.TypeInstrumentDef); got != 64 {
+		t.Errorf("midpoint instrdef = %d, want 64", got)
+	}
+	// An unsupported pair returns 0, which the callers already treat as
+	// "no canonical length known" and skip. It must not fall back to 130.
+	if got := expectedMsgLen(core.FeedTOB, 2, wire.TypeInstrumentDef); got != 0 {
+		t.Errorf("tob schema 2 instrdef = %d, want 0", got)
+	}
+	// Every other type is schema-invariant across 1 and 3. Sweep the full uint8
+	// type space rather than hand-listing the types expectedMsgLen currently
+	// knows about: a hand-picked array stops covering a type the day someone
+	// adds a new arm to the switch, and it does so silently — the same
+	// coverage-vs-silence failure this tool exists to catch in the feeds it
+	// validates (see "Coverage vs. silence" in README.md). A type value with no
+	// arm in expectedMsgLen returns 0 for both schemas and compares equal; that
+	// is expected and asserts nothing about that type.
+	//
+	// Run per non-midpoint feed because expectedMsgLen's switch branches on
+	// feed as well as type (e.g. TypeQuote, TypeLiquidation, TypeLevelUpdate).
+	// Midpoint is excluded: it supports only schema 1, so "schema 1 vs schema
+	// 3" isn't a meaningful comparison for it.
+	for _, feed := range []core.Feed{core.FeedTOB, core.FeedMBO, core.FeedMBP} {
+		for typ := 0; typ <= 0xFF; typ++ {
+			if typ == wire.TypeInstrumentDef {
+				continue // pinned separately above: 0x02 is expected to differ.
+			}
+			one := expectedMsgLen(feed, 1, uint8(typ))
+			three := expectedMsgLen(feed, 3, uint8(typ))
+			if one != three {
+				t.Errorf("%s type 0x%02X: schema 1 = %d, schema 3 = %d; only InstrumentDefinition may differ", feed, typ, one, three)
+			}
 		}
 	}
 }

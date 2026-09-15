@@ -48,27 +48,32 @@ func TestEmitUnknownSchemaDowngrade(t *testing.T) {
 	}
 }
 
-// TestEmitStaleSchemaKeepsChecking pins the deliberate asymmetry in beginFrame:
-// a *future* schema downgrades version-specific rules, a *stale* one does not.
+// TestEmitSupportedSchemaKeepsChecking pins that beginFrame's downgrade is
+// membership in wire.SupportedSchemas, not a "how new is it" comparison: a
+// producer on schema 1 is not the feed's newest (MBO's set is {1, 3}), but 1
+// is a schema this build decodes, so it does not downgrade — the same as
+// schema 3 would. There is no separate "stale" case any more; a schema either
+// is in the set, in which case it is fully checked, or it is not, in which
+// case it downgrades, regardless of whether it sits above or below the set.
 //
-// Suppressing on stale would read as the friendlier migration behaviour, but it
-// silences rules that are still catching real defects — on the bundled pre-2.0
-// nonconformant_mbp capture it drops MSG.SNAPSHOT_FLAG_MATCHES_PORT from 6
-// violations to 0, turning a regression fixture into a clean-looking run. If
-// this test ever fails because someone changed > to !=, read the beginFrame
-// comment before "fixing" it.
-func TestEmitStaleSchemaKeepsChecking(t *testing.T) {
+// A schema-1 producer is not hypothetical: the bundled nonconformant_mbp
+// capture is entirely schema 1. Silencing version-specific rules for it would
+// drop MSG.SNAPSHOT_FLAG_MATCHES_PORT from 6 violations to 0, turning a
+// regression fixture into a clean-looking run. If this test ever fails, read
+// beginFrame's comment before "fixing" it — this pins the supported side of
+// that membership test, not a particular schema number.
+func TestEmitSupportedSchemaKeepsChecking(t *testing.T) {
 	cap := &capture{}
-	e := New(Config{Feed: core.FeedMBO}, cap) // MBO implements schema 3
-	e.beginFrame(1)                           // stale 1.x publisher
+	e := New(Config{Feed: core.FeedMBO}, cap) // MBO supports schema 1 and 3
+	e.beginFrame(1)                           // supported, but not the newest
 
 	e.Emit("MSG.LENGTH_PER_TYPE", core.Violation, core.PortRefData, 0, 0, 0, "x")
 	if cap.last.Status != core.Violation {
-		t.Fatal("a stale schema must NOT silence version-specific rules; they still catch real defects")
+		t.Fatal("a supported older schema must NOT silence version-specific rules; they still catch real defects")
 	}
 
 	e.Emit("FRAME.SCHEMA_VERSION", core.Violation, core.PortRefData, 0, 0, 0, "x")
 	if cap.last.Status != core.Violation {
-		t.Fatal("FRAME.SCHEMA_VERSION is an envelope rule and must report the stale version itself")
+		t.Fatal("FRAME.SCHEMA_VERSION is an envelope rule and must report the version itself")
 	}
 }

@@ -484,7 +484,7 @@ func (e *Engine) checkMBO(f *wire.Frame, ch uint8) {
 			// Skip tracker mutation when the message length is non-canonical:
 			// MSG.LENGTH_PER_TYPE already fired, and body reads would return
 			// zero/garbage, corrupting tracker state.
-			if m.Length != expectedMsgLen(e.cfg.Feed, m.Type) {
+			if m.Length != expectedMsgLen(e.cfg.Feed, f.Header.SchemaVersion, m.Type) {
 				continue
 			}
 			instrID := deltaInstrumentID(m)
@@ -498,7 +498,7 @@ func (e *Engine) checkMBO(f *wire.Frame, ch uint8) {
 			e.checkMBORef(ch, instrID, gated, frameSeq, m)
 
 		case wire.TypeTrade:
-			if m.Length != expectedMsgLen(e.cfg.Feed, m.Type) {
+			if m.Length != expectedMsgLen(e.cfg.Feed, f.Header.SchemaVersion, m.Type) {
 				continue
 			}
 			instrID := tradeInstrumentID(m)
@@ -515,7 +515,7 @@ func (e *Engine) checkMBO(f *wire.Frame, ch uint8) {
 
 		case wire.TypeInstrReset:
 			// Same length guard: only act on a well-formed InstrumentReset.
-			if m.Length != expectedMsgLen(e.cfg.Feed, m.Type) {
+			if m.Length != expectedMsgLen(e.cfg.Feed, f.Header.SchemaVersion, m.Type) {
 				continue
 			}
 			instrID := instrResetInstrumentID(m)
@@ -523,7 +523,7 @@ func (e *Engine) checkMBO(f *wire.Frame, ch uint8) {
 			e.mbo.onInstrumentReset(ch, instrID, newAnchor)
 
 		case wire.TypeBatchBoundary:
-			if m.Length != expectedMsgLen(e.cfg.Feed, m.Type) {
+			if m.Length != expectedMsgLen(e.cfg.Feed, f.Header.SchemaVersion, m.Type) {
 				continue
 			}
 			e.checkBatchIDMonotonic(ch, frameSeq, m)
@@ -815,19 +815,19 @@ func (e *Engine) checkMBOSnapshot(f *wire.Frame, ch uint8, snapPortSeq uint64) {
 	for _, m := range f.Messages {
 		switch m.Type {
 		case wire.TypeSnapshotBegin:
-			if m.Length != expectedMsgLen(e.cfg.Feed, m.Type) {
+			if m.Length != expectedMsgLen(e.cfg.Feed, f.Header.SchemaVersion, m.Type) {
 				continue
 			}
 			e.handleSnapBegin(m, ch, snapPortSeq)
 
 		case wire.TypeSnapshotOrder:
-			if m.Length != expectedMsgLen(e.cfg.Feed, m.Type) {
+			if m.Length != expectedMsgLen(e.cfg.Feed, f.Header.SchemaVersion, m.Type) {
 				continue
 			}
 			e.handleSnapOrder(m, ch, snapPortSeq)
 
 		case wire.TypeSnapshotEnd:
-			if m.Length != expectedMsgLen(e.cfg.Feed, m.Type) {
+			if m.Length != expectedMsgLen(e.cfg.Feed, f.Header.SchemaVersion, m.Type) {
 				continue
 			}
 			e.handleSnapEnd(m, ch, snapPortSeq)

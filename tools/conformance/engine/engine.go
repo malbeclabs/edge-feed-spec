@@ -11,8 +11,8 @@ import (
 	"github.com/malbeclabs/edge-feed-spec/tools/conformance/wire"
 )
 
-// envelopeRules keep their severity even under an unknown (higher) schema version,
-// because the spec guarantees their layout is schema-stable.
+// envelopeRules keep their severity even under an unknown (unsupported) schema
+// version, because the spec guarantees their layout is schema-stable.
 var envelopeRules = map[string]bool{
 	"FRAME.MAGIC_MISMATCH":     true,
 	"FRAME.SCHEMA_VERSION":     true,
@@ -80,28 +80,29 @@ func MagicFor(feed core.Feed) uint16 {
 // beginFrame marks whether this frame's schema is one we implement, which gates
 // the downgrade of version-specific rules in Emit.
 //
-// The test is deliberately > and not !=, i.e. only a *future* schema downgrades.
-// A stale lower one (a publisher still emitting Schema Version 1 after its feed
-// moved to 2) does produce derived noise: a per-type length violation, and a
-// short body that makes Manifest Seq read as 0 and trip the refdata rules. But
-// != would suppress every non-envelope rule on such a stream, and those rules
-// are still finding real defects — on the bundled pre-2.0 nonconformant_mbp
-// capture it silently drops MSG.SNAPSHOT_FLAG_MATCHES_PORT from 6 violations to
-// 0. A rule that stops running reports the same thing as a rule that checked
-// everything and found nothing, which is the failure mode this tool is built to
-// avoid (see "Coverage vs. silence" in the README). Noise is recoverable;
-// silence is not. FRAME.SCHEMA_VERSION is an envelope rule, so the actionable
-// finding is present at full severity under either choice.
+// The test is membership in wire.SupportedSchemas, not an ordering comparison.
+// Ordering used to stand in for "can we decode this", back when this validator
+// implemented exactly one schema per feed and any higher one was necessarily
+// unimplemented. Multi-schema decode support answers that question directly, so
+// membership is the right test now, and ordering never really was — it just
+// happened to agree with membership for a single-element set.
 //
-// Validating a capture from a prior MAJOR properly needs multi-version decode
-// support, which is a feature, not a gate tweak.
+// Schema 1 is in the supported set for every feed, so it is no longer unknown:
+// nothing downgrades for it, the same outcome as before this feature, but
+// because we decode it, not as a side effect of a numeric comparison. Schema 2
+// is unsupported but not numerically higher than 3, so the old > test would
+// have graded a schema-2 stream at full severity through schema-3 offsets it
+// does not match — exactly the false-alarm failure mode a fleet validator must
+// not introduce. Membership downgrades it like any other unsupported version.
+// FRAME.SCHEMA_VERSION is an envelope rule, so the actionable finding for an
+// unsupported schema is present at full severity either way.
 func (e *Engine) beginFrame(schemaVersion uint8) {
-	e.curUnknownSchema = schemaVersion > wire.ExpectedSchemaVersion(MagicFor(e.cfg.Feed))
+	e.curUnknownSchema = !wire.SchemaSupported(MagicFor(e.cfg.Feed), schemaVersion)
 }
 
 // Emit resolves severity from the registry, applying two downgrades:
 //   - Conditional must* rules downgrade unless their --expect-* config is set.
-//   - Under an unknown (higher) schema version, non-envelope checks downgrade.
+//   - Under an unknown (unsupported) schema version, non-envelope checks downgrade.
 //
 // port and seq are the logical port and frame sequence number of the frame being
 // classified; they are recorded on the Finding for logging and debugging.

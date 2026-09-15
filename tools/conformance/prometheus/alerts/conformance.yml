@@ -61,10 +61,22 @@ groups:
       # not-applicable is not owed coverage (an instrument that declares no price
       # bound has nothing to bound-check), so counting those would page on a
       # perfectly healthy instrument set.
+      # FRAME.SCHEMA_VERSION_SUPERSEDED is excluded because it is the one rule whose
+      # correct steady state is this metric shape. It fires once per frame, forever,
+      # on any publisher running a supported-but-not-current MAJOR, and never records
+      # a pass — so on exactly the population multi-schema support exists to serve
+      # (hyperliquid on schema 1) it would hold this warning permanently.
+      #
+      # That is different in kind from the other rules that never pass
+      # (FRAME.MAGIC_MISMATCH, FRAME.SCHEMA_VERSION, FRAME.LENGTH_CONSISTENCY): for
+      # those, 10+ findings in 15 minutes means something is actively broken and the
+      # alert is doing its job even though its wording is about verification. For
+      # this one it means a publisher is old, which is a dashboard fact, not an
+      # incident.
       - alert: ConformanceRuleNoLongerVerifying
         expr: >
           sum by (feed, rule_id) (
-            increase(dz_conformance_checks_total{result=~"pass|violation|unverifiable"}[15m])
+            increase(dz_conformance_checks_total{result=~"pass|violation|unverifiable",rule_id!="FRAME.SCHEMA_VERSION_SUPERSEDED"}[15m])
           ) > 10
           unless
           sum by (feed, rule_id) (
