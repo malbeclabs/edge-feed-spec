@@ -23,9 +23,16 @@ the rule severities that decide what pages are defined here.
 
 ## Goal
 
-Every feed registered onchain is validated continuously, from a subscriber's vantage, in both
-testnet and mainnet-beta. A venue gets coverage by registering its feed, not by anyone editing a
-list. **Never at the cost of a dropped packet on a capture host — see §12.**
+Every feed **that can be resolved to a group and ports** is validated continuously, from a
+subscriber's vantage, in both testnet and mainnet-beta. A venue gets coverage by registering its feed
+and publishing a registry fragment, not by anyone editing a list. **Never at the cost of a dropped
+packet on a capture host — see §12.**
+
+**The qualifier is load-bearing and §4.1 is why.** Ports come from the feed registry, so a feed that
+is onchain and absent from the registry cannot be graded — only reported as missing. That is exactly
+the state Binance is in today. The honest scope is therefore "every registry-resolvable feed, plus a
+page for every onchain feed that is not one", and closing the gap means getting fragments published,
+which is §7's template work rather than anything the checker can do alone.
 
 There are two end-to-end pipelines, not one (§11). This document covers the first, which ends at the
 wire specs. The second ends at Edge Connect's JSON contract and needs its own checker and its own
@@ -148,12 +155,20 @@ before anything else in this document is possible.
 
 **Change.** Dispatch the `InstrumentDefinition` layout on the `Schema Version` byte the frame header
 already carries, instead of on the build. One binary reads schema 1 and schema 3. The 80-byte
-(schema 1) and 130-byte (schema 3) layouts both live in `tools/conformance/wire/`, selected per
-datagram.
+(schema 1) and 130-byte (schema 3) layouts both live in one table at
+`tools/conformance/engine/instrdef.go`, selected per datagram. `wire/` owns which versions are
+accepted; `engine/` owns where the fields sit at each one.
 
-Schema 2 is not implemented. No deployed feed runs it, and a decoder that claims a layout it has
-never seen on the wire is worse than one that rejects it. An unknown `Schema Version` stays a
-rejection.
+Schema 2 is not implemented, and a decoder that claims a layout it has never seen on the wire is
+worse than one that rejects it. An unknown `Schema Version` stays a rejection.
+
+**The premise is an assumption, not a verified fact.** "No deployed feed runs schema 2" is what the
+version history implies — `VERSIONING.md` records 2.0.0 widening `Symbol` and 3.0.0 following it, and
+every feed account and capture examined for this design carries 1 or 3 — but nobody has enumerated
+every live publisher to confirm it. It is stated here because it is the decoder's policy and policy
+has to be written down, and flagged because a schema-2 publisher would be rejected rather than
+mis-decoded, which is the safe failure. If one is ever found, the layout is recoverable from the
+`v2.0.0` tags and the table takes a third row.
 
 **This bends a stated rule.** `VERSIONING.md` says a decoder MUST reject a `Schema Version` it was
 not built for. A validator that accepts several versions is a deliberate exception, for this tool
@@ -277,9 +292,16 @@ now reads the aggregate. It should report the difference:
 - **Onchain, not in the aggregate** — published but undiscoverable. This is the Binance case, and it
   is invisible to every other layer.
 - **In the aggregate, not onchain** — a row pointing at a feed nobody can hold an access pass for.
-- **In both, disagreeing** — the registry's group or ports differ from the `MulticastGroup` account.
-  This one is the most dangerous, because a checker following the registry would grade a different
-  stream than the ledger says the feed is.
+- **In both, disagreeing on the group** — the registry's group address differs from the
+  `MulticastGroup` account's `multicast_ip`. The most dangerous of the three, because a checker
+  following the registry would grade a different stream than the ledger says the feed is.
+
+  **Ports are not part of this comparison, and cannot be.** §4 opens by saying the ledger carries no
+  port, which is the whole reason the registry is consulted, so there is no authoritative onchain
+  value for a registry port to disagree with. Port correctness is a registry-side question — one
+  publisher block's ports against another's, and against what the host is actually bound to — and
+  belongs to the aggregator's collision checks below, not here. An earlier draft of this bullet
+  promised a cross-check with only one side.
 
 That replaces the "unresolved-feed count" the earlier draft proposed. Same purpose — a feed nobody
 configured must page rather than pass silently — but it measures the real gap instead of a gap in a
@@ -330,11 +352,22 @@ monitor.
 The Playbook's Phase 9 asks for a book-builder that writes per-update rows to ClickHouse. For the
 latency question that is more machinery than the question needs.
 
-The sentinel already holds both numbers. It reads the publisher's send timestamp from every datagram
-header to keep its per-instance baseline, and it knows when it received the datagram.
+The sentinel already reads the publisher's send timestamp from every datagram header, to keep its
+per-instance baseline. It does **not** currently have the other half: `input.Datagram` carries
+`RecvTS`, but `run.go` drops it at `eng.Process(dg.Src, frame, dg.Port, sf)` and `Engine.Process`
+has no receive-time parameter.
 
-**Change.** Export `wire_latency_ns` as a Prometheus histogram, labelled by feed, source and metro.
-Percentile alerting follows from the existing Grafana setup.
+**Change.** Three pieces, not one:
+
+1. Thread receive time from `input.Datagram` through `Process` into the engine.
+2. Define what it means per source. On live capture it is the socket read; on pcap replay it is the
+   capture timestamp, which is a different clock on a different host and makes the resulting
+   difference a property of the capture rather than of this run. A replayed latency number that
+   silently means something else than a live one is worse than no number.
+3. Export `wire_latency_ns` as a Prometheus histogram, labelled by feed, source and metro.
+
+An earlier draft of this section said the sentinel "already holds both numbers" and priced the work
+as a histogram. It does not, and the propagation plus the pcap/live semantics are the larger half.
 
 **The caveat travels with the number, wherever it appears.** This is a wall-clock difference between
 two hosts. It includes clock skew. It is a useful relative measure and not an absolute latency.
@@ -713,9 +746,18 @@ first thing that should happen after this design is approved is a name, not a co
 
 **The spec-version panel is a thing the fleet cannot show today**, and it is worth naming why. A
 binary pinned to one schema cannot report what a publisher on a different schema is emitting — it
-grades the frame as a version violation and stops. §2's multi-schema decoder is what makes "what
-version is this publisher on" an observable per-publisher fact rather than a deployment assumption
-recorded in a group_vars comment. That panel is a direct output of phase A1.
+grades the frame as a version violation and stops. §2's multi-schema decoder is the precondition:
+it makes "what version is this publisher on" observable at all rather than a deployment assumption
+recorded in a group_vars comment.
+
+**It is a precondition and not the panel.** Two corrections to an earlier draft that called it "a
+direct output of phase A1". The byte is the spec's **MAJOR** only — `VERSIONING.md` is explicit that
+MINOR and PATCH are not observable on the wire — so the panel reports a schema major, and a
+publisher behind by a MINOR looks current. And A1 exposes the fact as a finding count
+(`FRAME.SCHEMA_VERSION_SUPERSEDED`), which answers "is anything behind" but not "what is each
+publisher on": a count cannot be read per publisher, and inferring a version from the absence of a
+finding is exactly the silence this tool refuses elsewhere. The panel wants a gauge — observed schema
+major per channel instance — which is fleet-mode work in §3, not something A1 already shipped.
 
 **One reconciliation before the panels are built.** The ask names the tuple as
 `(source_ip, dst_ip, channel_id)`. The checker keys its sequence state on

@@ -181,6 +181,30 @@ func SchemaSupported(magic uint16, ver uint8) bool {
 	}
 	return false
 }
+
+// CurrentSchema returns the Schema Version a publisher of this feed SHOULD be
+// emitting today: the MAJOR of the feed's current spec line.
+//
+// Distinct from SupportedSchemas on purpose. Supported is what this validator can
+// decode; current is what the spec says to emit. A feed on a supported-but-not-
+// current version is readable and behind, and that is a fact an operator wants
+// reported rather than silently tolerated — see FRAME.SCHEMA_VERSION_SUPERSEDED
+// in Step 4a.
+func CurrentSchema(magic uint16) uint8 {
+	if magic == MagicMid {
+		return 1
+	}
+	return 3
+}
+
+// DefaultSchema is the version hand-built test fixtures carry unless they forge
+// another. It is CurrentSchema by definition: a fixture with no opinion about its
+// version should look like a conformant publisher of today's spec.
+//
+// Named rather than derived from SupportedSchemas' ordering, because indexing that
+// slice makes every fixture in the suite change meaning the day a version is
+// appended or the slice is reordered — with no compile error and no failing test.
+func DefaultSchema(magic uint16) uint8 { return CurrentSchema(magic) }
 ```
 
 - [ ] **Step 4: Update the check in `wire/decode.go`**
@@ -197,11 +221,37 @@ Replace:
 with:
 
 ```go
-	if !SchemaSupported(expectMagic, h.SchemaVersion) {
+	switch {
+	case !SchemaSupported(expectMagic, h.SchemaVersion):
 		fs = append(fs, StructFinding{"FRAME.SCHEMA_VERSION", 2,
 			fmt.Sprintf("schema version %d, supported %v", h.SchemaVersion, SupportedSchemas(expectMagic)), false})
+	case h.SchemaVersion != CurrentSchema(expectMagic):
+		// Decodable, and behind. Accepting several MAJORs is what lets one binary
+		// grade the whole fleet, but it also removes the signal that used to come
+		// for free from rejecting the older one — and the per-venue build pins this
+		// change deletes were themselves the record of who was behind. Without this
+		// the fleet has nothing that says a publisher is on a superseded line.
+		fs = append(fs, StructFinding{"FRAME.SCHEMA_VERSION_SUPERSEDED", 2,
+			fmt.Sprintf("schema version %d is supported but not current (%d)",
+				h.SchemaVersion, CurrentSchema(expectMagic)), false})
 	}
 ```
+
+The two cases are mutually exclusive: a version is either undecodable or decodable-and-possibly-old, never both. A test asserts that.
+
+- [ ] **Step 4a: Register `FRAME.SCHEMA_VERSION_SUPERSEDED`, and pay what a new rule costs**
+
+Adding one rule touches six places, four of which the repository's own guards will find for you. Run
+`go test ./...` after each and let the failures drive the list:
+
+1. `core/registry.go` — `{"FRAME.SCHEMA_VERSION_SUPERSEDED", Info, 1, StateNone, allFeeds, false}`, directly under `FRAME.SCHEMA_VERSION`.
+2. `core/ruledoc.go` — a one-line description. It ships as the `rule_info` metric, so it is user-facing.
+3. `core/registry_test.go` and `README.md` — the total moves 88 → 89 and every per-feed count rises by one (`mbo` 68→69, `tob` 33→34, `mbp` 32→33, `midpoint` 31→32). `TestRegistryComplete` and `TestFeedRuleCounts` fail until both agree.
+4. `engine/tier1_test.go` — a case in the `TestTier1Rules` table, or `TestEveryTier1RuleHasCase` fails. Use `bad: Schema(1)` / `good: Schema(3)` on TOB.
+5. `engine/coverage_test.go` — an entry in `testedRules`, or `TestRuleCoverage` fails.
+6. **`prometheus/alerts/conformance.yml` — the one no test catches.** `ConformanceRuleNoLongerVerifying` fires when a rule logs 10+ checks in 15 minutes with no `pass`, and this rule's *correct* steady state is exactly that: one violation per frame, forever, on any publisher running an old MAJOR. Left alone, every schema-1 venue holds a permanent warning — the population this plan exists to serve. Add `rule_id!="FRAME.SCHEMA_VERSION_SUPERSEDED"` to the first selector, add a `promql_expr_test` case in `prometheus/rule_tests/conformance_test.yml` asserting no alert, and confirm that case fails with the exclusion removed.
+
+   This is narrow on purpose. `FRAME.MAGIC_MISMATCH`, `FRAME.SCHEMA_VERSION` and `FRAME.LENGTH_CONSISTENCY` also never pass, but for those 10+ findings in 15 minutes means something is actively broken and the alert is right. Do not exclude the class.
 
 - [ ] **Step 5: Fix every other caller of the deleted function**
 
@@ -676,6 +726,15 @@ func TestInstrDefAllFieldsSchema1(t *testing.T) {
 	}
 }
 
+// The oversized case, which the bounds checks alone do not cover: a 130-byte body
+// under the 80-byte layout passes every one of them.
+func TestInstrDefAllFieldsRejectsOversizedBody(t *testing.T) {
+	m := instrDefMsg(t, wire.MagicMBO, 1, 130, 0x11223344, 123, 124, 1, 0x0777)
+	if _, _, _, _, ok := instrDefAllFields(core.FeedMBO, 1, m); ok {
+		t.Fatal("a 130-byte body under the 80-byte schema-1 layout must not resolve")
+	}
+}
+
 // Reading past the body must report absence, never a zero that looks like data.
 func TestInstrDefAllFieldsRejectsUnsupportedSchema(t *testing.T) {
 	m := instrDefMsg(t, wire.MagicTOB, 1, 80, 1, 73, 74, 1, 1)
@@ -729,6 +788,18 @@ Replace everything from the `// --- InstrumentDefinition (0x02) — feed-depende
 func instrDefAllFields(feed core.Feed, schema uint8, m wire.Message) (instrID uint32, manifestSeq uint16, defaultMethod, priceBound uint8, ok bool) {
 	l, ok := instrDefLayoutFor(feed, schema)
 	if !ok {
+		return 0, 0, 0, 0, false
+	}
+	// Exact length, not just "long enough". A body SHORTER than the layout fails
+	// the bounds checks below, but a LONGER one passes every one of them and is
+	// read as data — the case VERSIONING.md names when it says a publisher MUST
+	// NOT emit a Schema Version other than the one its frames conform to. A
+	// 130-byte schema-3 definition tagged Schema Version = 1 resolves to the
+	// 80-byte layout, and Manifest Seq at body 74 is read out of the middle of
+	// Symbol. checkTier1 has already reported the real fault as
+	// MSG.LENGTH_PER_TYPE; extracting anyway only adds fabricated must-severity
+	// findings on top of it.
+	if int(m.Length) != int(l.MsgLen) {
 		return 0, 0, 0, 0, false
 	}
 	instrID, ok = bodyU32LEAt(m, l.InstrumentID)
@@ -870,7 +941,14 @@ func TestSchema1TOBStreamRaisesNoMustViolation(t *testing.T) {
 }
 ```
 
-The exact constructor names (`engine.New`, `report.Discard`, `eng.Process`, `eng.Findings`, `core.MustRule`) must match what the existing tests in `golden_test.go` and `engine/engine_test.go` use. Read one of those tests first and copy its setup rather than the names above; the assertion is the part that matters.
+**The block above is a sketch, not compilable code, and several names in it do not exist.** Treat only its assertion as the requirement. Known wrong, verified against the tree:
+
+- `Engine.Process` takes a source address first: `Process(src netip.Addr, f *wire.Frame, port core.Port, sf []wire.StructFinding)`. The source is part of the channel-instance key, so it is not optional.
+- `report.Discard` and `Engine.Findings` do not exist. `golden_test.go` collects through a reporter — follow its `goldenCapture` pattern and its `goldenEngineConfig`.
+- **`Flush()` and `EndRun()` are required and are the reason this matters.** The reorder window defaults to 8 frames, so a two-frame test that never flushes classifies nothing and the assertion passes over an empty finding set. A test that cannot fail is worse here than no test, because it would license deleting the production version pins.
+- Find how a `must` rule is distinguished from a `should` one in `core/` rather than assuming a helper name.
+
+Read `golden_test.go` first and copy its real setup. After it passes, prove it can fail: point `instrDefLayoutFor`'s schema-1 case at `instrDefSchema3`, confirm the test fails with `MSG.LENGTH_PER_TYPE type 0x02: length 80, expected 130`, then revert.
 
 - [ ] **Step 2: Run it to verify it fails**
 
