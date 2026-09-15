@@ -69,6 +69,17 @@ Go version: 1.25.x.
 - Use the format `component: short description` (e.g. `conformance: key the canonical message length on schema version`, `docs: record the validator's multi-schema exception`)
 - Keep the description lowercase (except proper nouns) and concise
 
+## Before opening a pull request
+
+Four checks, in this order. They are not a substitute for review — four reviewers found nine things on #70 and #72 and no two findings overlapped. They exist so a reviewer's time goes on the findings only another mind can produce, rather than on these four, all of which have already shipped here once.
+
+1. **Every factual claim about the code is verified by reading the code.** Not from memory, not from what the code did last week. A design doc asserted "the sentinel already holds both numbers" when `run.go` drops `dg.RecvTS` before `Process` ever sees it, and that one sentence priced a whole section wrong.
+2. **After rewriting a section, grep for what it withdrew.** Rewriting §4 around the feed registry retired a mechanism that five later passages still depended on, so a reader implementing the plan would have built the exact thing §4 said not to build.
+3. **After amending a summary, constraint or table, re-read the steps that implement it.** Amending a plan's constraints and File Structure while leaving its executable steps alone produced a document that told a worker to call a function no step defined.
+4. **When adding or changing a rule or a metric, grep `prometheus/` for anything that keys on it.** A new info-severity rule whose correct steady state is one finding per frame and never a pass is the exact shape `ConformanceRuleNoLongerVerifying` treats as a rule that stopped checking — so it would have held a permanent warning on every venue it was written to serve. No test catches this; only the grep does.
+
+The common thread in all four: an assertion nobody verified, or one place edited and its dependents left behind. Both are mechanical, which is why they belong in a checklist rather than in a reviewer's head.
+
 ## Pull Requests
 
 - Follow `.github/pull_request_template.md`: **Summary of Changes**, **Spec Impact**, **Review Notes**. Add a **Testing Verification** section.
