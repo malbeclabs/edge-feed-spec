@@ -320,7 +320,7 @@ acceptance test for the whole document:
 | emit an unknown `Schema Version` byte | schema rejection, not a mis-decode |
 | stall reference data | refdata coverage |
 | leave the group unjoined | join failure, distinct from a quiet market |
-| register a feed with no registry row | unresolved-feed count non-zero (§4) |
+| register it onchain and leave it out of the feed registry | the §4.1 onchain-not-published count goes non-zero |
 
 Each break must produce its alert and only its alert. A monitor nobody has watched fail is not a
 monitor.
@@ -363,7 +363,9 @@ Per venue:
   example nothing runs into a CI job.
 - **edge-builder** — add the gate before its first feed registers.
 - **edge-publisher-template** — add both halves to the template, so a new venue inherits the suite
-  shape and the gate. Add the §4 port-table row to the Playbook's Phase 1 Source ID step.
+  shape and the gate. Add §4's feed registry fragment to the Playbook's Phase 1, beside the Source
+  ID claim — a venue that publishes a feed and no fragment is undiscoverable, which is the state §4.1
+  exists to report.
 
 ### 7.1 The white-box harness leaves the hyperliquid repository
 
@@ -456,19 +458,22 @@ on the wire were right. It says nothing about what Edge Connect served, which is
 actually read. The risk is not the gap, which is known; it is a dashboard that shows green and does
 not say which surface it graded.
 
-**The registry becomes a second catalog.** §4 accepts a per-feed table outside the ledger. The
-unresolved-feed alert is what keeps it honest. If that alert is ever silenced, §4 has quietly become
-§1.1.
+**The two catalogs stay out of step, and the cross-check is the only thing that says so.** §4 reads
+the feed registry rather than inventing a table, but that makes fleet mode depend on a document that
+is three hand-written rows today against 306 onchain feed accounts. §4.1's difference report is what
+keeps the gap visible instead of silently narrowing coverage to whatever the aggregate happens to
+list. If that report is dropped, or read as noise while the aggregate is immature, §4 has quietly
+become §1.1 — a hand-maintained list, just maintained by someone else.
 
 **The two layers can drift into one.** §7 keeps both. The failure mode is a later reading of this
 document that sees two things called conformance and consolidates them, deleting the mutation
 sensitivity and field-level audit that only a white-box suite can do. §1.3 and §7 say why that is a
 loss, and the non-goals say it outright.
 
-**The private port table can go stale where the public code cannot.** §4 splits the code from the
-table that configures it, across a repository boundary and a visibility boundary. The
-unresolved-feed alert in §4 is the only thing making that split safe. If it is ever silenced, §4 has
-become §1.1 with an extra repository in the way.
+**Fleet mode inherits the aggregator's problems.** Reading the registry is right and it is not free:
+until an aggregator exists, the aggregate is stale by construction, and a group or port collision
+between two live feeds is invisible to fleet mode because only a central process sees every feed at
+once. §4 depends on that component existing and does not substitute for it.
 
 ## 10. Repository split and disclosure
 
@@ -749,6 +754,6 @@ rather than a contradiction.
 
 Always-on monitoring of the Edge Connect and conformance infrastructure itself. The self-referential
 part matters most: a conformance tester that has silently died reports exactly what a clean feed
-reports. §3.1's join-and-liveness series and §4's unresolved-feed count are the checker's answer to
+reports. §3.1's join-and-liveness series and §4.1's catalog-difference report are the checker's answer to
 that for itself; Edge Connect needs its own equivalent, and neither is optional once someone is on
 call for the dashboard.

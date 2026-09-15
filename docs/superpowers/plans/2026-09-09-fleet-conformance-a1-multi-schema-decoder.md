@@ -16,7 +16,15 @@
 - Commit subjects are `component: short description`, lowercase except proper nouns. No `Co-Authored-By` lines.
 - The `dz-conformance` `--version` output must stay exactly `version+commit` on one line. `malbeclabs/infra`'s `dz_conformance` role parses it and requires `^[0-9]+\.[0-9]+\.[0-9]+([-+].*)?$` after trimming a leading `v`. A space or a parenthesis makes it re-download the binary and restart every instance on every run.
 - Supported schema versions after this plan: **midpoint = {1}**, **every other feed = {1, 3}**. Schema **2 is not implemented** and stays rejected.
-- Existing rule IDs and their severities do not change. No rule is added or removed.
+- Existing rule IDs and their severities do not change.
+- **Amended during execution:** this constraint originally read "No rule is added or removed." One
+  rule was added — `FRAME.SCHEMA_VERSION_SUPERSEDED`, at `Info`. Accepting a set of versions retires
+  the tool's only signal that a venue runs a superseded MAJOR, and on the one real capture in the
+  repository losing `FRAME.SCHEMA_VERSION` was the entire observable difference between the old
+  binary and the new one. §13.1's spec-version panel wants exactly that signal, so the constraint was
+  wrong rather than the addition. Adding it required updating the rule catalog, the README's
+  per-feed counts, a Tier-1 test case, the coverage guard, and an exclusion in
+  `prometheus/alerts/conformance.yml` — see the note under Task 1.
 
 ---
 
@@ -25,7 +33,11 @@
 | File | Responsibility after this plan |
 | --- | --- |
 | `wire/header.go` | Owns which schema versions a feed's decoder accepts. `ExpectedSchemaVersion` is replaced by `SchemaSupported`. |
-| `wire/decode.go` | Emits `FRAME.SCHEMA_VERSION` on an unsupported version, unchanged otherwise. |
+| `wire/decode.go` | Emits `FRAME.SCHEMA_VERSION` on an unsupported version and `FRAME.SCHEMA_VERSION_SUPERSEDED` on a supported-but-not-current one. The two are mutually exclusive. |
+| `wire/wirebuild/build.go` | **Production caller of the deleted function.** `Frame` defaults every hand-built fixture's schema. Indexing `SupportedSchemas` here silently re-points the whole test suite the day a version is appended, so it takes an explicit `wire.DefaultSchema`. |
+| `engine/engine.go` | **Production caller of the deleted function, and a grading decision.** `beginFrame` sets `curUnknownSchema`, which decides whether non-envelope rules downgrade. See the note below — this is not a mechanical substitution. |
+| `core/registry.go`, `core/ruledoc.go` | The added rule and its one-line description. |
+| `prometheus/alerts/conformance.yml` | Excludes the added rule from `ConformanceRuleNoLongerVerifying`. |
 | `engine/instrdef.go` | **New.** The `(feed, schema) → InstrumentDefinition layout` table, in one place. |
 | `engine/fields.go` | Field accessors read offsets from the layout instead of constants. |
 | `engine/tier1.go` | `expectedMsgLen` takes a schema. |
@@ -195,7 +207,14 @@ with:
 
 Run: `cd tools/conformance && grep -rn 'ExpectedSchemaVersion' --include '*.go' .`
 
-Expected: hits in test files that assert the old single value. Rewrite each to `SchemaSupported(magic, ver)`. Do not delete a test to make it compile; a test asserting "schema 3 is expected for TOB" becomes "schema 3 is supported for TOB".
+Expected: **two production callers and several test callers.** An earlier draft of this plan predicted only tests; that was wrong, and the production pair is the more important half of the step.
+
+- `wire/wirebuild/build.go` — see the File Structure note. Replace with `wire.DefaultSchema(magic)`.
+- `engine/engine.go`, in `beginFrame` — **this one is a grading decision, not a substitution.** It sets `curUnknownSchema`, which decides whether non-envelope rules downgrade. The existing test is `schemaVersion > <the single expected version>`, which is future-only: a *stale lower* schema deliberately keeps full severity, because suppressing its rules drops real violations. That comment also names the proper fix — "validating a capture from a prior MAJOR properly needs multi-version decode support, which is a feature, not a gate tweak" — which is this plan.
+
+  It becomes `!wire.SchemaSupported(MagicFor(e.cfg.Feed), schemaVersion)`. Ordering was a proxy for decodability that only worked for a one-element set, and it is actively wrong for schema 2: unsupported but *lower* than 3, so `>` grades such a stream at full severity through schema-3 offsets. Membership also changes schema 0 the same way. Rewrite the doc comment; do not leave the old rationale beside the new code.
+
+For the test callers: rewrite each to `SchemaSupported(magic, ver)`. Do not delete a test to make it compile; a test asserting "schema 3 is expected for TOB" becomes "schema 3 is supported for TOB". Check the schema each fixture actually builds rather than assuming 3 — midpoint's is 1.
 
 - [ ] **Step 6: Run the wire tests**
 
