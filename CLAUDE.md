@@ -16,6 +16,26 @@ Wire-format specifications for the DoubleZero Edge multicast feeds, and the tool
 
 Do not rotate synonyms — one word for one thing. A **venue** is not a **matching engine**; a **channel instance** is `(source IP, Channel ID, destination port)` and nothing looser. A `Source ID` names a matching engine, not a venue.
 
+## How to write
+
+Write in ASD-STE100 Simplified Technical English (skill: `asd-ste100`).
+
+- Short sentences. One idea per sentence.
+- Active voice. Simple tenses.
+- One word for one meaning. Pick a verb for an action and reuse it. Do not rotate synonyms.
+
+This covers the specifications, `GLOSSARY.md`, this file, code comments, commit
+messages, pull request descriptions, and **review comments**. A review is prose
+another person must act on, so it follows the same rule as the text it reviews.
+
+The reason is the product. Other teams write decoders from these documents. A
+sentence that needs a second reading produces a wrong decoder.
+
+`GLOSSARY.md` and this rule do different jobs. The glossary picks the word. This
+picks the sentence. Both apply.
+
+`.github/skills/code-review/SKILL.md` is written this way. Read it as the example.
+
 ## Versioning is the load-bearing discipline
 
 - Every change classifies as **PATCH** (editorial), **MINOR** (additive) or **MAJOR** (breaking). `VERSIONING.md`'s class table decides this, not judgement. Read it before classifying.
@@ -71,14 +91,19 @@ Go version: 1.25.x.
 
 ## Before opening a pull request
 
-Four checks, in this order. They are not a substitute for review — four reviewers found nine things on #70 and #72 and no two findings overlapped. They exist so a reviewer's time goes on the findings only another mind can produce, rather than on these four, all of which have already shipped here once.
+Four checks. Each one has already missed a defect in this repository, so each one
+is cheap next to what it costs a reviewer.
 
-1. **Every factual claim about the code is verified by reading the code.** Not from memory, not from what the code did last week. A design doc asserted "the sentinel already holds both numbers" when `run.go` drops `dg.RecvTS` before `Process` ever sees it, and that one sentence priced a whole section wrong.
-2. **After rewriting a section, grep for what it withdrew.** Rewriting §4 around the feed registry retired a mechanism that five later passages still depended on, so a reader implementing the plan would have built the exact thing §4 said not to build.
-3. **After amending a summary, constraint or table, re-read the steps that implement it.** Amending a plan's constraints and File Structure while leaving its executable steps alone produced a document that told a worker to call a function no step defined.
-4. **When adding or changing a rule or a metric, grep `prometheus/` for anything that keys on it.** A new info-severity rule whose correct steady state is one finding per frame and never a pass is the exact shape `ConformanceRuleNoLongerVerifying` treats as a rule that stopped checking — so it would have held a permanent warning on every venue it was written to serve. No test catches this; only the grep does.
+1. **Read the code before you state what it does.** Not from memory, and not from
+   what it did last week.
+2. **After you rewrite a section, search for what it withdrew.** Other passages
+   may still depend on it.
+3. **After you change a summary, a constraint or a table, read the steps that
+   implement it.** They do not follow on their own.
+4. **After you add or change a rule or a metric, search `prometheus/` for anything
+   that reads it.** An alert can key on the shape you changed.
 
-The common thread in all four: an assertion nobody verified, or one place edited and its dependents left behind. Both are mechanical, which is why they belong in a checklist rather than in a reviewer's head.
+Every one of these is mechanical. None of them replaces review.
 
 ## Pull Requests
 
