@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
+	"os"
 	"time"
 
 	"github.com/malbeclabs/edge-feed-spec/tools/conformance/wire"
@@ -26,17 +28,22 @@ type sender struct {
 }
 
 func newSender(group string, port int, iface *net.Interface, ttl int) (*sender, error) {
-	addr := &net.UDPAddr{IP: net.ParseIP(group), Port: port}
-	if addr.IP == nil {
+	ip := net.ParseIP(group)
+	if ip == nil {
 		return nil, fmt.Errorf("%q is not an IP address", group)
 	}
+	// DialUDP will happily send to a unicast address, and the publisher would report success while
+	// no subscriber could ever join it.
+	if !ip.IsMulticast() {
+		return nil, fmt.Errorf("%s is not a multicast address", group)
+	}
+	addr := &net.UDPAddr{IP: ip, Port: port}
 	conn, err := net.DialUDP("udp4", nil, addr)
 	if err != nil {
 		return nil, fmt.Errorf("cannot open a socket to %s:%d: %w", group, port, err)
 	}
 	if err := setMulticastOptions(conn, iface, ttl); err != nil {
-		conn.Close()
-		return nil, err
+		return nil, errors.Join(err, conn.Close())
 	}
 	return &sender{
 		write: func(datagram []byte) error {
@@ -52,12 +59,16 @@ func newSender(group string, port int, iface *net.Interface, ttl int) (*sender, 
 // The header chain is repeated at each call site rather than factored into a helper, because
 // `wirebuild.Frame` returns an unexported type that no signature here can name.
 //
+// The first datagram carries sequence 0, which the spec requires of a new session, so the counter
+// is read before it is advanced rather than after.
+//
 // Both have to move on every datagram. A subscriber reads a repeated sequence as backward motion
 // and a stale send timestamp as a latency measurement, so a publisher that loops a fixed capture
 // reports as broken however well the transport is working.
 func (s *sender) send(build func(seq uint64, sendTS uint64) []byte) error {
+	seq := s.seq
 	s.seq++
-	return s.write(build(s.seq, uint64(time.Now().UnixNano())))
+	return s.write(build(seq, uint64(time.Now().UnixNano())))
 }
 
 func (s *sender) Close() error { return s.close() }
@@ -76,12 +87,12 @@ func publish(ctx context.Context, cfg config) error {
 	if err != nil {
 		return err
 	}
-	defer mktData.Close()
+	defer func() { _ = mktData.Close() }()
 	refData, err := newSender(cfg.group, cfg.refDataPort, iface, cfg.ttl)
 	if err != nil {
 		return err
 	}
-	defer refData.Close()
+	defer func() { _ = refData.Close() }()
 
 	fmt.Printf("publishing top-of-book to %s: quotes on %d, manifest on %d\n",
 		cfg.group, cfg.mktDataPort, cfg.refDataPort)
@@ -98,12 +109,19 @@ func publish(ctx context.Context, cfg config) error {
 	defer manifests.Stop()
 	heartbeats := time.NewTicker(cfg.heartbeatEvery)
 	defer heartbeats.Stop()
+	definitions := time.NewTicker(cfg.definitionEvery)
+	defer definitions.Stop()
 
 	var tick uint64
 	for {
 		select {
 		case <-ctx.Done():
-			fmt.Printf("sent %d quote datagrams and %d on refdata\n", mktData.seq, refData.seq)
+			// Announce the end rather than just stopping. Without this a subscriber cannot tell a
+			// closed session from a publisher that died, and waits out its heartbeat timeout.
+			if err := sendEndOfSession(mktData, refData); err != nil {
+				fmt.Fprintf(os.Stderr, "could not announce the session end: %v\n", err)
+			}
+			fmt.Printf("sent %d datagrams on mktdata and %d on refdata\n", mktData.seq, refData.seq)
 			return ctx.Err()
 		case <-quotes.C:
 			tick++
@@ -117,6 +135,12 @@ func publish(ctx context.Context, cfg config) error {
 		case <-heartbeats.C:
 			if err := sendHeartbeat(mktData); err != nil {
 				return fmt.Errorf("cannot send a heartbeat: %w", err)
+			}
+		case <-definitions.C:
+			// The whole cycle, not the definition alone: a definition outside a pair of summaries
+			// is not attributable to a manifest sequence.
+			if err := sendManifestCycle(refData); err != nil {
+				return fmt.Errorf("cannot send a definition cycle: %w", err)
 			}
 		}
 	}
@@ -137,17 +161,38 @@ func sendManifestCycle(refData *sender) error {
 }
 
 func sendManifest(refData *sender) error {
+	return sendManifestWithValidity(refData, 1)
+}
+
+// sendManifestWithValidity sends a summary. `valid` is 0 only on the way out, which is how a
+// subscriber is told the instrument set is no longer being served.
+func sendManifestWithValidity(refData *sender, valid uint8) error {
 	return refData.send(func(seq uint64, sendTS uint64) []byte {
 		return wb.Frame(wire.MagicTOB).Channel(channelID).Seq(seq).SendTS(sendTS).Msg(wire.TypeManifest, 24, func(b *wb.Body) {
 			b.U8(channelID)
-			b.U8(1) // valid
+			b.U8(valid)
 			b.Pad(2)
 			b.U16(1) // manifest sequence
 			b.Pad(2)
 			b.U32(1) // instrument count
-			b.U64(100_000)
+			// The time this summary was emitted, not a constant: a subscriber that reads it off a
+			// fixed value sees a timestamp that never advances.
+			b.U64(sendTS)
 		}).Bytes()
 	})
+}
+
+// sendEndOfSession announces a clean stop on both ports: the message on mktdata, and a summary
+// marked invalid on refdata so the instrument set is withdrawn too.
+func sendEndOfSession(mktData *sender, refData *sender) error {
+	err := mktData.send(func(seq uint64, sendTS uint64) []byte {
+		return wb.Frame(wire.MagicTOB).Channel(channelID).Seq(seq).SendTS(sendTS).Msg(wire.TypeEndOfSession, 16, func(b *wb.Body) {
+			b.U8(channelID)
+			b.Pad(3)
+			b.U64(sendTS)
+		}).Bytes()
+	})
+	return errors.Join(err, sendManifestWithValidity(refData, 0))
 }
 
 func sendInstrumentDefinition(refData *sender) error {

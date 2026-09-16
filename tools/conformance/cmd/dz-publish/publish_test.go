@@ -83,8 +83,9 @@ func TestTheDefinitionSitsBetweenTwoSummaries(t *testing.T) {
 	}
 }
 
-// Sequence numbers advance on every datagram, which is the whole reason this publisher exists
-// rather than a loop over a fixed capture. A repeated sequence reads to a subscriber as backward
+// Sequence numbers start at 0, which the spec requires of a new session, and advance on every
+// datagram, which is the whole reason this publisher exists rather than a loop over a fixed
+// capture. A repeated sequence reads to a subscriber as backward
 // motion, which latches its verifiability window for the life of the process.
 func TestSequenceAdvancesOnEveryDatagram(t *testing.T) {
 	var mktSent [][]byte
@@ -95,7 +96,8 @@ func TestSequenceAdvancesOnEveryDatagram(t *testing.T) {
 		}
 	}
 	for i, raw := range mktSent {
-		want := uint64(i + 1)
+		// Starting from 0, which top-of-book/spec.md requires of a new session's series.
+		want := uint64(i)
 		if got := decodeOne(t, raw).Header.Sequence; got != want {
 			t.Errorf("datagram %d carries sequence %d, want %d", i, got, want)
 		}
@@ -113,10 +115,10 @@ func TestEachPortKeepsItsOwnSequence(t *testing.T) {
 	if err := sendQuote(mktData, 1); err != nil {
 		t.Fatalf("quote: %v", err)
 	}
-	if got := decodeOne(t, mktSent[0]).Header.Sequence; got != 1 {
-		t.Errorf("the first quote carries sequence %d, want 1; the ports share a counter", got)
+	if got := decodeOne(t, mktSent[0]).Header.Sequence; got != 0 {
+		t.Errorf("the first quote carries sequence %d, want 0; the ports share a counter", got)
 	}
-	if got := decodeOne(t, refSent[2]).Header.Sequence; got != 3 {
-		t.Errorf("the third refdata datagram carries sequence %d, want 3", got)
+	if got := decodeOne(t, refSent[2]).Header.Sequence; got != 2 {
+		t.Errorf("the third refdata datagram carries sequence %d, want 2", got)
 	}
 }
