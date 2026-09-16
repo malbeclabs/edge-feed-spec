@@ -53,6 +53,7 @@ type config struct {
 	// quotes name, so it cannot grade them until the next cycle comes round.
 	definitionEvery time.Duration
 	duration        time.Duration
+	pcapOut         string
 }
 
 func run() error {
@@ -69,9 +70,17 @@ func run() error {
 	fs.DurationVar(&cfg.manifestEvery, "manifest-interval", time.Second, "time between manifest summaries")
 	fs.DurationVar(&cfg.heartbeatEvery, "heartbeat-interval", 15*time.Second, "time between heartbeats")
 	fs.DurationVar(&cfg.definitionEvery, "definition-interval", 30*time.Second, "time between instrument definition cycles, so a subscriber joining late becomes ready")
+	fs.StringVar(&cfg.pcapOut, "pcap-out", "", "write the session to this .pcap instead of sending it; needs --duration")
 	fs.DurationVar(&cfg.duration, "duration", 0, "stop after this long; runs until interrupted when zero")
 	if err := fs.Parse(os.Args[1:]); err != nil {
 		return err
+	}
+	if cfg.pcapOut != "" && cfg.duration <= 0 {
+		return errors.New("--pcap-out needs --duration, or it would write until interrupted")
+	}
+	if cfg.pcapOut != "" {
+		// A capture goes nowhere, so the group is not needed and asking for one would imply it is.
+		cfg.group = "239.0.0.1"
 	}
 	if cfg.group == "" || cfg.mktDataPort == 0 || cfg.refDataPort == 0 {
 		fs.Usage()

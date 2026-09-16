@@ -1,0 +1,4 @@
+{
+  "spec_revision": "sources/spec.md: private/experimental 32768-65535, which publishers MAY use for internal testing and subscribers MUST NOT assume meaning for. The embedded registry pins the production range 1-1023 alone, so grading a test publisher needs this.",
+  "ranges": [[32768, 65535]]
+}
