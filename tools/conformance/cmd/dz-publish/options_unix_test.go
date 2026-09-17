@@ -15,7 +15,7 @@ func TestSetMulticastOptionsSetsMulticastTTL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	if err := setMulticastOptions(conn, nil, 8); err != nil {
 		t.Fatalf("setMulticastOptions: %v", err)
