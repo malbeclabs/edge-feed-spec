@@ -13,6 +13,7 @@ package engine
 // channel that reaches ready *late* is a violation rather than a pass.
 
 import (
+	"slices"
 	"testing"
 	"time"
 
@@ -82,17 +83,22 @@ func TestNeverReachesReadyDefersWhileTheWindowIsOpen(t *testing.T) {
 // EndRun only ever asked whether ready was reached, never whether it was reached in
 // time, so a channel that took far longer than the window reported a pass. The window
 // is the rule.
+//
+// **No manifests between the window closing and the late definition**, and that absence is
+// the test. With them, the span branch latches the violation before the late definition is
+// ever classified, so the test passed with the readiness deadline at
+// `decideNeverReachesReady` disabled entirely — it pinned the wrong branch. Here the only
+// thing that can produce a verdict is the readiness comparison, because nothing else has
+// closed the period: the channel reaches ready at t=7s and the deadline is what judges it.
 func TestNeverReachesReadyLateReadyIsAViolation(t *testing.T) {
 	e, ac := liveReadyEngine(t)
 
 	manifestAt(e, 1, 0, 2)
 	processFrame(e, buildInstrDefFrameWithTS(nsPerSec/10, 100, 1, 1), wire.MagicTOB, core.PortRefData, 2)
-	for i := 2; i <= 6; i++ {
-		manifestAt(e, uint64(i+1), uint64(i)*nsPerSec, 2)
-	}
-	// The second definition finally arrives at t=7s, long after the 2s window.
-	processFrame(e, buildInstrDefFrameWithTS(7*nsPerSec, 101, 1, 1), wire.MagicTOB, core.PortRefData, 8)
-	manifestAt(e, 9, 8*nsPerSec, 2)
+	// The second definition finally arrives at t=7s, long after the 2s window, and it is
+	// the datagram that makes the channel ready.
+	processFrame(e, buildInstrDefFrameWithTS(7*nsPerSec, 101, 1, 1), wire.MagicTOB, core.PortRefData, 3)
+	manifestAt(e, 4, 8*nsPerSec, 2)
 	e.Flush()
 	e.EndRun()
 
@@ -111,7 +117,7 @@ func TestNeverReachesReadyLateReadyIsAViolation(t *testing.T) {
 func TestNeverReachesReadyDecidesAgainOnANewEra(t *testing.T) {
 	e, ac := liveReadyEngine(t)
 
-	// Frame sequence is contiguous throughout, in both eras. A single skipped seq
+	// Datagram sequence is contiguous throughout, in both eras. A single skipped seq
 	// latches the dirty window for the channel instance — it is cleared only by a
 	// publisher reset, not by onResetChannel — and every later verdict would
 	// downgrade to Unverifiable/loss, which is a different branch than the one here.
@@ -214,7 +220,10 @@ func TestNeverReachesReadyRecordsTheDecidingSeq(t *testing.T) {
 
 	manifestAt(e, 1, 0, 2)
 	processFrame(e, buildInstrDefFrameWithTS(nsPerSec/10, 100, 1, 1), wire.MagicTOB, core.PortRefData, 2)
-	// Frame seq 3 carries t=2s, which is where the 2s window closes.
+	// Seq 3 carries t=2s, which is the 2s deadline itself, and seq 4 carries t=3s — the
+	// first datagram PAST it. The deadline is inclusive (see decideNeverReachesReady), so
+	// a publisher that has not reached ready at exactly 2s still had until that instant
+	// and the verdict belongs at seq 4.
 	for i := 2; i <= 6; i++ {
 		manifestAt(e, uint64(i+1), uint64(i)*nsPerSec, 2)
 	}
@@ -224,18 +233,37 @@ func TestNeverReachesReadyRecordsTheDecidingSeq(t *testing.T) {
 	if len(found) != 1 {
 		t.Fatalf("setup: want exactly 1 verdict, got %d", len(found))
 	}
-	if found[0].Seq != 3 {
-		t.Errorf("REFDATA.NEVER_REACHES_READY: recorded seq %d, want 3 — the datagram that closed the window", found[0].Seq)
+	if found[0].Seq != 4 {
+		t.Errorf("REFDATA.NEVER_REACHES_READY: recorded seq %d, want 4 — the first datagram past the window", found[0].Seq)
 	}
 }
 
-// TestNeverReachesReadyDoesNotLatchASchemaDowngrade: an unknown (higher) schema version
+// TestNeverReachesReadyDoesNotLatchASchemaDowngrade: an UNSUPPORTED schema version
 // downgrades every non-envelope rule for the datagram being classified, and deciding
-// mid-run means the verdict inherits the version of whichever datagram happened to
-// close the window. neverReadyDecided would then make that permanent — one datagram
-// from a mid-upgrade publisher, arriving at exactly the wrong moment, and the period's
-// Violation is recorded as NA/Info with no later datagram able to restate it. A
-// non-final decision defers instead.
+// mid-run means the verdict inherits the version of whichever datagram happened to close
+// the window. neverReadyDecided would then make that permanent — one such datagram,
+// arriving at exactly the wrong moment, and the period's Violation is recorded as NA/Info
+// with no later datagram able to restate it. A non-final decision defers instead.
+//
+// **Unsupported is set membership, not ordering.** `wire.SupportedSchemas` returns {1, 3}
+// for top of book, so an unsupported version can be BELOW the current one — 2 is the live
+// example — and the old framing of this test ("an unknown (higher) version", "a publisher
+// ahead of us", `ExpectedSchemaVersion+1`) rested on an ordering that does not exist. The
+// version below is picked as the first one the feed does not support, so it cannot rot
+// with the set.
+// unsupportedSchema returns the lowest Schema Version this feed does not support, so a
+// test that needs "a datagram this validator cannot decode" says exactly that rather than
+// assuming the unsupported ones are the high ones.
+func unsupportedSchema(magic uint16) uint8 {
+	supported := wire.SupportedSchemas(magic)
+	for v := uint8(1); v < 255; v++ {
+		if !slices.Contains(supported, v) {
+			return v
+		}
+	}
+	panic("every schema version is supported; this test needs rewriting")
+}
+
 func TestNeverReachesReadyDoesNotLatchASchemaDowngrade(t *testing.T) {
 	e, ac := liveReadyEngine(t)
 
@@ -246,7 +274,7 @@ func TestNeverReachesReadyDoesNotLatchASchemaDowngrade(t *testing.T) {
 	// t=2s closes the 2s window, and this is the one datagram from a publisher ahead
 	// of us.
 	processFrameSchema(e, buildManifestFrameWithTS(wire.MagicTOB, 2*nsPerSec, 1, 1, 2, 1),
-		wire.MagicTOB, core.PortRefData, 4, wire.ExpectedSchemaVersion(wire.MagicTOB)+1)
+		wire.MagicTOB, core.PortRefData, 4, unsupportedSchema(wire.MagicTOB))
 	e.Flush()
 
 	// A clean datagram behind it, which is the one that should decide the period.
@@ -258,17 +286,29 @@ func TestNeverReachesReadyDoesNotLatchASchemaDowngrade(t *testing.T) {
 	}
 }
 
-// TestNeverReachesReadyHalfConfiguredIsNotSilent: the second silence path, the same
-// shape as #50 reached through the config. Config.Configured used to call the rule
-// configured on ExpectDefinitionCycle alone, so a run with --expect-definition-cycle
-// and no --expect-manifest-cadence kept a Must rule in scope while the guard returned
-// without a word for every channel. The two agree now, and the run says what it could
-// not measure instead of saying nothing.
-func TestNeverReachesReadyHalfConfiguredIsNotSilent(t *testing.T) {
-	e, ac := newCadenceEngine(Config{
+// TestNeverReachesReadyHalfConfiguredIsOutOfScopeAndSaysNothing: a half-configured run
+// takes the rule out of scope, and out of scope means **no verdict at all**.
+//
+// This is the config half of #50 answered the way `denominator.go` requires rather than
+// the way it was first written here: "A rule that is off because its `--expect-*` flag was
+// not passed reports nothing… This invariant is about stream state, not configuration." An
+// `inapplicable` for a Must rule on every run missing a flag is a claim about the feed
+// manufactured out of a fact about the command line.
+//
+// The silence #50 is about is a different thing, and `Config.Configured` is what keeps them
+// apart: it requires BOTH flags for this rule, so a run with one of them has the rule out
+// of scope AND out of the denominator, rather than in scope and quiet — which is the state
+// that made coverage and no-op indistinguishable.
+func TestNeverReachesReadyHalfConfiguredIsOutOfScopeAndSaysNothing(t *testing.T) {
+	cfg := Config{
 		Feed:                  core.FeedTOB,
 		ExpectDefinitionCycle: 1 * time.Second,
-	})
+	}
+	if cfg.Configured("REFDATA.NEVER_REACHES_READY") {
+		t.Fatal("setup: the rule must be out of scope with only one --expect-* set; the denominator claim depends on it")
+	}
+
+	e, ac := newCadenceEngine(cfg)
 
 	manifestAt(e, 1, 0, 2)
 	processFrame(e, buildInstrDefFrameWithTS(nsPerSec/10, 100, 1, 1), wire.MagicTOB, core.PortRefData, 2)
@@ -276,16 +316,8 @@ func TestNeverReachesReadyHalfConfiguredIsNotSilent(t *testing.T) {
 	e.Flush()
 	e.EndRun()
 
-	found := findingsFor(ac, "REFDATA.NEVER_REACHES_READY")
-	if len(found) == 0 {
-		t.Fatal("REFDATA.NEVER_REACHES_READY: no verdict at all with only one --expect-* set — silence is the #50 failure, in a different disguise")
-	}
-	for _, f := range found {
-		if f.Status == core.Violation {
-			t.Errorf("REFDATA.NEVER_REACHES_READY: violated on a window it cannot measure: %s", f.Detail)
-		}
-		if f.Severity != core.Info {
-			t.Errorf("REFDATA.NEVER_REACHES_READY: severity %v, want Info — the rule is not configured, so it must not claim Must coverage", f.Severity)
-		}
+	if found := findingsFor(ac, "REFDATA.NEVER_REACHES_READY"); len(found) != 0 {
+		t.Errorf("REFDATA.NEVER_REACHES_READY: %d verdict(s) on a run that did not configure the window; out of scope reports nothing (%s)",
+			len(found), found[0].Detail)
 	}
 }

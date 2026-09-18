@@ -126,6 +126,20 @@ type channelRefdataState struct {
 	lastServingSendTS    uint64
 	lastServingSendTSSet bool
 
+	// lastRefdataSendTS is the most recent SendTS seen on this channel's refdata port,
+	// whatever the datagram carried.
+	//
+	// **NEVER_REACHES_READY closes its window on this, not on the serving span alone.**
+	// The span advances only on Valid=1 summaries, so a publisher that reaches the
+	// deadline and then stops summarising — while still sending definitions, heartbeats
+	// or invalid manifests — never closes its own window, and in a process that does not
+	// exit the rule stays silent: #50's shape reached through silence instead of through
+	// exit. A definition arriving after the deadline is proof the deadline passed, even
+	// though it does not extend the serving period, and charging the period with it would
+	// be the bug the two-field split above exists to avoid.
+	lastRefdataSendTS    uint64
+	lastRefdataSendTSSet bool
+
 	// everReady is true once channelReady has ever been true for this channel.
 	// Used by NEVER_REACHES_READY.
 	everReady bool
@@ -583,6 +597,7 @@ func (rs *refdataState) onManifestSummary(ch uint8, valid uint8, seq uint16, cou
 	s.prevSummarySet = true
 	s.seqEverSet = true
 
+	seqAdvanced := s.valid && isLaterSeq(seq, s.latestSeq)
 	if !s.valid || isLaterSeq(seq, s.latestSeq) {
 		// New or advancing seq: reset defs and update state.
 		s.valid = true
@@ -598,6 +613,23 @@ func (rs *refdataState) onManifestSummary(ch uint8, valid uint8, seq uint16, cou
 	if !s.firstSendTSSet {
 		s.firstSendTS = sendTS
 		s.firstSendTSSet = true
+	} else if seqAdvanced {
+		// **A new Manifest Seq is a new serving period, so it gets a new deadline.**
+		// The block above cleared `defs`, which restarts the collection; leaving
+		// firstSendTS anchored at the period's first Valid=1 summary charged that fresh
+		// collection to the original window, so a publisher that added an instrument
+		// while the subscriber was still collecting was graded non-conformant on a must
+		// rule. Repro that used to fail: window 2 s, seq bump at t=1.5 s, set complete
+		// at t=2.5 s.
+		//
+		// Readiness resets with it: the channel is not ready for THIS period until the
+		// new set completes, and the verdict is re-decided because the period it latched
+		// is over.
+		s.firstSendTS = sendTS
+		s.everReady = false
+		s.readySendTS = 0
+		s.readySendTSSet = false
+		s.neverReadyDecided = false
 	}
 	s.lastManifestSendTS = sendTS
 	s.lastManifestSendTSSet = true
@@ -837,6 +869,17 @@ func (e *Engine) processRefdataFrame(f *wire.Frame, pt *portTracker) {
 	// a runt decoding to the all-zero header, or a Heartbeat — and EndRun would then
 	// report a cold-start Unverified for it.
 	if s, ok := e.refdata.channels[ch]; ok {
+		// Advances the clock the window closes on — see lastRefdataSendTS — but only
+		// while the channel is SERVING. A definition or a heartbeat past the deadline is
+		// proof the deadline passed; a datagram sent while `Valid = 0` is not, because
+		// the serving period ended at the last Valid=1 summary and charging it with the
+		// invalid stretch is the bug the firstSendTS/lastServingSendTS split exists to
+		// avoid — a publisher that keeps its cadence while invalid would turn a 2 s
+		// period into a minute-long one and earn a violation on a must rule.
+		if s.valid && (!s.lastRefdataSendTSSet || f.Header.SendTS > s.lastRefdataSendTS) {
+			s.lastRefdataSendTS = f.Header.SendTS
+			s.lastRefdataSendTSSet = true
+		}
 		e.decideNeverReachesReady(ch, s, f.Header.Sequence, false)
 	}
 }
