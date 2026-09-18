@@ -600,11 +600,19 @@ func TestNeverReachesReady(t *testing.T) {
 	processFrame(e, raw3, wire.MagicTOB, core.PortRefData, 3)
 
 	e.Flush()
-	clearFindings(ac)
-	e.EndRun()
 
+	// The verdict lands when the window closes, not at exit (#50): the third datagram
+	// is the one that carries the span past the window, so the finding must already
+	// be here with EndRun never called.
 	if !hasViolation(ac, "REFDATA.NEVER_REACHES_READY") {
-		t.Error("REFDATA.NEVER_REACHES_READY: expected Violation at EndRun for channel that never reached ready, got none")
+		t.Error("REFDATA.NEVER_REACHES_READY: expected a Violation once the window closed, before EndRun, got none")
+	}
+
+	// And EndRun must not say it again: one serving period, one verdict.
+	before := len(findingsFor(ac, "REFDATA.NEVER_REACHES_READY"))
+	e.EndRun()
+	if after := len(findingsFor(ac, "REFDATA.NEVER_REACHES_READY")); after != before {
+		t.Errorf("REFDATA.NEVER_REACHES_READY: EndRun repeated the verdict (%d findings, want %d)", after, before)
 	}
 }
 
@@ -629,7 +637,11 @@ func TestNeverReachesReadyDoesNotFireWhenReady(t *testing.T) {
 	processFrame(e, raw3, wire.MagicTOB, core.PortRefData, 3)
 
 	e.Flush()
-	clearFindings(ac)
+
+	// The pass lands at the datagram that reached ready, with EndRun never called.
+	if !hasPass(ac, "REFDATA.NEVER_REACHES_READY") {
+		t.Error("REFDATA.NEVER_REACHES_READY: a channel that reached ready must be reported as a pass before EndRun")
+	}
 	e.EndRun()
 
 	if hasViolation(ac, "REFDATA.NEVER_REACHES_READY") {
