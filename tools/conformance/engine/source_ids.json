@@ -1,4 +1,4 @@
 {
-  "spec_revision": "malbeclabs/edge-feed-spec sources/spec.md (read 2026-06-15): production range 1-1023, reserved 0 and 1024-32767, private/experimental 32768-65535; assigned IDs: 1=Hyperliquid, 2=Phoenix",
+  "spec_revision": "malbeclabs/edge-feed-spec sources/spec.md 1.4.0 (read 2026-09-18): production range 1-1023, reserved 0 and 1024-32767, private/experimental 32768-65535; assigned IDs: 1=Hyperliquid, 2=Phoenix, 3=Kalshi, 4=Setai Financials, 5=Setai Commodities, 6=Binance USD-Margined Futures, 7=XYZ",
   "ranges": [[1, 1023]]
 }
