@@ -11,8 +11,14 @@ package engine
 // These tests pin the live contract: terminal verdicts land when they become true,
 // non-terminal ones still wait, each serving period says its piece exactly once, and a
 // channel that reaches ready *late* is a violation rather than a pass.
+//
+// They also pin what a live verdict must not do. It must not grade a set the engine has
+// not read to the end of — the definitions that complete it can still be in a reorder
+// buffer, on this path or on another — and it must not measure a serving period with the
+// clock of the one before it, which is what a publisher restart leaves behind.
 
 import (
+	"net/netip"
 	"slices"
 	"testing"
 	"time"
@@ -200,11 +206,11 @@ func TestNeverReachesReadyDoesNotVivifyAChannel(t *testing.T) {
 	}
 }
 
-// processFrameSchema is processFrame with the header's Schema Version overridden after
+// processDatagramSchema is processFrame with the header's Schema Version overridden after
 // decode, so the datagram reaches the engine as one from a publisher ahead of us
 // without wire.Decode itself reporting FRAME.SCHEMA_VERSION. That isolates the
 // downgrade beginFrame applies, which is what is under test here.
-func processFrameSchema(e *Engine, raw []byte, magic uint16, port core.Port, seq uint64, schema uint8) {
+func processDatagramSchema(e *Engine, raw []byte, magic uint16, port core.Port, seq uint64, schema uint8) {
 	f, sf := wire.Decode(raw, magic)
 	f.Header.Sequence = seq
 	f.Header.SchemaVersion = schema
@@ -238,19 +244,6 @@ func TestNeverReachesReadyRecordsTheDecidingSeq(t *testing.T) {
 	}
 }
 
-// TestNeverReachesReadyDoesNotLatchASchemaDowngrade: an UNSUPPORTED schema version
-// downgrades every non-envelope rule for the datagram being classified, and deciding
-// mid-run means the verdict inherits the version of whichever datagram happened to close
-// the window. neverReadyDecided would then make that permanent — one such datagram,
-// arriving at exactly the wrong moment, and the period's Violation is recorded as NA/Info
-// with no later datagram able to restate it. A non-final decision defers instead.
-//
-// **Unsupported is set membership, not ordering.** `wire.SupportedSchemas` returns {1, 3}
-// for top of book, so an unsupported version can be BELOW the current one — 2 is the live
-// example — and the old framing of this test ("an unknown (higher) version", "a publisher
-// ahead of us", `ExpectedSchemaVersion+1`) rested on an ordering that does not exist. The
-// version below is picked as the first one the feed does not support, so it cannot rot
-// with the set.
 // unsupportedSchema returns the lowest Schema Version this feed does not support, so a
 // test that needs "a datagram this validator cannot decode" says exactly that rather than
 // assuming the unsupported ones are the high ones.
@@ -264,6 +257,18 @@ func unsupportedSchema(magic uint16) uint8 {
 	panic("every schema version is supported; this test needs rewriting")
 }
 
+// TestNeverReachesReadyDoesNotLatchASchemaDowngrade: an UNSUPPORTED schema version
+// downgrades every non-envelope rule for the datagram being classified, and deciding
+// mid-run means the verdict inherits the version of whichever datagram happened to close
+// the window. neverReadyDecided would then make that permanent — one such datagram,
+// arriving at exactly the wrong moment, and the period's Violation is recorded as NA/Info
+// with no later datagram able to restate it. A non-final decision defers instead.
+//
+// **Unsupported is set membership, not ordering.** `wire.SupportedSchemas` returns {1, 3}
+// for top of book, so an unsupported version can be BELOW the current one — 2 is the live
+// example — and the old framing of this test ("an unknown (higher) version", "a publisher
+// ahead of us") rested on an ordering that does not exist. unsupportedSchema picks the
+// first version the feed does not support, so the test cannot rot with the set.
 func TestNeverReachesReadyDoesNotLatchASchemaDowngrade(t *testing.T) {
 	e, ac := liveReadyEngine(t)
 
@@ -273,7 +278,7 @@ func TestNeverReachesReadyDoesNotLatchASchemaDowngrade(t *testing.T) {
 
 	// t=2s closes the 2s window, and this is the one datagram from a publisher ahead
 	// of us.
-	processFrameSchema(e, buildManifestFrameWithTS(wire.MagicTOB, 2*nsPerSec, 1, 1, 2, 1),
+	processDatagramSchema(e, buildManifestFrameWithTS(wire.MagicTOB, 2*nsPerSec, 1, 1, 2, 1),
 		wire.MagicTOB, core.PortRefData, 4, unsupportedSchema(wire.MagicTOB))
 	e.Flush()
 
@@ -319,5 +324,132 @@ func TestNeverReachesReadyHalfConfiguredIsOutOfScopeAndSaysNothing(t *testing.T)
 	if found := findingsFor(ac, "REFDATA.NEVER_REACHES_READY"); len(found) != 0 {
 		t.Errorf("REFDATA.NEVER_REACHES_READY: %d verdict(s) on a run that did not configure the window; out of scope reports nothing (%s)",
 			len(found), found[0].Detail)
+	}
+}
+
+// processDatagramFrom is processFrame from a named path, so a test can put two
+// redundant publishers on one channel. Each path owns its own reorder buffer.
+func processDatagramFrom(e *Engine, src netip.Addr, raw []byte, port core.Port, seq uint64) {
+	f, sf := wire.Decode(raw, wire.MagicTOB)
+	f.Header.Sequence = seq
+	e.Process(src, f, port, sf)
+}
+
+// processDatagramInEra is processFrame with the header's Reset Count overridden after
+// decode, which is how a test drives a publisher restart from the wire rather than by
+// calling onResetChannel behind the engine's back.
+func processDatagramInEra(e *Engine, raw []byte, seq uint64, era uint8) {
+	f, sf := wire.Decode(raw, wire.MagicTOB)
+	f.Header.Sequence = seq
+	f.Header.ResetCount = era
+	e.Process(srcA, f, core.PortRefData, sf)
+}
+
+// TestNeverReachesReadyWaitsForTheDefinitionsStillInAReorderBuffer: a channel served by
+// two paths is graded on what BOTH have delivered, so a verdict taken while either
+// buffer still holds an in-window datagram grades a set the engine has not read to the
+// end of — and neverReadyDecided makes that first answer the period's only answer.
+//
+// The drain is what exposes it. Flush walks one path at a time, so the last path drains
+// with every other buffer already empty, and drainAll empties the heap before the first
+// item is classified: the definitions that complete the set are in flight, invisible to
+// anything that asks the buffer. Here the set completes at t=0.2s of a 2s window and the
+// channel is ready at the end of the run, which is what makes the Violation this used to
+// report a false one.
+//
+// **Reorder window 8, the CLI default.** At 1 a path holds one datagram, and the shapes
+// this covers need a buffer deep enough to hold a whole serving period.
+func TestNeverReachesReadyWaitsForTheDefinitionsStillInAReorderBuffer(t *testing.T) {
+	ac := &allCapture{}
+	e := New(Config{
+		Feed:                  core.FeedTOB,
+		ExpectManifestCadence: 1 * time.Second,
+		ExpectDefinitionCycle: 1 * time.Second,
+		ReorderWindow:         8,
+	}, ac)
+
+	manifest := func(ts uint64) []byte { return buildManifestFrameWithTS(wire.MagicTOB, ts, 1, 1, 2, 1) }
+	// Both paths announce the same two instruments and keep the cadence out to t=3s,
+	// past the 2s window. Path A carries instrument 100, path B instrument 101, so the
+	// subscriber's set is complete at t=0.2s and neither path completes it alone.
+	pathA := [][]byte{manifest(0), buildInstrDefFrameWithTS(nsPerSec/10, 100, 1, 1),
+		manifest(nsPerSec), manifest(2 * nsPerSec), manifest(3 * nsPerSec)}
+	pathB := [][]byte{manifest(0), buildInstrDefFrameWithTS(nsPerSec/5, 101, 1, 1),
+		manifest(nsPerSec), manifest(2 * nsPerSec), manifest(3 * nsPerSec)}
+	for i := range pathA {
+		processDatagramFrom(e, srcA, pathA[i], core.PortRefData, uint64(i+1))
+		processDatagramFrom(e, srcB, pathB[i], core.PortRefData, uint64(i+1))
+	}
+	e.Flush()
+	e.EndRun()
+
+	if hasViolation(ac, "REFDATA.NEVER_REACHES_READY") {
+		t.Errorf("REFDATA.NEVER_REACHES_READY: the channel was ready at t=0.2s of a 2s window; the verdict was taken over datagrams still in flight (%s)",
+			findingsFor(ac, "REFDATA.NEVER_REACHES_READY")[0].Detail)
+	}
+	if !hasPass(ac, "REFDATA.NEVER_REACHES_READY") {
+		t.Error("REFDATA.NEVER_REACHES_READY: no pass for a channel that reached ready inside its window")
+	}
+}
+
+// TestNeverReachesReadyClearsTheWindowClockOnANewEra: the clock the window closes on is
+// period-scoped like the period's first summary, so a publisher restart has to clear it.
+// Left behind, the new era is measured from the old era's last datagram and its first
+// Valid=1 summary is an instant Must Violation — a conformance failure manufactured out
+// of a restart, and latched for the era.
+func TestNeverReachesReadyClearsTheWindowClockOnANewEra(t *testing.T) {
+	e, ac := liveReadyEngine(t)
+
+	// Era 0: one instrument, announced and shipped, then cadence out to t=100s.
+	processDatagramInEra(e, buildManifestFrameWithTS(wire.MagicTOB, 0, 1, 1, 1, 1), 1, 0)
+	processDatagramInEra(e, buildInstrDefFrameWithTS(nsPerSec/10, 100, 1, 1), 2, 0)
+	processDatagramInEra(e, buildManifestFrameWithTS(wire.MagicTOB, 50*nsPerSec, 1, 1, 1, 1), 3, 0)
+	processDatagramInEra(e, buildManifestFrameWithTS(wire.MagicTOB, 100*nsPerSec, 1, 1, 1, 1), 4, 0)
+	e.Flush()
+	clearFindings(ac)
+
+	// Era 1: the publisher restarted. Its clock starts again at t=1s and both of the
+	// instruments it announces arrive inside the 2s window.
+	processDatagramInEra(e, buildManifestFrameWithTS(wire.MagicTOB, nsPerSec, 1, 1, 2, 1), 5, 1)
+	processDatagramInEra(e, buildInstrDefFrameWithTS(nsPerSec+nsPerSec/10, 100, 1, 1), 6, 1)
+	processDatagramInEra(e, buildInstrDefFrameWithTS(nsPerSec+nsPerSec/5, 101, 1, 1), 7, 1)
+	processDatagramInEra(e, buildManifestFrameWithTS(wire.MagicTOB, 2*nsPerSec, 1, 1, 2, 1), 8, 1)
+	e.Flush()
+	e.EndRun()
+
+	if hasViolation(ac, "REFDATA.NEVER_REACHES_READY") {
+		t.Errorf("REFDATA.NEVER_REACHES_READY: the new era reached ready 0.2s into its 2s window; it was graded on the era before it (%s)",
+			findingsFor(ac, "REFDATA.NEVER_REACHES_READY")[0].Detail)
+	}
+	if !hasPass(ac, "REFDATA.NEVER_REACHES_READY") {
+		t.Error("REFDATA.NEVER_REACHES_READY: no verdict for the new era; a restart gets its own window, not silence")
+	}
+}
+
+// TestNeverReachesReadyNegativeExpectationIsOutOfScopeToo: `Configured` reads both flags
+// as `> 0`, so a negative duration takes the rule out of scope there. The decision ladder
+// tested only for zero, so the same run computed a negative window, found every elapsed
+// time greater than it, and reported against a deadline no publisher could meet. The two
+// have to agree on what "configured" means.
+func TestNeverReachesReadyNegativeExpectationIsOutOfScopeToo(t *testing.T) {
+	cfg := Config{
+		Feed:                  core.FeedTOB,
+		ExpectManifestCadence: -1 * time.Second,
+		ExpectDefinitionCycle: 1 * time.Second,
+	}
+	if cfg.Configured("REFDATA.NEVER_REACHES_READY") {
+		t.Fatal("setup: a negative --expect-* takes the rule out of scope")
+	}
+
+	e, ac := newCadenceEngine(cfg)
+
+	manifestAt(e, 1, 0, 2)
+	processFrame(e, buildInstrDefFrameWithTS(nsPerSec/10, 100, 1, 1), wire.MagicTOB, core.PortRefData, 2)
+	manifestAt(e, 3, 10*nsPerSec, 2)
+	e.Flush()
+	e.EndRun()
+
+	if found := findingsFor(ac, "REFDATA.NEVER_REACHES_READY"); len(found) != 0 {
+		t.Errorf("REFDATA.NEVER_REACHES_READY: %d verdict(s) against a negative window (%s)", len(found), found[0].Detail)
 	}
 }

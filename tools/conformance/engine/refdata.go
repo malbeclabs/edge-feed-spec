@@ -9,7 +9,8 @@ package engine
 //   - REFDATA.MANIFEST_CADENCE          (config-gated, ExpectManifestCadence)
 //   - REFDATA.DEFINITION_CYCLE_COVERAGE (config-gated, ExpectDefinitionCycle)
 //   - REFDATA.NO_BURST_DEFINITIONS      (config-gated, ExpectDefinitionCycle)
-//   - REFDATA.NEVER_REACHES_READY       (config-gated, end-of-run, ExpectDefinitionCycle)
+//   - REFDATA.NEVER_REACHES_READY       (config-gated, per datagram,
+//     ExpectManifestCadence + ExpectDefinitionCycle)
 //
 // Timing baseline: all timing checks use the frame-level SendTS field (uint64
 // nanoseconds since epoch as written by the publisher).  This is deterministic
@@ -137,6 +138,12 @@ type channelRefdataState struct {
 	// exit. A definition arriving after the deadline is proof the deadline passed, even
 	// though it does not extend the serving period, and charging the period with it would
 	// be the bug the two-field split above exists to avoid.
+	//
+	// **Period-scoped, like firstSendTS, and cleared wherever that is.** It is one end of
+	// a span whose other end is the period's first summary, so a value from an earlier
+	// period measures nothing: a publisher that served to t=100s and then reset is graded
+	// on 100s of a window its new era never used, and the first summary of that era is an
+	// instant Violation.
 	lastRefdataSendTS    uint64
 	lastRefdataSendTSSet bool
 
@@ -299,6 +306,8 @@ func (rs *refdataState) onResetChannel(only uint8) {
 		s.firstSendTSSet = false
 		s.lastServingSendTS = 0
 		s.lastServingSendTSSet = false
+		s.lastRefdataSendTS = 0
+		s.lastRefdataSendTSSet = false
 		s.everReady = false
 		s.readySendTS = 0
 		s.readySendTSSet = false
@@ -586,6 +595,8 @@ func (rs *refdataState) onManifestSummary(ch uint8, valid uint8, seq uint16, cou
 		s.readySendTSSet = false
 		s.firstSendTSSet = false
 		s.lastServingSendTSSet = false
+		s.lastRefdataSendTS = 0
+		s.lastRefdataSendTSSet = false
 		// The period that just decided is closed; the one opening here is a fresh
 		// subscriber and gets its own window to reach ready.
 		s.neverReadyDecided = false
@@ -626,6 +637,8 @@ func (rs *refdataState) onManifestSummary(ch uint8, valid uint8, seq uint16, cou
 		// new set completes, and the verdict is re-decided because the period it latched
 		// is over.
 		s.firstSendTS = sendTS
+		s.lastRefdataSendTS = 0
+		s.lastRefdataSendTSSet = false
 		s.everReady = false
 		s.readySendTS = 0
 		s.readySendTSSet = false
