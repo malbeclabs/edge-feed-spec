@@ -6,7 +6,7 @@ A Source ID identifies the **matching engine** whose activity the message descri
 
 **A Source ID names a matching engine, not a venue.** One venue may run several matching engines and therefore hold several Source IDs. Two engines are distinct where their order-matching rules differ, and equally where they match independently over disjoint instrument sets under identical rules; a capacity shard the venue can rebalance is a channel rather than an engine. [GLOSSARY.md](../GLOSSARY.md) carries the full test and is the authority for it. A new engine at an already-registered venue is a new ID rather than a reuse of that venue's existing one. Because IDs are never renumbered, this only ever adds, and an ID already assigned keeps meaning whichever engine has been publishing under it. Venues split their own engines on their own schedule, so treat the set as open rather than assuming the current table is final.
 
-This document specifies version **1.3.0**: the reserved ranges, the current assignment set, and the process for requesting a new ID.
+This document specifies version **1.4.0**: the reserved ranges, the current assignment set, and the process for requesting a new ID.
 
 ## Reserved Ranges
 
@@ -21,12 +21,13 @@ This document specifies version **1.3.0**: the reserved ranges, the current assi
 
 | ID | Name | Code | Venue | Kind | Notes |
 |----|------|------|-------|------|-------|
-| `1` | Hyperliquid | `HYPERLIQUID` | Hyperliquid | Perpetual DEX | |
+| `1` | Hyperliquid | `HYPERLIQUID` | Hyperliquid | Perpetual DEX | Currently stamped on the venue's native perps and on its HIP-3 builder-deployed DEXes alike. Each builder DEX is a separate matching engine and takes its own ID; this row narrows to the native perps once the ID `1` publishers filter, and records the current state until then. See `7`. |
 | `2` | Phoenix | `PHOENIX` | Phoenix | Perpetual DEX | |
 | `3` | Kalshi | `KALSHI` | Kalshi | Perpetual Futures, Prediction Market | Registered under the codename `Lashay` until the venue launched. Carries two matching engines and is due to split; see below. |
 | `4` | Setai Financials | `SETAI_FINANCIALS` | Setai | Futures | Interface versioned separately from `5`. |
 | `5` | Setai Commodities | `SETAI_COMMODITIES` | Setai | Futures, Options on Futures | Interface versioned separately from `4`. |
 | `6` | Binance USD-Margined Futures | `BINANCE` | Binance | Perpetual Futures, Dated Futures | The venue's own `futuresType` for this engine is `U_MARGINED`. Spot, coin-margined futures and options are separate matching engines at this venue, unclaimed, and will share this `Code`. |
+| `7` | XYZ | `HYPERLIQUID` | Hyperliquid | Perpetual DEX | HIP-3 builder-deployed DEX. Matches the `xyz:`-prefixed perps on real-world assets, a set disjoint from ID `1`'s native perps. Shares ID `1`'s `Code`. The other builder DEXes at this venue are separate matching engines, unclaimed; see below. |
 
 `Code` is the machine-readable short name **for the venue**. It matches the `Venue` column and takes the same name TradingView uses. Uppercase, never an abbreviation, each space and hyphen a single underscore.
 
@@ -42,7 +43,7 @@ Name the venue as TradingView does, where TradingView lists it. Its [data covera
 
 Note that `Venue` is deliberately not `Operator`. The glossary reserves **Operator** for the person or organization running a *publisher*, which is a different question from which exchange runs the engine, and one this registry does not currently record.
 
-`Name` on IDs `1` through `3` predates the rule that an ID names an engine, and each is currently the venue's name because each venue published one engine when its ID was assigned. Those names stand, because assigned rows are stable. A new row names the **engine**, not the venue, and where a venue runs more than one engine each takes its own row and its own uppercase `Code`.
+`Name` on IDs `1` through `3` predates the rule that an ID names an engine, and each is currently the venue's name because each venue published one engine when its ID was assigned. Those names stand, because assigned rows are stable. A new row names the **engine**, not the venue, and where a venue runs more than one engine each engine takes its own row and its own `Name`, sharing the venue's uppercase `Code`.
 
 ### ID `3` carries two engines
 
@@ -64,12 +65,28 @@ These two engines report the **same** order-matching algorithm, so differing rul
 
 Recorded because it is the first assignment resting on the second half of the rule rather than the first. [GLOSSARY.md](../GLOSSARY.md) `1.3.0` widened the definition to cover it, and this assignment is the case that prompted the widening.
 
+### ID `7` is a second engine at an already-registered venue
+
+Hyperliquid matches its own native perps on the engine that holds ID `1`. It also hosts HIP-3 builder-deployed DEXes. A builder deploys a perp DEX on the venue, and lists its own instruments under its own name prefix. `XYZ` is one such DEX.
+
+The order-matching rules are the venue's in both cases, so the first half of the rule above does not separate the two. They are distinct under the second half: they match independently over disjoint instrument sets. On 17 September 2026 the venue API listed 234 bare-symbol native perps and 122 `xyz:`-prefixed perps on real-world assets: equities, metals, currencies, indices and commodities. No instrument appeared in both sets.
+
+The boundary is durable rather than a capacity shard the venue can rebalance. The builder holds its own deployer keys for this engine, and controls asset registration, the oracle updater, trading halts, margin tables and funding multipliers for its own instrument set alone. The venue publishes each builder DEX with its own such controls, so an instrument does not cross between the two engines. Several of those controls are microstructure parameters, which [GLOSSARY.md](../GLOSSARY.md) places under the first half of the rule; they are recorded here as evidence that the instrument-set boundary is durable, not as a claim that the two engines match by different rules. The assignment rests on the second half alone.
+
+This is the same basis as IDs `4` and `5`, which this document records as the first assignment resting on the second half of the rule. [GLOSSARY.md](../GLOSSARY.md) `1.3.0` already counts each HIP-3 builder DEX as an engine of its own, so the definition needs no change; its worked example named a fixed total that this assignment outgrows, corrected in glossary `1.3.1`.
+
+**The set of engines at this venue is open.** On 17 September 2026 the venue API listed ten builder DEXes. This row claims one of them. The other nine are separate matching engines, as are HIP-4 prediction markets, and each is unclaimed rather than overlooked. No ID is reserved for them here: each takes the next unused ID when a publisher is ready, exactly as this one did. The count grows whenever a builder deploys, which is the open set the Source ID definition above describes.
+
+Until the ID `1` publishers filter, the two IDs overlap rather than partition: an `xyz:` instrument is on the wire under ID `1` and under ID `7` at the same time. For as long as that holds, a subscriber MUST NOT treat ID `1` as native-only, and MUST expect the `xyz:` instruments under either ID. This is the counterpart to ID `3`'s rule above, and it lifts when those publishers filter, not when this row merges.
+
+`Name` is `XYZ`, which is the builder name the venue itself publishes. It is not a codename, so it needs no later retirement.
+
 ## Adding a New Source ID
 
 To request a new Source ID, open a pull request against this file that:
 
 1. Adds a row to the **Assigned Source IDs** table with the next unused ID in the production range.
-2. Names the matching engine in `Name`, gives its uppercase `Code`, names the exchange running it in `Venue`, and fills in `Kind` and (optionally) `Notes`.
+2. Names the matching engine in `Name`, gives the venue's uppercase `Code`, names the exchange running it in `Venue`, and fills in `Kind` and (optionally) `Notes`. Where the venue already holds rows, the `Code` is the one those rows carry, where they agree; IDs `4` and `5` predate this rule and keep their engine-level Codes.
 3. States what makes the engine distinct from any already-registered engine at the same venue, where there is one.
 4. Does not renumber, reorder, or remove existing rows.
 
@@ -79,9 +96,11 @@ This registry is a supplement with no wire format of its own. It carries no `Mag
 
 Assigning a new Source ID is an additive change and is therefore a **MINOR** release, as is adding a column to the assignment table. Editorial changes to the `Name`, `Code`, `Venue`, `Kind`, or `Notes` of an existing row, and changes to this document's prose, are **PATCH** releases.
 
-Because assigned IDs are stable and MUST NOT be renumbered, reordered, removed, or reused, this registry has no mechanism by which a MAJOR release could arise. A subscriber pinned to any `1.x` version of this registry will find that every ID it knows still means what it meant; a later version only adds IDs it has not seen. Subscribers MUST treat an unrecognized Source ID as an unknown matching engine rather than an error, exactly as if they were running against an older copy of this registry.
+Because assigned IDs are stable and MUST NOT be renumbered, reordered, removed, or reused, this registry has no mechanism by which a MAJOR release could arise. A subscriber pinned to any `1.x` version of this registry will find that every ID it knows still names the same matching engine; the set of instruments a publisher stamps with it is a deployment concern and may be corrected. A later version only adds IDs it has not seen. Subscribers MUST treat an unrecognized Source ID as an unknown matching engine rather than an error, exactly as if they were running against an older copy of this registry.
 
 ### Changes
+
+**1.4.0** — assigned Source ID `7` to the `XYZ` HIP-3 builder-deployed matching engine at Hyperliquid. It is the second engine registered at that venue, so it shares ID `1`'s `Code` under the `1.3.0` rule. ID `1` is not redefined here: its publishers stamp it on the builder DEXes today, so its row records that current scope and notes that it narrows to the native perps once those publishers filter. That narrowing is a deployment change and a later release, per the sequencing ID `3` follows. Distinct from ID `1` under the second half of the engine rule: the same order-matching rules over a disjoint instrument set, which is the basis IDs `4` and `5` rest on. Recorded that this venue lists ten builder DEXes today, and that the other nine and HIP-4 prediction markets are unclaimed. Repaired two sentences that `1.3.0` left behind: a new engine at a known venue shares that venue's `Code` rather than taking its own, which this row is the first to exercise. Separated what an ID means from what a publisher stamps with it in the compatibility paragraph, which promised only the former but read as promising both. Stated that ID `1` and ID `7` overlap rather than partition until those publishers filter, and what a subscriber MUST do meanwhile, which is the counterpart to ID `3`'s rule. Brought the [VERSIONING.md](../VERSIONING.md) row for this registry current: it still read `1.2.0`, because neither `1.2.1` nor `1.3.0` updated it.
 
 **1.3.0** — assigned Source ID `6` to the USD-margined futures matching engine at Binance, and made `Code` name the venue rather than the matching engine. Several engines at one venue now share a `Code`, so `Code` alone no longer keys an engine and `Source ID` is stated as the engine key. This supersedes `1.2.1`'s statement that `Code` names the matching engine and stays unique. IDs `4` and `5` keep their engine-level Codes, because a `Code` already carried downstream cannot be changed without coordination.
 
