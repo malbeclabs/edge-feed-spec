@@ -4,7 +4,7 @@ Canonical vocabulary for DoubleZero Edge market data.
 
 Use these words with these meanings in specs, docs, plans, comments, identifiers, CLI flags, config keys, metric names, and log fields. If a word you want is listed under [Banned](#banned-words), use the replacement.
 
-This document specifies version **1.3.0**: the terms defined below, the banned words, and their documented exceptions. See [Versioning](#versioning) for what a level means and what has changed.
+This document specifies version **1.3.1**: the terms defined below, the banned words, and their documented exceptions. See [Versioning](#versioning) for what a level means and what has changed.
 
 ## Precedence
 
@@ -15,7 +15,7 @@ This file is the authority. A definition here overrides any local one, wherever 
 | Term | Definition | Not |
 |---|---|---|
 | **Venue** | The external exchange or market operator (Hyperliquid, Kalshi, Phoenix). One venue may run several matching engines and therefore hold several Source IDs. | A matching engine, a publisher, a host, a product line |
-| **Matching engine** | One matching domain at a venue: a set of instruments whose resting orders can match against one another, under one set of order-matching rules. Two domains are distinct engines where their rules differ, and equally where they match independently over disjoint instrument sets under identical rules. Hyperliquid native perps, each HIP-3 builder DEX, HIP-4 prediction markets, Kalshi events, and Kalshi perps are five engines across two venues. | A venue, a channel, a feed |
+| **Matching engine** | One matching domain at a venue: a set of instruments whose resting orders can match against one another, under one set of order-matching rules. Two domains are distinct engines where their rules differ, and equally where they match independently over disjoint instrument sets under identical rules. Hyperliquid native perps, each of the venue's HIP-3 builder DEXes, HIP-4 prediction markets, Kalshi events, and Kalshi perps are separate engines across two venues; the builder DEXes alone numbered ten on 17 September 2026, so the count is open rather than fixed. | A venue, a channel, a feed |
 | **Source ID** | The `u16` wire field naming the matching engine whose activity a message describes, assigned by the Source ID Registry. Present on every price and event message, and on `InstrumentDefinition` as of Schema Version 3. | A venue, a channel, a publisher instance, a host, a transport, a timestamp |
 | **Source ID Registry** | The assignment table in `sources/spec.md`. Sole authority. | Any copy of it |
 | **Registry mirror** | Any copy of the Source ID Registry outside `sources/spec.md` — a hardcoded table, or a config artifact a service loads at runtime. Derived, never authoritative. | The registry |
@@ -131,6 +131,8 @@ This glossary is versioned so that a spec, a repository, or a conformance pass c
 A `MAJOR` release is the expensive one, because prose, identifiers, and config keys across several repositories were written against the older ruling and each has to be revisited. Prefer recording an exception over redefining a term.
 
 ### Changes
+
+**1.3.1** — editorial. The **Matching engine** example counted the HIP-3 builder DEXes as one engine and gave a fixed total; it now names them as separate engines and records that the count is open. The definition is unchanged.
 
 **1.3.0** — widened **Matching engine**. The `1.2.0` test was one set of order-matching rules, under which two platforms at one venue running identical rules over disjoint instrument sets read as a single engine; they are now two. Added the guard separating that case from a capacity shard, which is a channel rather than an engine. Classified `MINOR` rather than `MAJOR` because the widening only ever splits further: every engine identified under `1.2.0` is still an engine, no Source ID Registry assignment changes, and no conforming text becomes wrong.
 
