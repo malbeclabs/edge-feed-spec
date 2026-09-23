@@ -136,6 +136,14 @@ type portTracker struct {
 	hashRingSize int // number of valid entries currently in the ring (≤ cap)
 	// buf is the bounded reorder buffer for this series.
 	buf portBuffer
+	// unclassified holds the items a drain has already taken out of buf and has not
+	// handed to the classifier yet — the tail of the batch the engine is walking.
+	//
+	// **A drain empties the heap before the first item is classified**, so buf alone
+	// answers "nothing is pending" while a whole serving period's definitions are still
+	// in flight. A check that decides on the set the engine has read so far has to see
+	// them; see Engine.classifyDrained and refdataUnclassifiedWithin.
+	unclassified []*bufferItem
 	// arrivalCounter is incremented on each push and stored in bufferItem.arrival
 	// to provide stable heap ordering for equal-seq duplicates.
 	arrivalCounter uint64

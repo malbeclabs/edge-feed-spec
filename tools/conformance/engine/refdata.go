@@ -9,7 +9,8 @@ package engine
 //   - REFDATA.MANIFEST_CADENCE          (config-gated, ExpectManifestCadence)
 //   - REFDATA.DEFINITION_CYCLE_COVERAGE (config-gated, ExpectDefinitionCycle)
 //   - REFDATA.NO_BURST_DEFINITIONS      (config-gated, ExpectDefinitionCycle)
-//   - REFDATA.NEVER_REACHES_READY       (config-gated, end-of-run, ExpectDefinitionCycle)
+//   - REFDATA.NEVER_REACHES_READY       (config-gated, per datagram,
+//     ExpectManifestCadence + ExpectDefinitionCycle)
 //
 // Timing baseline: all timing checks use the frame-level SendTS field (uint64
 // nanoseconds since epoch as written by the publisher).  This is deterministic
@@ -126,9 +127,48 @@ type channelRefdataState struct {
 	lastServingSendTS    uint64
 	lastServingSendTSSet bool
 
+	// lastRefdataSendTS is the most recent SendTS seen on this channel's refdata port,
+	// whatever the datagram carried.
+	//
+	// **NEVER_REACHES_READY closes its window on this, not on the serving span alone.**
+	// The span advances only on Valid=1 summaries, so a publisher that reaches the
+	// deadline and then stops summarising — while still sending definitions, heartbeats
+	// or invalid manifests — never closes its own window, and in a process that does not
+	// exit the rule stays silent: #50's shape reached through silence instead of through
+	// exit. A definition arriving after the deadline is proof the deadline passed, even
+	// though it does not extend the serving period, and charging the period with it would
+	// be the bug the two-field split above exists to avoid.
+	//
+	// **Period-scoped, like firstSendTS, and cleared wherever that is.** It is one end of
+	// a span whose other end is the period's first summary, so a value from an earlier
+	// period measures nothing: a publisher that served to t=100s and then reset is graded
+	// on 100s of a window its new era never used, and the first summary of that era is an
+	// instant Violation.
+	lastRefdataSendTS    uint64
+	lastRefdataSendTSSet bool
+
 	// everReady is true once channelReady has ever been true for this channel.
 	// Used by NEVER_REACHES_READY.
 	everReady bool
+
+	// readySendTS is the wire SendTS of the datagram at which channelReady first
+	// became true in the current serving period. NEVER_REACHES_READY needs the
+	// moment, not just the fact: the rule asks whether ready was reached *within*
+	// manifest cadence + definition cycle, and everReady alone cannot answer that.
+	// Without it a channel that reaches ready long after the window still passes
+	// whenever no Valid=1 summary lands between the window closing and readiness,
+	// because nothing ever measures a span past the window.
+	readySendTS    uint64
+	readySendTSSet bool
+
+	// neverReadyDecided is true once REFDATA.NEVER_REACHES_READY has reported this
+	// serving period, so the verdict is emitted exactly once whether it was reached
+	// mid-run or at end of run. Cleared wherever a period is: a reset, and the start
+	// of the Valid=1 period that replaces one a Valid=0 closed. Deliberately NOT
+	// cleared by the Valid=0 itself — that summary does not close the period (the
+	// next one's start does), so clearing there would let the same period report
+	// twice.
+	neverReadyDecided bool
 
 	// cycleStartSendTS is the SendTS of the ManifestSummary that opened the
 	// current retransmission cycle. A cycle spans from one ManifestSummary to
@@ -266,7 +306,12 @@ func (rs *refdataState) onResetChannel(only uint8) {
 		s.firstSendTSSet = false
 		s.lastServingSendTS = 0
 		s.lastServingSendTSSet = false
+		s.lastRefdataSendTS = 0
+		s.lastRefdataSendTSSet = false
 		s.everReady = false
+		s.readySendTS = 0
+		s.readySendTSSet = false
+		s.neverReadyDecided = false
 		s.cycleStartSendTS = 0
 		s.cycleStartSendTSSet = false
 		s.defsSeenThisCycle = make(map[uint32]struct{})
@@ -544,10 +589,17 @@ func (rs *refdataState) onManifestSummary(ch uint8, valid uint8, seq uint16, cou
 	// window, or the next period inherits the previous one's readiness and is
 	// credited with the wall-clock time the channel spent invalid.
 	if !s.valid && s.firstSendTSSet {
-		rs.e.checkNeverReachesReady(ch, s)
+		rs.e.decideNeverReachesReady(ch, s, frameSeq, true)
 		s.everReady = false
+		s.readySendTS = 0
+		s.readySendTSSet = false
 		s.firstSendTSSet = false
 		s.lastServingSendTSSet = false
+		s.lastRefdataSendTS = 0
+		s.lastRefdataSendTSSet = false
+		// The period that just decided is closed; the one opening here is a fresh
+		// subscriber and gets its own window to reach ready.
+		s.neverReadyDecided = false
 	}
 
 	// Update previous-summary tracking (for COUNT_CHANGE_NO_SEQ_BUMP).
@@ -556,6 +608,7 @@ func (rs *refdataState) onManifestSummary(ch uint8, valid uint8, seq uint16, cou
 	s.prevSummarySet = true
 	s.seqEverSet = true
 
+	seqAdvanced := s.valid && isLaterSeq(seq, s.latestSeq)
 	if !s.valid || isLaterSeq(seq, s.latestSeq) {
 		// New or advancing seq: reset defs and update state.
 		s.valid = true
@@ -571,6 +624,25 @@ func (rs *refdataState) onManifestSummary(ch uint8, valid uint8, seq uint16, cou
 	if !s.firstSendTSSet {
 		s.firstSendTS = sendTS
 		s.firstSendTSSet = true
+	} else if seqAdvanced {
+		// **A new Manifest Seq is a new serving period, so it gets a new deadline.**
+		// The block above cleared `defs`, which restarts the collection; leaving
+		// firstSendTS anchored at the period's first Valid=1 summary charged that fresh
+		// collection to the original window, so a publisher that added an instrument
+		// while the subscriber was still collecting was graded non-conformant on a must
+		// rule. Repro that used to fail: window 2 s, seq bump at t=1.5 s, set complete
+		// at t=2.5 s.
+		//
+		// Readiness resets with it: the channel is not ready for THIS period until the
+		// new set completes, and the verdict is re-decided because the period it latched
+		// is over.
+		s.firstSendTS = sendTS
+		s.lastRefdataSendTS = 0
+		s.lastRefdataSendTSSet = false
+		s.everReady = false
+		s.readySendTS = 0
+		s.readySendTSSet = false
+		s.neverReadyDecided = false
 	}
 	s.lastManifestSendTS = sendTS
 	s.lastManifestSendTSSet = true
@@ -720,8 +792,14 @@ func (rs *refdataState) onInstrumentDef(ch uint8, instrID uint32, manifestSeq ui
 		}
 		s.setSnapshotSeq = s.latestSeq
 		s.setSnapshotSet = true
-		// Task 15: record that this channel has ever become ready.
+		// Task 15: record that this channel has ever become ready, and when — the
+		// window NEVER_REACHES_READY grades is a deadline, so the moment is the
+		// half that decides pass from violation.
 		s.everReady = true
+		if !s.readySendTSSet {
+			s.readySendTS = sendTS
+			s.readySendTSSet = true
+		}
 		// Task 18: notify the MBO per-instrument tracker gate of the new survivor
 		// set so it can drop trackers for instruments removed by the seq bump.
 		// Pass ch so only trackers for this refdata channel are pruned.
@@ -792,5 +870,29 @@ func (e *Engine) processRefdataFrame(f *wire.Frame, pt *portTracker) {
 			}
 			e.refdata.onInstrumentDef(ch, instrID, manifestSeq, defaultMethod, priceBound, sendTS, dirty, frameSeq)
 		}
+	}
+
+	// REFDATA.NEVER_REACHES_READY decides here rather than only at EndRun, so the
+	// rule is reachable in a process that never exits (#50). Terminal verdicts only;
+	// see decideNeverReachesReady.
+	//
+	// Look the channel up rather than channel(ch), which creates the entry: a refdata
+	// datagram carrying neither a ManifestSummary nor an InstrumentDefinition would
+	// otherwise materialize state for a channel that has no reference data at all —
+	// a runt decoding to the all-zero header, or a Heartbeat — and EndRun would then
+	// report a cold-start Unverified for it.
+	if s, ok := e.refdata.channels[ch]; ok {
+		// Advances the clock the window closes on — see lastRefdataSendTS — but only
+		// while the channel is SERVING. A definition or a heartbeat past the deadline is
+		// proof the deadline passed; a datagram sent while `Valid = 0` is not, because
+		// the serving period ended at the last Valid=1 summary and charging it with the
+		// invalid stretch is the bug the firstSendTS/lastServingSendTS split exists to
+		// avoid — a publisher that keeps its cadence while invalid would turn a 2 s
+		// period into a minute-long one and earn a violation on a must rule.
+		if s.valid && (!s.lastRefdataSendTSSet || f.Header.SendTS > s.lastRefdataSendTS) {
+			s.lastRefdataSendTS = f.Header.SendTS
+			s.lastRefdataSendTSSet = true
+		}
+		e.decideNeverReachesReady(ch, s, f.Header.Sequence, false)
 	}
 }

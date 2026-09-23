@@ -2,6 +2,7 @@ package engine
 
 import (
 	"fmt"
+	"math"
 	"net/netip"
 	"slices"
 	"time"
@@ -391,6 +392,69 @@ func (e *Engine) mktdataPending(ch uint8) bool {
 	return false
 }
 
+// classifyDrained hands a drained batch to the classifier one item at a time, keeping
+// the items behind the current one visible as unclassified while it runs. A rule that
+// decides on state the batch is still filling in needs that; see
+// refdataUnclassifiedWithin.
+func (e *Engine) classifyDrained(items []*bufferItem, pt *portTracker) {
+	for i, item := range items {
+		pt.unclassified = items[i+1:]
+		e.classify(item, pt)
+	}
+	pt.unclassified = nil
+}
+
+// refdataUnclassifiedWithin reports whether a refdata reorder buffer of this channel
+// still holds a datagram sent at or before deadlineTS. It looks at EVERY path of the
+// channel, the one being classified included.
+//
+// **A verdict taken before those datagrams are classified grades the publisher on a set
+// the engine has not finished reading.** The paths of one channel share its reference-data
+// state and have one reorder buffer each, and `Flush` drains one path at a time, so the
+// last path drains with every other buffer already empty while its own buffer still holds
+// the definitions that complete the set. `neverReadyDecided` then latches a Violation that
+// the next datagram disproves. Repro: two paths on Channel ID 1, the set complete at
+// t=0.2s of a 2s window, reported as a Must Violation with the channel ready at the end.
+//
+// **The SendTS bound is what keeps the rule live.** A buffer is never empty until Flush —
+// it holds up to `--reorder-window` datagrams at all times — so a gate on "anything
+// pending" would silence every mid-run verdict and give back the silence of #50. A
+// datagram sent after the deadline cannot change whether the deadline was met, so those
+// are not worth waiting for, and once the deadline is behind the publisher every buffer
+// holds only datagrams past it.
+func (e *Engine) refdataUnclassifiedWithin(ch uint8, deadlineTS uint64) bool {
+	for k, pt := range e.ports {
+		if k.port != core.PortRefData || k.ch != ch {
+			continue
+		}
+		for _, item := range pt.buf {
+			if item.tuple.frame.Header.SendTS <= deadlineTS {
+				return true
+			}
+		}
+		for _, item := range pt.unclassified {
+			if item.tuple.frame.Header.SendTS <= deadlineTS {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// readyDeadlineTS returns the wire time by which a serving period that started at
+// firstSendTS has to reach ready. It saturates rather than wrapping: a publisher
+// timestamp near 2^64 must not produce a deadline in the past.
+func readyDeadlineTS(firstSendTS uint64, window time.Duration) uint64 {
+	if window <= 0 {
+		return firstSendTS
+	}
+	w := uint64(window)
+	if firstSendTS > math.MaxUint64-w {
+		return math.MaxUint64
+	}
+	return firstSendTS + w
+}
+
 // snapPortDirty reports whether the channel's snapshot verifiability window is
 // tainted (a snapshot-seq gap or transport corruption occurred this era). Used
 // by the SNAP.TOTAL_ORDERS_COUNT_MATCH under-count gate so a truncated snapshot
@@ -418,9 +482,7 @@ func (e *Engine) Process(src netip.Addr, f *wire.Frame, port core.Port, sf []wir
 	// Step 1: classify old-era drained items BEFORE advancing era. This ensures
 	// old-era gap/seq detection (transport loss for forward gaps, SEQ_RESET_GAP
 	// for backward motion) fires with the old tracker state still intact.
-	for _, item := range res.preDrainItems {
-		e.classify(item, pt)
-	}
+	e.classifyDrained(res.preDrainItems, pt)
 
 	// Step 2: advance era and enqueue the new-era item (for eraNewer transition).
 	if res.advanceEra {
@@ -711,9 +773,7 @@ func (e *Engine) Flush() {
 	for _, port := range []core.Port{core.PortMktData, core.PortRefData, core.PortSnapshot} {
 		for _, key := range e.instancesOn(port) {
 			pt := e.ports[key]
-			for _, item := range pt.drainAll() {
-				e.classify(item, pt)
-			}
+			e.classifyDrained(pt.drainAll(), pt)
 		}
 	}
 }
@@ -738,8 +798,9 @@ func (e *Engine) Flush() {
 // settles it comes from the other port.
 //
 // REFDATA.NEVER_REACHES_READY (Task 15): the serving period each channel still had
-// open at end of stream. Periods a Valid=0 closed were already reported when the
-// next one opened; see checkNeverReachesReady.
+// open at end of feed. Periods a Valid=0 closed were already reported when the
+// next one opened, and a period whose window closed mid-run was reported there; see
+// decideNeverReachesReady.
 func (e *Engine) EndRun() {
 	// Flush any snapshot groups that were opened but never closed.
 	e.flushOpenSnaps()
@@ -755,45 +816,187 @@ func (e *Engine) EndRun() {
 	e.refdata.resolveShutdownVerdicts()
 
 	for ch, s := range e.refdata.channels {
-		e.checkNeverReachesReady(ch, s)
+		// Seq 0: the end of the feed is not a datagram, so there is nothing to point at.
+		e.decideNeverReachesReady(ch, s, 0, true)
 	}
 }
 
-// checkNeverReachesReady reports REFDATA.NEVER_REACHES_READY for one serving period
-// of one channel, measured between its first and last Valid=1 summary. Called from
-// EndRun for the period still open at end of stream, and from onManifestSummary for
-// one a Valid=0 closed and a later Valid=1 replaced.
+// decideNeverReachesReady reports REFDATA.NEVER_REACHES_READY for one serving period
+// of one channel, measured between its first and last Valid=1 summary, at most once
+// per period. Called per refdata datagram, from onManifestSummary for a period a
+// Valid=0 closed and a later Valid=1 replaced, and from EndRun for the period still
+// open at end of feed.
+//
+// **It runs during the run, not only at the end.** The rule's own summary is that a
+// fresh both-port subscriber reaches ready() within manifest cadence + cycle, and
+// that is decidable the moment the window closes — waiting for EndRun makes the rule
+// unreachable in the deployment it matters most in, because a `dz-conformance@`
+// systemd instance never ends (#50). A checker that only speaks at exit cannot alert.
+//
+// `final` is true from EndRun and from the close of a superseded period. The three
+// non-terminal outcomes — no manifest yet, regressed timestamps, a span still short
+// of the window — are answers to "not yet", so mid-period they defer rather than
+// report; more wire may still settle them. The two terminal ones report as soon as
+// they are true:
+//
+//   - ready reached inside the window → Pass, at the datagram that reached it.
+//   - ready reached past it, or the window closed without ready → Violation, at the
+//     datagram that settled it.
+//
+// **A mid-run Violation waits for every path's in-window datagrams.** A reorder buffer
+// can still hold the definitions that complete the set, on this path or on another, and
+// a verdict taken over them grades a publisher on a set the engine has not read to the
+// end of — see refdataUnclassifiedWithin. A Pass does not wait: a definition still in a
+// buffer can add to the set, never take from it, so it cannot unmake a readiness the
+// channel already reached in time.
 //
 // Each period is one opportunity, and each of the five ways out below reports it. A
 // period that reached ready is the rule *passing* — the reason it was silent is that
 // the check is written as a search for failures, which is exactly the shape that
 // makes coverage and no-op indistinguishable (engine/denominator.go).
-func (e *Engine) checkNeverReachesReady(ch uint8, s *channelRefdataState) {
-	if e.cfg.ExpectManifestCadence == 0 || e.cfg.ExpectDefinitionCycle == 0 {
+//
+// Deciding at the window rather than at exit also fixes a masking bug: a period that
+// reached ready long AFTER the window used to report Pass, because EndRun only asked
+// whether ready was ever reached, not whether it was reached in time. Closing it takes
+// the readiness timestamp, not the span: the span ends at the last Valid=1 summary, so
+// where none lands between the window closing and a late readiness there is no span
+// past the window to catch it.
+func (e *Engine) decideNeverReachesReady(ch uint8, s *channelRefdataState, datagramSeq uint64, final bool) {
+	if s.neverReadyDecided {
+		return
+	}
+	// An unsupported schema version downgrades every non-envelope rule for the
+	// datagram being classified, and neverReadyDecided would latch that downgrade for
+	// the whole serving period: one datagram from a mid-upgrade publisher, landing at
+	// the moment the window closes, would record the Violation as NA/Info and no later
+	// datagram could restate it. Defer instead, so a clean one decides the period.
+	// Not when final: EndRun and a closed period are the last word, and deferring
+	// there would trade the downgrade for the silence this whole change exists to fix.
+	if e.curUnknownSchema && !final {
+		return
+	}
+	// **Not configured to measure a window, so this reports nothing at all.**
+	// `denominator.go` draws the line: "A rule that is off because its `--expect-*` flag was
+	// not passed reports nothing… This invariant is about stream state, not configuration."
+	// An `inapplicable` here would put an NA for a Must rule on every run missing either
+	// flag, which is a claim about the feed made out of a fact about the command line.
+	//
+	// The silence #50 is about is a different thing, and `Config.Configured` is what keeps
+	// them apart: it requires BOTH flags for this rule, so a half-configured run has the
+	// rule out of scope and out of the denominator rather than in scope and quiet.
+	//
+	// Non-positive, not zero: `Configured` reads both flags as `> 0`, so a negative
+	// duration on the command line takes the rule out of scope there. Testing `== 0`
+	// here let the same run compute a negative window and report against it.
+	if e.cfg.ExpectManifestCadence <= 0 || e.cfg.ExpectDefinitionCycle <= 0 {
+		if final {
+			s.neverReadyDecided = true
+		}
 		return
 	}
 	window := e.cfg.ExpectManifestCadence + e.cfg.ExpectDefinitionCycle
+	// True while a reorder buffer of this channel still holds a datagram from inside the
+	// window. Every Violation below waits for it; see the note on the buffers above.
+	unread := !final && s.firstSendTSSet &&
+		e.refdataUnclassifiedWithin(ch, readyDeadlineTS(s.firstSendTS, window))
 	if s.everReady {
-		e.passed("REFDATA.NEVER_REACHES_READY", core.PortRefData, 0, ch, 0,
+		// Ready alone is not a Pass — the rule grades a deadline. Compare the moment
+		// readiness was reached against the window, because the span below cannot see
+		// a late ready that no later Valid=1 summary follows.
+		// **The deadline is inclusive, and the same definition governs the span branch
+		// below**: in time means elapsed <= window, so a channel that reaches ready at
+		// exactly the deadline passes, and one that has not is only a violation once the
+		// span STRICTLY exceeds the window. Graded the other way round, the two branches
+		// disagreed at the deadline itself and the verdict fell to whichever datagram was
+		// classified first.
+		measurable := s.firstSendTSSet && s.readySendTSSet && s.readySendTS >= s.firstSendTS &&
+			s.readySendTS-s.firstSendTS <= math.MaxInt64
+		if !measurable {
+			// **Not a pass.** The ladder used to fall through to one here, which turned
+			// every unmeasurable shape into a Must rule passing: readiness stamped behind
+			// the period's first manifest (`readySendTS < firstSendTS`), or a delta at or
+			// past 2^63, which `time.Duration` casts to a negative span. Ready was reached
+			// and the deadline was not measured; say that.
+			if unread {
+				return
+			}
+			s.neverReadyDecided = true
+			e.unverified("REFDATA.NEVER_REACHES_READY", core.ReasonSuperseded, core.PortRefData, datagramSeq, ch, 0,
+				fmt.Sprintf("channel %d reached ready, but the wire timestamps do not measure it against the period start (FRAME.SEND_TS_MONOTONIC reports the regression)", ch))
+			return
+		}
+		if elapsed := time.Duration(s.readySendTS-s.firstSendTS) * time.Nanosecond; elapsed > window {
+			// A buffered definition can only make the channel ready EARLIER, so a late
+			// ready is not late until every in-window datagram has been classified.
+			if unread {
+				return
+			}
+			st := core.Violation
+			reason := ""
+			if e.dirtyOn(core.PortRefData, ch) {
+				st = core.Unverifiable
+				reason = core.ReasonLoss
+			}
+			s.neverReadyDecided = true
+			e.Emit("REFDATA.NEVER_REACHES_READY", st, core.PortRefData, datagramSeq, ch, 0,
+				fmt.Sprintf("channel %d reached ready after %v, past the %v window", ch, elapsed, window), reason)
+			return
+		}
+		s.neverReadyDecided = true
+		e.passed("REFDATA.NEVER_REACHES_READY", core.PortRefData, datagramSeq, ch, 0,
 			fmt.Sprintf("channel %d reached ready state", ch))
 		return
 	}
 	if !s.firstSendTSSet || !s.lastServingSendTSSet {
-		e.unverified("REFDATA.NEVER_REACHES_READY", core.ReasonColdStart, core.PortRefData, 0, ch, 0,
+		if !final {
+			return
+		}
+		s.neverReadyDecided = true
+		e.unverified("REFDATA.NEVER_REACHES_READY", core.ReasonColdStart, core.PortRefData, datagramSeq, ch, 0,
 			fmt.Sprintf("channel %d: no ManifestSummary observed, so the observation span is unknown", ch))
 		return
 	}
 	if s.lastServingSendTS < s.firstSendTS {
 		// Wire timestamps regressed (FRAME.SEND_TS_MONOTONIC fires separately);
-		// skip this channel rather than computing a spurious negative/huge span.
-		e.unverified("REFDATA.NEVER_REACHES_READY", core.ReasonSuperseded, core.PortRefData, 0, ch, 0,
+		// skip this period rather than computing a spurious negative/huge span.
+		if !final {
+			return
+		}
+		s.neverReadyDecided = true
+		e.unverified("REFDATA.NEVER_REACHES_READY", core.ReasonSuperseded, core.PortRefData, datagramSeq, ch, 0,
 			fmt.Sprintf("channel %d: wire timestamps regressed, so the span is not measurable (FRAME.SEND_TS_MONOTONIC reports it)", ch))
 		return
 	}
+	// **Two spans, and they answer different questions.** `span` is what the period is
+	// CHARGED with — it ends at the last Valid=1 summary, so a publisher that keeps its
+	// cadence while invalid does not turn a 2 s period into a minute-long one. `closedBy`
+	// only asks whether the deadline has passed, and it advances on any refdata datagram
+	// sent while the channel is serving: a definition or a heartbeat past the deadline is
+	// proof the deadline passed, which is what lets this decide at all in a process that
+	// does not exit rather than only at EndRun (the silence half of #50).
+	//
+	// **Both go in the detail, because `closedBy` is what the verdict was decided on.**
+	// Printing the span alone read as self-contradictory — "observed 0s (> window 2s)" —
+	// and hid which clock closed the window.
 	span := time.Duration(s.lastServingSendTS-s.firstSendTS) * time.Nanosecond
-	if span < window {
-		e.unverified("REFDATA.NEVER_REACHES_READY", core.ReasonInsufficientWindow, core.PortRefData, 0, ch, 0,
-			fmt.Sprintf("channel %d: observed %v, less than the %v a publisher needs to reach ready", ch, span, window))
+	closedBy := span
+	if s.lastRefdataSendTSSet && s.lastRefdataSendTS > s.lastServingSendTS {
+		closedBy = time.Duration(s.lastRefdataSendTS-s.firstSendTS) * time.Nanosecond
+	}
+	// `<=`, not `<`: see the inclusive deadline above. A window equal to the elapsed time
+	// is a publisher that still had until this instant, so it is not yet a violation.
+	if closedBy <= window {
+		if !final {
+			return
+		}
+		s.neverReadyDecided = true
+		e.unverified("REFDATA.NEVER_REACHES_READY", core.ReasonInsufficientWindow, core.PortRefData, datagramSeq, ch, 0,
+			fmt.Sprintf("channel %d: observed %v on the refdata port (serving span %v), which does not exceed the %v a publisher has to reach ready",
+				ch, closedBy, span, window))
+		return
+	}
+	// The window closed on a set the engine may not have read to the end of; wait.
+	if unread {
 		return
 	}
 	// Gate: if any refdata window on this channel is dirty, downgrade.
@@ -804,7 +1007,8 @@ func (e *Engine) checkNeverReachesReady(ch uint8, s *channelRefdataState) {
 		st = core.Unverifiable
 		reason = core.ReasonLoss
 	}
-	e.Emit("REFDATA.NEVER_REACHES_READY", st, core.PortRefData, 0, ch, 0,
-		fmt.Sprintf("channel %d: observed %v (≥ window %v) but never reached ready state",
-			ch, span, window), reason)
+	s.neverReadyDecided = true
+	e.Emit("REFDATA.NEVER_REACHES_READY", st, core.PortRefData, datagramSeq, ch, 0,
+		fmt.Sprintf("channel %d: %v elapsed on the refdata port (> window %v, serving span %v) but never reached ready state",
+			ch, closedBy, window, span), reason)
 }
