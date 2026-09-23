@@ -86,7 +86,7 @@ Until the ID `1` publishers filter, the two IDs overlap rather than partition: a
 
 This is the second of that venue's four matching engines to be claimed. The ID `6` section lists all four. This ID is distinct from ID `6` under the **first** half of the engine rule: the order-matching rules differ. The spot engine matches an exchange of two assets, and settles it at the match. The USD-margined engine matches margined contracts, with funding payments and liquidation. The two run on separate stacks under separate rate limits, and spot offers a binary SBE market data interface where the USD-margined stack is JSON only.
 
-The assignment does **not** rest on the second half of the rule, and a reader must not infer that the instrument sets are disjoint. The two engines share symbol strings. `BTCUSDT` names a spot pair on one engine and a perpetual contract on the other. They are different instruments under the same string, which is a further reason `Source ID` is the engine key and a symbol is not.
+The assignment does **not** rest on the second half of the rule. The engines can expose the same symbol strings: `BTCUSDT` names a spot pair on one engine and a perpetual contract on the other. These are different instruments even though they use the same symbol, so a symbol cannot establish whether the instrument sets are disjoint; `Source ID` remains the engine key.
 
 `Name` is `Binance Spot`. It says spot and nothing narrower, because the engine matches every spot pair whatever the quote asset. On 18 September 2026 the venue listed 1,368 pairs in the `TRADING` state, against 566 instruments on the engine that holds ID `6`. `Code` is `BINANCE`, which ID `6` already carries, under the rule that a `Code` names the venue.
 
