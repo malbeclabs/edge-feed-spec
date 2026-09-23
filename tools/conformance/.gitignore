@@ -1,4 +1,6 @@
-dz-conformance
+# Build output. A bare name would also match cmd/dz-publish, the source directory.
+/dz-conformance
+/dz-publish
 
 # Local demo env (copied from .env.example); never commit real feed config.
 .env
