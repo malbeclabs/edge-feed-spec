@@ -1,6 +1,9 @@
 package core
 
-import "time"
+import (
+	"net/netip"
+	"time"
+)
 
 type Severity int
 
@@ -43,6 +46,35 @@ const (
 	StateRefdata
 	StateSnapshotGroup
 )
+
+// InstanceScoped reports whether a rule holding this kind of state judges one
+// CHANNEL INSTANCE — "one path's view of one channel, keyed (source IP address,
+// Channel ID, destination port)" (GLOSSARY.md) — rather than the channel as a
+// whole.
+//
+// This is what decides whether a finding can name the publisher that caused it,
+// and it is read from the rule catalog rather than from where the finding was
+// emitted. The two are not the same: REFDATA.NEVER_REACHES_READY fires from
+// inside per-datagram classification, but it is decided over a set every path of
+// the channel contributes to (see refdataUnclassifiedWithin), so the path that
+// happened to deliver the settling datagram did not cause the verdict.
+//
+// The split follows the state each rule holds, and the GLOSSARY's own definition
+// of the instance draws it:
+//
+//   - StateNone judges the datagram in front of it and nothing else, so its
+//     subject is whichever path sent that datagram.
+//   - StateCounters is the sequence series and the Reset Count, which the glossary
+//     names as the two things an instance OWNS. Two publishers serving one channel
+//     each advance their own, which is why engine.ports keys on the instance.
+//   - StateOrderIDSet, StateFullBook, StateSnapshotGroup and StateRefdata are
+//     reconstructed from every path at once — engine.mbo, engine.mbp and
+//     engine.refdata all key on the channel — so no single address is their
+//     subject, and attributing one would name a publisher for a book its peer
+//     also filled.
+func (k StateKind) InstanceScoped() bool {
+	return k == StateNone || k == StateCounters
+}
 
 type Feed string
 
@@ -147,11 +179,21 @@ func ValidReason(s string) bool {
 
 // Finding is the unit of output. Reporters consume it.
 type Finding struct {
-	RuleID       string
-	Severity     Severity
-	Status       Status
-	Feed         Feed
-	Port         Port
+	RuleID   string
+	Severity Severity
+	Status   Status
+	Feed     Feed
+	Port     Port
+	// SourceAddr is the publisher whose datagrams this finding judges, and it is
+	// set only where the rule's subject is one channel instance — see
+	// StateKind.InstanceScoped. The zero Addr means "this verdict is about the
+	// channel, not about one path", which is a statement and not a missing value:
+	// a reader must never fill it in by picking whichever publisher was nearby.
+	//
+	// A validator subscribes to a GROUP, so it receives every path merged. The
+	// address is the only thing that tells them apart, and the engine already
+	// keys its own instance state on it (engine.instanceKey).
+	SourceAddr   netip.Addr
 	ChannelID    uint8
 	InstrumentID uint32 // 0 when not instrument-scoped
 	// NoInstrumentID is set when the finding's subject carries no Instrument ID at

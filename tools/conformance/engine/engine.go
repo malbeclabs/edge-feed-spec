@@ -26,7 +26,22 @@ type Engine struct {
 	cfg              Config
 	rep              report.Reporter
 	curUnknownSchema bool
-	now              func() time.Time
+	// curSrc is the publisher whose datagram is in front of the engine, read by emit for
+	// instance-scoped rules. It follows curUnknownSchema's shape deliberately: the
+	// alternative is threading an address through ~140 Emit call sites, nearly all
+	// of which are rules that must NOT carry one.
+	//
+	// Written in two places, and both are needed. Process sets it on entry, because it
+	// emits before the datagram is classified. classify sets it from the tracker it is
+	// handed, because Flush drains buffers with no caller holding an address at all.
+	//
+	// Cleared by EndRun, whose checks run over merged state with no datagram in
+	// front of them. Every rule they emit is channel-scoped today and so would
+	// drop the address anyway; clearing it means a rule that later moves into
+	// those paths reads no address rather than the last one classify happened to
+	// leave behind.
+	curSrc netip.Addr
+	now    func() time.Time
 	// reorder buffers and seq trackers, one per channel instance — per (source
 	// address, port, channel). Sequencing keys on the instance and never on the
 	// channel (GLOSSARY.md): two publishers may serve one channel on one group and
@@ -164,9 +179,16 @@ func (e *Engine) emit(ruleID string, st core.Status, port core.Port, seq uint64,
 	if st == core.Unverifiable && rsn == core.ReasonLoss && e.captureDirtyOn(port, ch) {
 		rsn = core.ReasonCaptureLoss
 	}
+	// The address travels only for rules whose subject IS one path's view of the
+	// channel. meta is the catalog's own answer, so a rule changes scope by moving
+	// in the registry and not by being emitted from somewhere new.
+	var src netip.Addr
+	if meta.State.InstanceScoped() {
+		src = e.curSrc
+	}
 	e.rep.Record(core.Finding{RuleID: ruleID, Severity: sev, Status: st, Feed: e.cfg.Feed,
-		Port: port, Seq: seq, ChannelID: ch, InstrumentID: inst, NoInstrumentID: noInst,
-		Detail: detail, Reason: rsn, At: e.now()})
+		Port: port, SourceAddr: src, Seq: seq, ChannelID: ch, InstrumentID: inst,
+		NoInstrumentID: noInst, Detail: detail, Reason: rsn, At: e.now()})
 }
 
 // maxChannelInstances bounds the tracker map. The source address is part of the
@@ -202,6 +224,7 @@ func (e *Engine) instanceTrack(src netip.Addr, port core.Port, ch uint8) *portTr
 			e.evictOldestInstance()
 		}
 		pt = newPortTracker(e.cfg.ReorderWindow)
+		pt.src = src
 		e.ports[key] = pt
 	}
 	e.seenCounter++
@@ -405,6 +428,14 @@ func (e *Engine) snapPortDirty(ch uint8) bool {
 // findings + tier1 + seq detector rules) runs when items are popped from the
 // buffer in seq order.
 func (e *Engine) Process(src netip.Addr, f *wire.Frame, port core.Port, sf []wire.StructFinding) {
+	// Whose datagram this is, set before anything can emit. classify() sets it again from the
+	// tracker it is handed — which is the same address for every path through here — but it is
+	// not the only emitter: the FRAME.MKTDATA_SEQ_START check below runs BEFORE the datagram
+	// that triggered it is classified. On an era advance whose buffer was already drained there
+	// are no old-era items to classify first, so without this the rule reads whatever address
+	// classification last saw, and on a group two publishers share that is the other one.
+	e.curSrc = src
+
 	pt := e.instanceTrack(src, port, f.Header.ChannelID)
 	tuple := intakeTuple{frame: f, port: port, structFindings: sf, captureEpoch: e.captureLossEpoch}
 
@@ -482,6 +513,10 @@ func (e *Engine) classify(item *bufferItem, pt *portTracker) {
 	f := item.tuple.frame
 	port := item.tuple.port
 	sf := item.tuple.structFindings
+
+	// Whose datagram this is. Taken from the tracker rather than from a parameter
+	// because Flush drains buffers with no caller holding the address.
+	e.curSrc = pt.src
 
 	// Capture previous SendTS before observe() updates it.
 	var prevSendTS *uint64
@@ -741,6 +776,9 @@ func (e *Engine) Flush() {
 // open at end of stream. Periods a Valid=0 closed were already reported when the
 // next one opened; see checkNeverReachesReady.
 func (e *Engine) EndRun() {
+	// No datagram is in front of these checks; see Engine.curSrc.
+	e.curSrc = netip.Addr{}
+
 	// Flush any snapshot groups that were opened but never closed.
 	e.flushOpenSnaps()
 	e.flushOpenMBPSnaps()
