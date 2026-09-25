@@ -46,20 +46,20 @@ func NewProm(reg *prometheus.Registry, version, commit string, feed core.Feed) *
 	p.violations = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: promNamespace,
 		Name:      "violations_total",
-		Help:      "Total confirmed conformance violations by feed, rule, and severity.",
-	}, []string{"feed", "rule_id", "severity"})
+		Help:      "Total confirmed conformance violations by feed, rule, severity, and publisher source address. `source_addr` names the publisher whose datagrams the rule judged; it is EMPTY for a rule decided over state every path of the channel fills (the book, the snapshot groups, the reference data), where no single publisher is the subject. An empty value is a statement, not an unknown.",
+	}, []string{"feed", "rule_id", "severity", "source_addr"})
 
 	p.unverifiable = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: promNamespace,
 		Name:      "unverifiable_total",
-		Help:      "Total checks that could not be verified, by feed, rule, and cause. `reason` is a closed enum; it breaks a rule's shortfall against checks_total down by what stopped it.",
-	}, []string{"feed", "rule_id", "reason"})
+		Help:      "Total checks that could not be verified, by feed, rule, cause, and publisher source address. `reason` is a closed enum; it breaks a rule's shortfall against checks_total down by what stopped it. See violations_total for what an empty `source_addr` means.",
+	}, []string{"feed", "rule_id", "reason", "source_addr"})
 
 	p.checks = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: promNamespace,
 		Name:      "checks_total",
-		Help:      "Total checks by feed, rule, and result (pass|violation|suspected|unverifiable|na). Summed over `result` this is a rule's denominator: for a rule whose execution is conditional, compare result=\"pass\" against it to read the coverage actually achieved rather than assuming silence means clean.",
-	}, []string{"feed", "rule_id", "result"})
+		Help:      "Total checks by feed, rule, result (pass|violation|suspected|unverifiable|na), and publisher source address. Summed over `result` this is a rule's denominator: for a rule whose execution is conditional, compare result=\"pass\" against it to read the coverage actually achieved rather than assuming silence means clean. Summing over `source_addr` as well gives the channel's denominator; see violations_total for what an empty value means.",
+	}, []string{"feed", "rule_id", "result", "source_addr"})
 
 	p.transportLoss = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: promNamespace,
@@ -135,6 +135,26 @@ func NewProm(reg *prometheus.Registry, version, commit string, feed core.Feed) *
 	return p
 }
 
+// sourceAddrLabel renders the publisher a finding judges, or "" when the finding
+// is about the channel as a whole (core.StateKind.InstanceScoped).
+//
+// **The empty string is the honest value and must stay empty.** A placeholder such
+// as "unknown" or "0.0.0.0" reads as an address the checker failed to determine,
+// when what it actually means is that the rule has no single path as its subject.
+// A consumer grouping by this label gets one series for the channel-scoped rules,
+// which is exactly one bucket for a set of verdicts that share a subject.
+//
+// Cardinality is bounded by the publishers on the group — two on every redundant
+// feed deployed today — and only instance-scoped rules multiply at all, so this
+// at most doubles the series of the 52 rules that carry it and leaves the other
+// 37 at one apiece.
+func sourceAddrLabel(f core.Finding) string {
+	if !f.SourceAddr.IsValid() {
+		return ""
+	}
+	return f.SourceAddr.String()
+}
+
 // feedApplies reports whether feed is in the rule's applicable-feeds list.
 func feedApplies(feed core.Feed, feeds []core.Feed) bool {
 	return slices.Contains(feeds, feed)
@@ -146,12 +166,13 @@ func (p *Prom) Record(f core.Finding) {
 	feed := string(f.Feed)
 	sev := f.Severity.String()
 	result := statusString(f.Status)
+	src := sourceAddrLabel(f)
 
-	p.checks.WithLabelValues(feed, f.RuleID, result).Inc()
+	p.checks.WithLabelValues(feed, f.RuleID, result, src).Inc()
 
 	switch f.Status {
 	case core.Violation:
-		p.violations.WithLabelValues(feed, f.RuleID, sev).Inc()
+		p.violations.WithLabelValues(feed, f.RuleID, sev, src).Inc()
 	case core.Unverifiable:
 		// reason MUST be a bounded enum (Finding.Reason), never the free-form Detail,
 		// to keep this metric's cardinality bounded.
@@ -159,7 +180,7 @@ func (p *Prom) Record(f core.Finding) {
 		if reason == "" {
 			reason = "unspecified"
 		}
-		p.unverifiable.WithLabelValues(feed, f.RuleID, reason).Inc()
+		p.unverifiable.WithLabelValues(feed, f.RuleID, reason, src).Inc()
 	}
 }
 
