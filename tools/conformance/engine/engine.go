@@ -310,9 +310,11 @@ func (e *Engine) classifyDrained(items []*bufferItem, pt *portTracker) {
 	pt.unclassified = nil
 }
 
-// refdataUnclassifiedWithin reports whether a refdata reorder buffer of this channel
-// still holds a datagram sent at or before deadlineTS. It looks at EVERY path of the
-// channel, the one being classified included.
+// refdataUnclassifiedWithin reports what the refdata reorder buffers of this channel still
+// hold from before deadlineTS. It looks at EVERY path of the channel, the one being
+// classified included. `pending` is a datagram on a path that still sends, and the verdict
+// waits for it. `stranded` is a datagram from inside the serving period on a path that
+// stopped, and the verdict cannot wait for it.
 //
 // **A verdict taken before those datagrams are classified grades the publisher on a set
 // the engine has not finished reading.** The paths of one channel share its reference-data
@@ -328,23 +330,46 @@ func (e *Engine) classifyDrained(items []*bufferItem, pt *portTracker) {
 // datagram sent after the deadline cannot change whether the deadline was met, so those
 // are not worth waiting for, and once the deadline is behind the publisher every buffer
 // holds only datagrams past it.
-func (e *Engine) refdataUnclassifiedWithin(ch uint8, deadlineTS uint64) bool {
+//
+// **A path that stopped sending never releases its buffer.** A datagram leaves a reorder
+// buffer only when later datagrams of the same path push it out, or at Flush. A publisher
+// address is a tunnel lease, and a reassigned lease leaves the old path's buffer full for
+// the life of the process, with SendTS values at or before every later deadline. A wait
+// on it is a wait without end, which is #50 again. So a path is stopped when its last
+// arrival is more than `silence` behind nowTS, the channel's refdata clock. The caller
+// passes the rule's own window: a path that sends a ManifestSummary every cadence cannot
+// be silent for a whole cadence + cycle. A path that is only behind still arrives, and the
+// verdict still waits for it.
+//
+// **A stopped path's datagram is not a wait, and it is not nothing either.** One sent
+// inside the serving period, at or after periodStartTS, could be the definition that
+// completes the set, and the engine does not read it before Flush. That is `stranded`,
+// and the caller reports Unverifiable for it — received and never judged, the reason
+// evictOldestInstance accounts a buffer as loss. One sent before the period started is
+// not something a fresh subscriber at the period start receives, so it is neither: were
+// it counted, one lease change would downgrade every later period for the life of the
+// process.
+func (e *Engine) refdataUnclassifiedWithin(ch uint8, periodStartTS, deadlineTS, nowTS uint64, silence time.Duration) (pending, stranded bool) {
 	for k, pt := range e.ports {
 		if k.port != core.PortRefData || k.ch != ch {
 			continue
 		}
-		for _, item := range pt.buf {
-			if item.tuple.frame.Header.SendTS <= deadlineTS {
-				return true
-			}
-		}
-		for _, item := range pt.unclassified {
-			if item.tuple.frame.Header.SendTS <= deadlineTS {
-				return true
+		stopped := pt.lastArrivalSendTSSet && nowTS > pt.lastArrivalSendTS &&
+			nowTS-pt.lastArrivalSendTS > uint64(silence)
+		for _, items := range [][]*bufferItem{pt.buf, pt.unclassified} {
+			for _, item := range items {
+				ts := item.tuple.frame.Header.SendTS
+				switch {
+				case ts > deadlineTS:
+				case !stopped:
+					pending = true
+				case ts >= periodStartTS:
+					stranded = true
+				}
 			}
 		}
 	}
-	return false
+	return pending, stranded
 }
 
 // readyDeadlineTS returns the wire time by which a serving period that started at
@@ -376,6 +401,10 @@ func (e *Engine) snapPortDirty(ch uint8) bool {
 // buffer in seq order.
 func (e *Engine) Process(src netip.Addr, f *wire.Frame, port core.Port, sf []wire.StructFinding) {
 	pt := e.instanceTrack(src, port, f.Header.ChannelID)
+	if !pt.lastArrivalSendTSSet || f.Header.SendTS > pt.lastArrivalSendTS {
+		pt.lastArrivalSendTS = f.Header.SendTS
+		pt.lastArrivalSendTSSet = true
+	}
 	tuple := intakeTuple{frame: f, port: port, structFindings: sf}
 
 	res := pt.enqueue(tuple, e.cfg.ReorderWindow)
@@ -726,7 +755,9 @@ func (e *Engine) EndRun() {
 // a verdict taken over them grades a publisher on a set the engine has not read to the
 // end of — see refdataUnclassifiedWithin. A Pass does not wait: a definition still in a
 // buffer can add to the set, never take from it, so it cannot unmake a readiness the
-// channel already reached in time.
+// channel already reached in time. The wait covers only paths that still send. A path
+// silent for a whole window does not release its buffer before Flush, so its in-window
+// datagrams make the Violation Unverifiable instead of holding it forever.
 //
 // Each period is one opportunity, and each of the five ways out below reports it. A
 // period that reached ready is the rule *passing* — the reason it was silent is that
@@ -773,10 +804,19 @@ func (e *Engine) decideNeverReachesReady(ch uint8, s *channelRefdataState, datag
 		return
 	}
 	window := e.cfg.ExpectManifestCadence + e.cfg.ExpectDefinitionCycle
-	// True while a reorder buffer of this channel still holds a datagram from inside the
-	// window. Every Violation below waits for it; see the note on the buffers above.
-	unread := !final && s.firstSendTSSet &&
-		e.refdataUnclassifiedWithin(ch, readyDeadlineTS(s.firstSendTS, window))
+	// `unread` is true while a reorder buffer of a path that still sends holds a datagram
+	// from inside the window. Every Violation below waits for it; see the note on the
+	// buffers above. `stranded` is the same datagram on a path that stopped sending, and
+	// it turns every Violation below into Unverifiable instead of a wait.
+	var unread, stranded bool
+	if !final && s.firstSendTSSet {
+		nowTS := s.lastServingSendTS
+		if s.lastRefdataSendTSSet && s.lastRefdataSendTS > nowTS {
+			nowTS = s.lastRefdataSendTS
+		}
+		unread, stranded = e.refdataUnclassifiedWithin(ch, s.firstSendTS,
+			readyDeadlineTS(s.firstSendTS, window), nowTS, window)
+	}
 	if s.everReady {
 		// Ready alone is not a Pass — the rule grades a deadline. Compare the moment
 		// readiness was reached against the window, because the span below cannot see
@@ -811,7 +851,7 @@ func (e *Engine) decideNeverReachesReady(ch uint8, s *channelRefdataState, datag
 			}
 			st := core.Violation
 			reason := ""
-			if e.dirtyOn(core.PortRefData, ch) {
+			if stranded || e.dirtyOn(core.PortRefData, ch) {
 				st = core.Unverifiable
 				reason = core.ReasonLoss
 			}
@@ -877,8 +917,9 @@ func (e *Engine) decideNeverReachesReady(ch uint8, s *channelRefdataState, datag
 	if unread {
 		return
 	}
-	// Gate: if any refdata window on this channel is dirty, downgrade.
-	dirty := e.dirtyOn(core.PortRefData, ch)
+	// Gate: if any refdata window on this channel is dirty, or a path that stopped holds
+	// a datagram from inside the window, downgrade.
+	dirty := stranded || e.dirtyOn(core.PortRefData, ch)
 	st := core.Violation
 	reason := ""
 	if dirty {

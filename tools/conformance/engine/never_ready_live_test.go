@@ -453,3 +453,86 @@ func TestNeverReachesReadyNegativeExpectationIsOutOfScopeToo(t *testing.T) {
 		t.Errorf("REFDATA.NEVER_REACHES_READY: %d verdict(s) against a negative window (%s)", len(found), found[0].Detail)
 	}
 }
+
+// reassignedPathEngine is liveReadyEngine at the CLI default reorder window, which is
+// what lets a path that stops sending keep datagrams it never releases.
+func reassignedPathEngine() (*Engine, *allCapture) {
+	ac := &allCapture{}
+	return New(Config{
+		Feed:                  core.FeedTOB,
+		ExpectManifestCadence: 1 * time.Second,
+		ExpectDefinitionCycle: 1 * time.Second,
+		ReorderWindow:         8,
+	}, ac), ac
+}
+
+// TestNeverReachesReadyDoesNotWaitForAPathThatStopped: a publisher address is a tunnel
+// lease, and a reassigned lease leaves the old path's reorder buffer full for the life
+// of the process. Nothing drains it before Flush, so a wait on it is a wait without end,
+// and the rule goes quiet for the channel — the silence of #50, reached through the
+// wait that guards the verdict.
+//
+// Here the old path stops at t=1s with three datagrams in its buffer, all sent before
+// the serving period the new path opens at t=1.5s. The publisher announces two
+// instruments and ships one, so the period is a Violation, and it has to be one while
+// the process still runs.
+func TestNeverReachesReadyDoesNotWaitForAPathThatStopped(t *testing.T) {
+	e, ac := reassignedPathEngine()
+
+	manifest := func(ts uint64) []byte { return buildManifestFrameWithTS(wire.MagicTOB, ts, 1, 1, 2, 1) }
+	processDatagramFrom(e, srcA, manifest(0), core.PortRefData, 1)
+	processDatagramFrom(e, srcA, buildInstrDefFrameWithTS(nsPerSec/10, 100, 1, 1), core.PortRefData, 2)
+	processDatagramFrom(e, srcA, manifest(nsPerSec), core.PortRefData, 3)
+	// The lease moves. The new path keeps the cadence out to t=100s and ships only
+	// instrument 100.
+	seq := uint64(4)
+	for ts := 3 * nsPerSec / 2; ts <= 100*nsPerSec; ts += nsPerSec / 2 {
+		processDatagramFrom(e, srcB, manifest(ts), core.PortRefData, seq)
+		seq++
+		processDatagramFrom(e, srcB, buildInstrDefFrameWithTS(ts+nsPerSec/10, 100, 1, 1), core.PortRefData, seq)
+		seq++
+	}
+
+	found := findingsFor(ac, "REFDATA.NEVER_REACHES_READY")
+	if len(found) != 1 {
+		t.Fatalf("REFDATA.NEVER_REACHES_READY: want 1 verdict before Flush, got %d; a path that stopped sending holds the wait for the life of the process", len(found))
+	}
+	if found[0].Status != core.Violation {
+		t.Errorf("REFDATA.NEVER_REACHES_READY: want a Violation, got %v (%s); the stopped path holds nothing from inside the serving period",
+			found[0].Status, found[0].Detail)
+	}
+}
+
+// TestNeverReachesReadyStoppedPathInsideThePeriodIsUnverifiable: the converse. The old
+// path stops at t=1s of a 2s window with datagrams from inside the serving period still
+// in its buffer. One of them could be the definition that completes the set, and the
+// engine does not read it before Flush. A Violation over it grades a set the engine has
+// not read to the end of; waiting for it is silence. It is Unverifiable, for the reason
+// an evicted buffer is: received and never judged.
+func TestNeverReachesReadyStoppedPathInsideThePeriodIsUnverifiable(t *testing.T) {
+	e, ac := reassignedPathEngine()
+
+	manifest := func(ts uint64) []byte { return buildManifestFrameWithTS(wire.MagicTOB, ts, 1, 1, 2, 1) }
+	// Enough datagrams on the old path that the first ones are classified and open the
+	// serving period at t=0; the last eight stay in its buffer.
+	seq := uint64(1)
+	for ts := uint64(0); ts <= nsPerSec; ts += nsPerSec / 10 {
+		processDatagramFrom(e, srcA, manifest(ts), core.PortRefData, seq)
+		seq++
+	}
+	for ts := 3 * nsPerSec / 2; ts <= 100*nsPerSec; ts += nsPerSec / 2 {
+		processDatagramFrom(e, srcB, manifest(ts), core.PortRefData, seq)
+		seq++
+		processDatagramFrom(e, srcB, buildInstrDefFrameWithTS(ts+nsPerSec/10, 100, 1, 1), core.PortRefData, seq)
+		seq++
+	}
+
+	found := findingsFor(ac, "REFDATA.NEVER_REACHES_READY")
+	if len(found) != 1 {
+		t.Fatalf("REFDATA.NEVER_REACHES_READY: want 1 verdict before Flush, got %d; a path that stopped sending holds the wait for the life of the process", len(found))
+	}
+	if found[0].Status != core.Unverifiable || found[0].Reason != core.ReasonLoss {
+		t.Errorf("REFDATA.NEVER_REACHES_READY: want Unverifiable/%s, got %v/%s (%s); the stopped path holds datagrams from inside the window",
+			core.ReasonLoss, found[0].Status, found[0].Reason, found[0].Detail)
+	}
+}

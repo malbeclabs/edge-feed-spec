@@ -137,6 +137,11 @@ type portTracker struct {
 	// in flight. A check that decides on the set the engine has read so far has to see
 	// them; see Engine.classifyDrained and refdataUnclassifiedWithin.
 	unclassified []*bufferItem
+	// lastArrivalSendTS is the greatest SendTS this instance has delivered, counted on
+	// arrival rather than on classification, quarantined stragglers included. It tells a
+	// path that stopped sending from one that is behind: see refdataUnclassifiedWithin.
+	lastArrivalSendTS    uint64
+	lastArrivalSendTSSet bool
 	// arrivalCounter is incremented on each push and stored in bufferItem.arrival
 	// to provide stable heap ordering for equal-seq duplicates.
 	arrivalCounter uint64
