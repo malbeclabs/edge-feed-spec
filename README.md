@@ -29,7 +29,7 @@ See [VERSIONING.md](./VERSIONING.md) for the change classification, the compatib
 
 | Tool | Description |
 |------|-------------|
-| [dz-conformance](./tools/conformance/) | Conformance subscriber for publishers: validates one feed — live multicast or pcap replay — against an explicit rule catalog drawn from these specs, and returns a CI-friendly exit code |
+| [dz-conformance](./tools/conformance/) | Conformance subscriber for publishers: validates one feed — live multicast or capture replay (`pcap` or `pcapng`) — against an explicit rule catalog drawn from these specs, and returns a CI-friendly exit code |
 
 `dz-conformance` covers the Top-of-Book, Midpoint, Market-by-Order and Market-by-Price feeds, together with the Reference Data supplement they share. The Order-Intent and Perp Stats feeds have no checker yet. Per-feed rule counts and the known coverage gaps are in its [README](./tools/conformance/README.md).
 

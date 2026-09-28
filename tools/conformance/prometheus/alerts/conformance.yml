@@ -24,21 +24,40 @@ groups:
       # operation, which trains an operator to silence it. The causes below are the
       # ones that mean something is wrong upstream:
       #
-      #   loss      a datagram went missing
-      #   overflow  a bounded buffer was outrun (snapshot cycle too long for it)
-      #   untrusted an instrument's history never became established
+      #   loss         a datagram went missing
+      #   capture_loss the recorder admits it failed to record datagrams
+      #   overflow     a bounded buffer was outrun (snapshot cycle too long for it)
+      #   untrusted    an instrument's history never became established
+      #
+      # `capture_loss` reaches a scrape only from a replay run with --metrics-addr,
+      # since a live socket has no such accounting to report. It is here because
+      # when it does appear it is upstream in the same sense as the others — the
+      # recorder rather than the wire — and a set that silently omitted it would be
+      # a second place to keep in step with core.Reason*.
       #
       # See "Coverage vs. silence" in tools/conformance/README.md.
       - alert: ConformanceCoverageLoss
-        expr: increase(dz_conformance_unverifiable_total{reason=~"loss|overflow|untrusted"}[5m]) > 5
+        expr: increase(dz_conformance_unverifiable_total{reason=~"loss|capture_loss|overflow|untrusted"}[5m]) > 5
         for: 2m
         labels:
           severity: warning
         annotations:
           summary: "Conformance coverage loss on {{ $labels.feed }} feed"
+          # The remedy is branched on `reason` because one of these causes is not the
+          # feed's. `capture_loss` is the recorder admitting, in the archive, that it
+          # failed to record datagrams — telling an operator to check feed health and
+          # instrument definitions for it sends them to the wrong machine, and it is
+          # the opposite of why the reason was split out from `loss` in the first place.
           description: >
             Rule {{ $labels.rule_id }} became unverifiable (reason={{ $labels.reason }})
-            on feed {{ $labels.feed }}. Check feed health and instrument definitions.
+            on feed {{ $labels.feed }}.
+            {{ if eq $labels.reason "capture_loss" -}}
+            The recorder admits it failed to record the datagrams, so the coverage was
+            lost between the wire and the archive: check the recorder host and its own
+            drop counters, not the feed.
+            {{- else -}}
+            Check feed health and instrument definitions.
+            {{- end }}
 
       # Warn: a conditional rule has stopped passing while still getting work.
       #

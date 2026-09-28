@@ -86,6 +86,13 @@ const (
 	// ReasonLoss — a datagram went missing and could have carried what the check
 	// needed. Never a publisher fault.
 	ReasonLoss = "loss"
+	// ReasonCaptureLoss — the *capture* admits it failed to record datagrams in
+	// this window (pcapng's epb_dropcount), so what the check needed may never
+	// have reached the file. Distinct from ReasonLoss because the owner is
+	// different: the recorder, not the wire. An offline replay that charges its
+	// own recorder's drops to the publisher is the single error keeping the bytes
+	// was meant to prevent, so the two causes are not allowed to share a label.
+	ReasonCaptureLoss = "capture_loss"
 	// ReasonColdStart — the subscriber joined mid-stream, or the state the check
 	// reads has not been established yet.
 	ReasonColdStart = "cold_start"
@@ -121,7 +128,7 @@ const (
 
 // reasons is the closed set above, for validation.
 var reasons = map[string]struct{}{
-	ReasonLoss: {}, ReasonColdStart: {}, ReasonReorder: {}, ReasonPending: {},
+	ReasonLoss: {}, ReasonCaptureLoss: {}, ReasonColdStart: {}, ReasonReorder: {}, ReasonPending: {},
 	ReasonOverflow: {}, ReasonTruncated: {}, ReasonInsufficientWindow: {},
 	ReasonSuperseded: {}, ReasonUntrusted: {}, ReasonBoundSubset: {},
 	ReasonTransition: {}, ReasonUnspecified: {},

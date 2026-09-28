@@ -32,7 +32,7 @@ func main() {
 	iface := fs.String("interface", "", "network interface for live multicast capture")
 
 	// Replay
-	pcapPath := fs.String("pcap", "", "replay a .pcap file instead of live capture")
+	pcapPath := fs.String("pcap", "", "replay a capture file instead of live capture (.pcap or .pcapng, detected from the file)")
 
 	// Observability
 	metricsAddr := fs.String("metrics-addr", "", "serve Prometheus metrics on this addr (off by default; bind non-public, e.g. 127.0.0.1:9090)")
