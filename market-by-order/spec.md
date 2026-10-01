@@ -782,7 +782,7 @@ The format is fixed-size and binary; parsing requires no allocation, no string h
 
 ## Versioning and Forward Compatibility
 
-This document is version **3.3.0**, versioned independently of the sibling specs. The Schema Version byte in the frame header is `3` and equals this spec's MAJOR version, so it stays `3` for every `3.x.y` release and changes only on a breaking wire change. See the [Versioning Policy](../VERSIONING.md) for the full rule, the change classification, and the tag scheme.
+This document is version **3.3.0**, versioned independently of the other feed specs. The Schema Version byte in the frame header is `3` and equals this spec's MAJOR version, so it stays `3` for every `3.x.y` release and changes only on a breaking wire change. See the [Versioning Policy](../VERSIONING.md) for the full rule, the change classification, and the tag scheme.
 
 Future `3.x` versions of this specification MAY, without a Schema Version bump:
 

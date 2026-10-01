@@ -4,7 +4,7 @@ The DoubleZero Order-Intent Feed is a wire format for normalized, pre-consensus 
 
 This is a sibling protocol to the DoubleZero [Top-of-Book & Trades Feed](../top-of-book/spec.md), the [Market-by-Order Feed](../market-by-order/spec.md), and the [Midpoint Feed](../midpoint/spec.md), not a layer on top. Where those feeds carry accepted book state — quotes, resting orders, mid prices — this feed carries *intent*: every successfully normalized supported submission, plus dead-man-switch set/clear, as a fixed-size binary message.
 
-This document specifies version **3.1.0**: the frame header, application message header, and the message types that define the wire format. The wire format is venue-generic; the per-venue derivations it deliberately does not fix (account-id encoding, Action Tag rule, venue-message mapping) are defined out of band by each venue's publisher and are not part of this specification. The [Source ID Registry](../sources/spec.md) only assigns the Source ID → venue mapping.
+This document specifies version **3.1.0**: the frame header, application message header, and the message types that define the wire format. The wire format is venue-generic; the per-venue derivations it deliberately does not fix (account-id encoding, Action Tag rule, venue-message mapping) are defined out of band by each venue's publisher and are not part of this specification. The [Source ID Registry](../sources/spec.md) only assigns the Source ID → matching engine mapping.
 
 **Trust semantics (normative).** Events are *observed signed submissions*, not accepted orders. An event may reference an invalid order, a replay, an action the venue later rejects, or intent that never executes. The publisher performs no venue-level validation: it *attempts* signature recovery to attribute the event, but recovery is **not a gate on publication** — when recovery fails or is skipped, the event is still published with a zeroed Signer and the `signer unverified` flag (an unauthenticated observation; see [Common Event Fields](#common-event-fields)). Subscribers MUST treat the feed as intent, never as fills or book state. The boundary is syntactic, not semantic: values that parse and convert exactly are published as-is even if venue-invalid (zero quantity, a past schedule-cancel time, an order id that never existed). "Successfully normalized" means malformed, unmappable, or precision-violating entries are dropped; the feed does not promise every observed submission.
 
@@ -431,7 +431,7 @@ The wire format above is venue-generic. The [Source ID Registry](../sources/spec
 
 ## Versioning and Forward Compatibility
 
-This document is version **3.1.0**, versioned independently of the sibling specs. The Schema Version byte in the frame header is `3` and equals this spec's MAJOR version, so it stays `3` for every `3.x.y` release and changes only on a breaking wire change. See the [Versioning Policy](../VERSIONING.md) for the full rule, the change classification, and the tag scheme.
+This document is version **3.1.0**, versioned independently of the other feed specs. The Schema Version byte in the frame header is `3` and equals this spec's MAJOR version, so it stays `3` for every `3.x.y` release and changes only on a breaking wire change. See the [Versioning Policy](../VERSIONING.md) for the full rule, the change classification, and the tag scheme.
 
 Future `3.x` versions of this specification MAY, without a Schema Version bump:
 

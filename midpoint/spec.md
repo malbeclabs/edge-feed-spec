@@ -286,7 +286,7 @@ The format is fixed-size and binary, so parsing requires no allocation, no strin
 
 ## Versioning and Forward Compatibility
 
-This document is version **1.1.0**, versioned independently of the sibling specs. The Schema Version byte in the frame header is `1` and equals this spec's MAJOR version, so it stays `1` for every `1.x.y` release and changes only on a breaking wire change. See the [Versioning Policy](../VERSIONING.md) for the full rule, the change classification, and the tag scheme.
+This document is version **1.1.0**, versioned independently of the other feed specs. The Schema Version byte in the frame header is `1` and equals this spec's MAJOR version, so it stays `1` for every `1.x.y` release and changes only on a breaking wire change. See the [Versioning Policy](../VERSIONING.md) for the full rule, the change classification, and the tag scheme.
 
 Future `1.x` versions of this specification MAY, without a Schema Version bump:
 
@@ -298,7 +298,7 @@ Existing field layouts and semantics will not change within the `1.x` line. A ch
 
 ### Changes
 
-**1.1.0** — added Asset Class value `5` (Perpetual Future) to the value table, which this spec omitted while its siblings carried it. Additive: receivers already MUST accept any `u8` and treat unknown values as `0`. No layout change, and the 64-byte `InstrumentDefinition` variant is untouched.
+**1.1.0** — added Asset Class value `5` (Perpetual Future) to the value table, which this spec omitted while top-of-book and market-by-price carried it. Additive: receivers already MUST accept any `u8` and treat unknown values as `0`. No wire-layout change, and the 64-byte `InstrumentDefinition` variant is untouched; Schema Version remains `1`.
 
 **1.0.1** — editorial. Removed the *Relationship to Sibling Feeds* enumeration, relocating its `Magic` distinctness requirement verbatim to the [Versioning Policy](../VERSIONING.md) so it binds every feed rather than only the ones that happened to restate it, and adopted the glossary's "published set". No wire change.
 
