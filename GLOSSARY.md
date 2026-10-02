@@ -4,7 +4,7 @@ Canonical vocabulary for DoubleZero Edge market data.
 
 Use these words with these meanings in specs, docs, plans, comments, identifiers, CLI flags, config keys, metric names, and log fields. If a word you want is listed under [Banned](#banned-words), use the replacement.
 
-This document specifies version **1.3.1**: the terms defined below, the banned words, and their documented exceptions. See [Versioning](#versioning) for what a level means and what has changed.
+This document specifies version **1.4.0**: the terms defined below, the banned words, and their documented exceptions. See [Versioning](#versioning) for what a level means and what has changed.
 
 ## Precedence
 
@@ -61,6 +61,17 @@ Prefer `datagram` over `frame` or `packet` for our own traffic. A frame is a lay
 Two pairs, one per layer, and both are correct. From the network's point of view a publisher is a **transmitter** (or **sender**) and a subscriber is a **receiver**: use those for the act of moving datagrams. For the roles themselves use **publisher** and **subscriber**.
 
 Neither half of either pair is redefined here. `receiver` in particular keeps its plain meaning — anything that receives — so every subscriber is a receiver, and the specs' normative "Publishers SHOULD … receivers MUST …" is correct as written.
+
+## Reference data
+
+| Term | Definition | Not |
+|---|---|---|
+| **Strike** | The value or values that a venue compares with the settlement value to decide if a contract pays. On the wire it is an interval: a lower bound, an upper bound, or both, carried by `StrikeInterval`. | A price of the contract, a barrier |
+| **Settlement value** | The value that the venue compares with the strike. No wire field identifies it. | The price of the contract, `Leg1` |
+| **Pending** (strike) | The state of a strike that the venue has not fixed. A `StrikeInterval` with no bound present. | Unknown, unset, TBD |
+| **Fixed** (strike) | The state of a strike that the venue has fixed. A `StrikeInterval` with one or two bounds present. | Final, settled |
+
+Use `strike` for the venue fact and `StrikeInterval` for the message. `Price Bound` in `InstrumentDefinition` is a different thing: it limits the price of the contract, not the settlement value.
 
 ## Components
 
@@ -131,6 +142,8 @@ This glossary is versioned so that a spec, a repository, or a conformance pass c
 A `MAJOR` release is the expensive one, because prose, identifiers, and config keys across several repositories were written against the older ruling and each has to be revisited. Prefer recording an exception over redefining a term.
 
 ### Changes
+
+**1.4.0** — defined **Strike**, **Settlement value**, **Pending** and **Fixed**, the terms that the `StrikeInterval` message of the Reference Data Distribution supplement uses. New terms only: no existing term or ban changes.
 
 **1.3.1** — editorial. The **Matching engine** example counted the HIP-3 builder DEXes as one engine and gave a fixed total; it now names them as separate engines and records that the count is open. The definition is unchanged.
 

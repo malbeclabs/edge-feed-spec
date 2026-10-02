@@ -4,7 +4,7 @@ The DoubleZero Market-by-Price Feed is a wire format for price-aggregated (L2) b
 
 This is a sibling protocol to the DoubleZero Top-of-Book & Trades Feed, the DoubleZero Midpoint Feed, and the DoubleZero Market-by-Order Feed, not a layer on top. Where the top-of-book feed carries two-sided BBO data and trades, the midpoint feed carries a single derived price per instrument, and the market-by-order feed carries the full resting-order population, this feed carries the aggregate resting quantity at every price level of each instrument — the price-aggregated projection of the same book the market-by-order feed carries order-by-order — plus a continuous in-band snapshot mechanism that lets subscribers bootstrap and recover from packet loss over multicast alone.
 
-This document specifies version **3.1.1**: the frame header, application message header, the message types sufficient to operate a working publisher and subscriber, and the sequence-number-anchored snapshot/delta recovery model that is the core of the design.
+This document specifies version **3.2.0**: the frame header, application message header, the message types sufficient to operate a working publisher and subscriber, and the sequence-number-anchored snapshot/delta recovery model that is the core of the design.
 
 ---
 
@@ -52,7 +52,7 @@ Each channel is delivered to **one multicast group on three destination ports**,
 | Port | Carries |
 |------|---------|
 | mktdata | `LevelUpdate`, `BookClear`, `Trade`, `Liquidation`, `BatchBoundary`, `InstrumentReset`, `Heartbeat`, `EndOfSession` |
-| refdata | `InstrumentDefinition`, `ManifestSummary` |
+| refdata | `InstrumentDefinition`, `ManifestSummary`, `StrikeInterval` |
 | snapshot | `SnapshotBegin`, `SnapshotLevel`, `SnapshotEnd` |
 
 The frame header and application message header are identical on all three ports. A single decoder implementation handles all three. Concrete port assignments are out of scope for this spec; each deployment publishes its port mapping out of band.
@@ -165,6 +165,7 @@ Sharding the published instrument set across multiple publishers — each on its
 | `0x06` | EndOfSession | 12 | mktdata | Inherited. No more data for this session. |
 | `0x07` | ManifestSummary | 24 | refdata | Published instrument set summary. Inherited; see the [Reference Data Distribution supplement](../reference-data/spec.md). |
 | `0x08` | Liquidation | 48 | mktdata | Trade-companion annotation. **Identical byte-for-byte to the top-of-book feed's Liquidation.** Emitted in the same frame as its `Trade`. |
+| `0x09` | StrikeInterval | 40 | refdata | Strike of a contract that pays on a threshold or a range. Inherited; see the [Reference Data Distribution supplement](../reference-data/spec.md). |
 | `0x13` | BatchBoundary | 16 | mktdata | Atomic-batch delimiter. **Byte-for-byte identical to the market-by-order feed's `0x13`.** Required of batching publishers, absent on non-batching channels. |
 | `0x14` | InstrumentReset | 28 | mktdata | Per-instrument surgical resync signal. **Byte-for-byte identical to the market-by-order feed's `0x14`.** |
 | `0x20` | SnapshotBegin | 40 | snapshot | Start of a per-instrument snapshot group. Prefix-superset of the market-by-order feed's 36-byte `0x20`; see below. |
@@ -177,7 +178,7 @@ A decoder encountering an unknown type MUST skip the message using its `Message 
 
 ### Cross-Spec Type ID Policy
 
-A message Type ID that appears in more than one sibling feed MUST carry the same semantic meaning in each. The shared Type IDs at this writing are `0x01` (Heartbeat), `0x02` (InstrumentDefinition), `0x04` (Trade), `0x06` (EndOfSession), `0x07` (ManifestSummary), and `0x08` (Liquidation). Heartbeat, EndOfSession, and ManifestSummary are byte-for-byte identical across every sibling that carries them. Trade and Liquidation are byte-for-byte identical between the top-of-book feed, the market-by-order feed, and this feed. InstrumentDefinition shares the Type ID but each sibling defines its own layout — this feed, market-by-order, top-of-book, order-intent, and perp-stats share the 130-byte layout; the midpoint feed carries a slimmed 64-byte variant.
+A message Type ID that appears in more than one sibling feed MUST carry the same semantic meaning in each. The shared Type IDs at this writing are `0x01` (Heartbeat), `0x02` (InstrumentDefinition), `0x04` (Trade), `0x06` (EndOfSession), `0x07` (ManifestSummary), `0x08` (Liquidation), and `0x09` (StrikeInterval). Heartbeat, EndOfSession, ManifestSummary, and StrikeInterval are byte-for-byte identical across every sibling that carries them. Trade and Liquidation are byte-for-byte identical between the top-of-book feed, the market-by-order feed, and this feed. InstrumentDefinition shares the Type ID but each sibling defines its own layout — this feed, market-by-order, top-of-book, order-intent, and perp-stats share the 130-byte layout; the midpoint feed carries a slimmed 64-byte variant.
 
 Four payloads are shared with the market-by-order feed at its own Type IDs rather than renumbered into this feed's range, because they are the same payload and reassignment is what the policy forbids: `BatchBoundary` (`0x13`), `InstrumentReset` (`0x14`) and `SnapshotEnd` (`0x22`) are byte-for-byte identical, and `SnapshotBegin` (`0x20`) is a prefix-superset — its first 36 bytes are the market-by-order layout, with `Depth Bound` appended at offset 36. `InstrumentDefinition` is the precedent for one Type ID carrying different lengths across siblings (130 bytes here and in top-of-book, 64 in midpoint).
 
@@ -314,6 +315,24 @@ Inherited from the top-of-book feed verbatim. Annotates a forced (liquidation or
 | 12 | Trade ID | `u64` | Venue trade ID of the paired `Trade` |
 | 20 | Mark Price | `price` | Mark price at liquidation |
 | 28 | Liquidated User | 20B | Liquidated account address |
+
+### 0x09 StrikeInterval (40 bytes)
+
+Inherited. The strike of one instrument as an interval: a lower bound, an upper bound, or both. Carried on the `refdata` port. Defined in the [Reference Data Distribution supplement](../reference-data/spec.md); the layout is reproduced here for convenience. The supplement is the authority for the meaning of `Bound Flags` and for the publisher and subscriber rules.
+
+A publisher sends this message only for an instrument whose contract pays on a strike. A publisher MUST put it immediately after the `InstrumentDefinition` of the same instrument, in the same datagram. A subscriber that does not implement it skips it by `Message Length`.
+
+| Offset | Field | Type | Description |
+|--------|-------|------|-------------|
+| 0  | Header | 4B | Type=`0x09`, Length=40 |
+| 4  | Instrument ID | `u32` | The instrument that this strike applies to. The same value as in the `InstrumentDefinition` that this message follows. |
+| 8  | Source ID | `u16` | The matching engine, as assigned by the [Source ID Registry](../sources/spec.md). The same value as in the `InstrumentDefinition`. |
+| 10 | Strike Exponent | `i8` | The decimal exponent of both bounds. Independent of `Price Exponent`. |
+| 11 | Bound Flags | `u8` | Bit 0: `Lower Bound` is present. Bit 1: `Lower Bound` is inclusive. Bit 2: `Upper Bound` is present. Bit 3: `Upper Bound` is inclusive. Bits 4–7: reserved. Bits 0 and 2 both clear: the strike is pending. |
+| 12 | Lower Bound | `i64` | The raw value of the lower bound. Uses `Strike Exponent`. `0` when bit 0 of `Bound Flags` is clear. |
+| 20 | Upper Bound | `i64` | The raw value of the upper bound. Uses `Strike Exponent`. `0` when bit 2 of `Bound Flags` is clear. |
+| 28 | Fixing Time | `ts_ns` | The time at which the venue fixed the strike. `0` while the strike is pending, when the venue fixed the strike at listing, and when the time is not available. |
+| 36 | Reserved | 4B | Padding. `0`. |
 
 ### 0x40 LevelUpdate (48 bytes)
 
@@ -833,7 +852,7 @@ Publishers whose upstream provides no retransmission or replay carry the whole r
 A typical publisher session proceeds as follows:
 
 1. Publisher starts → increments `Reset Count` in the frame header and resets `Sequence Number` to 0 on each of the three ports.
-2. Begins emitting `InstrumentDefinition` on the `refdata` port, paced evenly across the definition cycle period (recommended 30 s per the [Reference Data Distribution supplement](../reference-data/spec.md)).
+2. Begins emitting `InstrumentDefinition` on the `refdata` port, paced evenly across the definition cycle period (recommended 30 s per the [Reference Data Distribution supplement](../reference-data/spec.md)). For an instrument whose contract pays on a strike, a `StrikeInterval` follows each definition in the same datagram.
 3. Begins emitting `ManifestSummary` with `Valid = 1` on the `refdata` port at the manifest cadence (recommended 1 s).
 4. Begins emitting `SnapshotBegin` / `SnapshotLevel` / `SnapshotEnd` on the `snapshot` port, round-robin across active instruments, at the configured snapshot cycle period.
 5. Begins emitting `LevelUpdate`, `BookClear`, `Trade`, and (optionally) `BatchBoundary` on the `mktdata` port as venue events arrive. Emits `Heartbeat` on `mktdata` when idle.
@@ -889,7 +908,7 @@ The format is fixed-size and binary; parsing requires no allocation, no string h
 
 ## Versioning and Forward Compatibility
 
-This document is version **3.1.1**, versioned independently of the sibling specs. The Schema Version byte in the frame header is `3` and equals this spec's MAJOR version, so it stays `3` for every `3.x.y` release and changes only on a breaking wire change. See the [Versioning Policy](../VERSIONING.md) for the full rule, the change classification, and the tag scheme.
+This document is version **3.2.0**, versioned independently of the sibling specs. The Schema Version byte in the frame header is `3` and equals this spec's MAJOR version, so it stays `3` for every `3.x.y` release and changes only on a breaking wire change. See the [Versioning Policy](../VERSIONING.md) for the full rule, the change classification, and the tag scheme.
 
 Future `3.x` versions of this specification MAY, without a Schema Version bump:
 
@@ -902,6 +921,8 @@ Future `3.x` versions of this specification MAY, without a Schema Version bump:
 Existing field layouts and semantics will not change within the `3.x` line. A change that moves or resizes a field, alters a message length, or redefines existing semantics requires a MAJOR release and a Schema Version bump, which old decoders MUST reject rather than parse.
 
 ### Changes
+
+**3.2.0** — additive. Added `0x09 StrikeInterval` (40 bytes) on the `refdata` port, defined in the [Reference Data Distribution supplement](../reference-data/spec.md) at its `1.1.0`. It carries the strike of a contract that pays on a threshold or a range, and follows the `InstrumentDefinition` of the same instrument in the same datagram. `InstrumentDefinition` does not change. An old decoder skips the type by Message Length, so the Schema Version byte stays `3`.
 
 **3.1.1** — editorial. Removed the *Relationship to Sibling Feeds* enumeration, qualified the bare uses of "source", and adopted the glossary's "published set". No wire change.
 
