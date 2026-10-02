@@ -57,7 +57,7 @@ func feedSpec(feed Feed) string {
 func SpecURL(id string, feed Feed) string {
 	prefix, _, _ := strings.Cut(id, ".")
 	switch prefix {
-	case "REFDATA", "MANIFEST":
+	case "REFDATA", "MANIFEST", "STRIKE":
 		// The one genuine exception: the reference-data supplement is a single
 		// document that every feed spec incorporates by reference rather than restating.
 		return specBaseURL + "reference-data/spec.md"
@@ -159,6 +159,13 @@ var ruleDocs = map[string]RuleDoc{
 	"REFDATA.SEQ_BUMP_NOT_BY_ONE":             {"On a set change, Manifest Seq increments by exactly 1 (modular)."},
 	"REFDATA.MANIFEST_SEQ_NONZERO_WHEN_VALID": {"A Valid=1 summary's seq is consistent with definition tags and a non-zero count."},
 	"MANIFEST.STATE_MACHINE":                  {"ManifestSummary is internally coherent (Valid 0/1, seq +1 on change, count matches)."},
+
+	// --- Reference-data supplement: StrikeInterval ---
+	"STRIKE.FOLLOWS_DEFINITION": {"A StrikeInterval immediately follows the InstrumentDefinition of the same instrument, in the same datagram."},
+	"STRIKE.FIELDS":             {"StrikeInterval fields agree: Source ID equals the definition's, reserved bits and bytes are zero, an absent bound is 0 and not inclusive, and a pending strike has Fixing Time 0."},
+	"STRIKE.INTERVAL_NOT_EMPTY": {"With both bounds present, Lower Bound ≤ Upper Bound, and equal bounds are both inclusive."},
+	"STRIKE.PRESENCE_STABLE":    {"While an instrument is in the published set, either every definition of it carries a StrikeInterval or none does."},
+	"STRIKE.FIXED_STAYS_FIXED":  {"A strike that was fixed does not return to pending."},
 
 	// --- Top-of-Book ---
 	"TOB.QUOTE.STRUCT_LEN_TYPE":        {"A Quote (0x03) is exactly 60 bytes, mktdata only, and parses within the frame."},

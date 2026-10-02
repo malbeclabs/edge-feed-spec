@@ -76,6 +76,11 @@ func expectedMsgLen(feed core.Feed, schema uint8, typ uint8) uint8 {
 			return 0 // reserved in midpoint
 		}
 		return 48
+	case wire.TypeStrikeInterval: // 0x09
+		if carriesStrikeInterval(feed, schema) {
+			return 40
+		}
+		return 0
 	case wire.TypeLevelUpdate: // 0x40
 		if feed == core.FeedMBP {
 			return 48
@@ -95,18 +100,32 @@ func expectedMsgLen(feed core.Feed, schema uint8, typ uint8) uint8 {
 	return 0
 }
 
+// carriesStrikeInterval reports whether the feed's spec lists StrikeInterval
+// (0x09) in its message table at this schema version. The reference-data
+// supplement defines the message; a feed adopts it by listing it. Elsewhere 0x09
+// is an unknown type and MSG.UNKNOWN_TYPE_SKIPPED reports it.
+//
+// Keyed on the schema as well as the feed, because this tool decodes more than
+// one MAJOR version per feed. top-of-book lists the type from 3.1.0 and
+// market-by-price from 3.2.0. No 1.x release of either does, so a schema-1
+// publisher that sends 0x09 sends a type its spec does not define.
+func carriesStrikeInterval(feed core.Feed, schema uint8) bool {
+	return (feed == core.FeedTOB || feed == core.FeedMBP) && schema == 3
+}
+
 // knownTypes returns the set of type IDs that are defined (non-reserved) in
 // this feed's spec.
 func knownTypes(feed core.Feed) map[uint8]bool {
 	switch feed {
 	case core.FeedTOB:
 		return map[uint8]bool{
-			wire.TypeHeartbeat:     true,
-			wire.TypeInstrumentDef: true,
-			wire.TypeQuote:         true, // 0x03 = Quote
-			wire.TypeTrade:         true,
-			wire.TypeEndOfSession:  true,
-			wire.TypeManifest:      true,
+			wire.TypeHeartbeat:      true,
+			wire.TypeInstrumentDef:  true,
+			wire.TypeQuote:          true, // 0x03 = Quote
+			wire.TypeTrade:          true,
+			wire.TypeEndOfSession:   true,
+			wire.TypeManifest:       true,
+			wire.TypeStrikeInterval: true,
 		}
 	case core.FeedMidpoint:
 		return map[uint8]bool{
@@ -138,17 +157,18 @@ func knownTypes(feed core.Feed) map[uint8]bool {
 			wire.TypeHeartbeat:     true,
 			wire.TypeInstrumentDef: true,
 			// 0x03 and 0x05 are reserved here too.
-			wire.TypeTrade:         true,
-			wire.TypeEndOfSession:  true,
-			wire.TypeManifest:      true,
-			wire.TypeLiquidation:   true,
-			wire.TypeBatchBoundary: true,
-			wire.TypeInstrReset:    true,
-			wire.TypeSnapshotBegin: true,
-			wire.TypeSnapshotEnd:   true,
-			wire.TypeLevelUpdate:   true,
-			wire.TypeBookClear:     true,
-			wire.TypeSnapshotLevel: true,
+			wire.TypeTrade:          true,
+			wire.TypeEndOfSession:   true,
+			wire.TypeManifest:       true,
+			wire.TypeLiquidation:    true,
+			wire.TypeStrikeInterval: true,
+			wire.TypeBatchBoundary:  true,
+			wire.TypeInstrReset:     true,
+			wire.TypeSnapshotBegin:  true,
+			wire.TypeSnapshotEnd:    true,
+			wire.TypeLevelUpdate:    true,
+			wire.TypeBookClear:      true,
+			wire.TypeSnapshotLevel:  true,
 		}
 	}
 	return nil
@@ -168,7 +188,8 @@ func portAllowed(feed core.Feed, typ uint8, port core.Port) bool {
 				typ == wire.TypeEndOfSession
 		case core.PortRefData:
 			return typ == wire.TypeInstrumentDef ||
-				typ == wire.TypeManifest
+				typ == wire.TypeManifest ||
+				typ == wire.TypeStrikeInterval
 		}
 	case core.FeedMidpoint:
 		// Two-port model: mktdata and refdata.
@@ -215,7 +236,8 @@ func portAllowed(feed core.Feed, typ uint8, port core.Port) bool {
 				typ == wire.TypeInstrReset
 		case core.PortRefData:
 			return typ == wire.TypeInstrumentDef ||
-				typ == wire.TypeManifest
+				typ == wire.TypeManifest ||
+				typ == wire.TypeStrikeInterval
 		case core.PortSnapshot:
 			return typ == wire.TypeSnapshotBegin ||
 				typ == wire.TypeSnapshotLevel ||
@@ -232,7 +254,7 @@ func (e *Engine) checkTier1(f *wire.Frame, port core.Port) {
 	ch := f.Header.ChannelID
 	seq := f.Header.Sequence
 
-	for _, m := range f.Messages {
+	for i, m := range f.Messages {
 		// MSG.RESERVED_TYPE_0X03_0X05 (MBO only): types 0x03 and 0x05 are explicitly
 		// reserved in MBO. Check this BEFORE the generic unknown-type path, so a reserved
 		// type is flagged as a reserved-type violation rather than swallowed as "unknown".
@@ -244,7 +266,7 @@ func (e *Engine) checkTier1(f *wire.Frame, port core.Port) {
 
 		// MSG.UNKNOWN_TYPE_SKIPPED: type not in this feed's defined set (genuinely
 		// unassigned/forward-compat). Skipped via Message Length, reported as info.
-		if !known[m.Type] {
+		if !known[m.Type] || (m.Type == wire.TypeStrikeInterval && !carriesStrikeInterval(e.cfg.Feed, f.Header.SchemaVersion)) {
 			e.Emit("MSG.UNKNOWN_TYPE_SKIPPED", core.Pass, port, seq, ch, 0,
 				fmt.Sprintf("type 0x%02X skipped (unknown in feed %s)", m.Type, e.cfg.Feed))
 			continue // skip further per-type checks on unknown messages
@@ -281,6 +303,97 @@ func (e *Engine) checkTier1(f *wire.Frame, port core.Port) {
 
 		// Per-type field checks.
 		e.checkTier1Message(f, m, port, ch, seq)
+
+		// StrikeInterval reads the message before it, so it needs the index.
+		if m.Type == wire.TypeStrikeInterval {
+			e.checkTier1Strike(f, i, port, ch, seq)
+		}
+	}
+}
+
+// checkTier1Strike runs the StrikeInterval checks on f.Messages[i]. All of them
+// are decidable from one intact datagram: the supplement puts the message and
+// its InstrumentDefinition in the same datagram, so loss cannot separate them.
+func (e *Engine) checkTier1Strike(f *wire.Frame, i int, port core.Port, ch uint8, seq uint64) {
+	m := f.Messages[i]
+	lengthOK := m.Length == expectedMsgLen(e.cfg.Feed, f.Header.SchemaVersion, m.Type)
+	var inst uint32
+	if lengthOK {
+		inst = strikeInstrumentID(m)
+	}
+
+	// STRIKE.FOLLOWS_DEFINITION: the message before it is the InstrumentDefinition
+	// of the same instrument. The type of the previous message does not depend on
+	// this message's length, so that half runs on a bad length too.
+	switch {
+	case i == 0:
+		e.Emit("STRIKE.FOLLOWS_DEFINITION", core.Violation, port, seq, ch, inst,
+			"StrikeInterval is the first message of the datagram: no InstrumentDefinition before it")
+	case f.Messages[i-1].Type != wire.TypeInstrumentDef:
+		e.Emit("STRIKE.FOLLOWS_DEFINITION", core.Violation, port, seq, ch, inst,
+			fmt.Sprintf("StrikeInterval follows type 0x%02X, not an InstrumentDefinition", f.Messages[i-1].Type))
+	case lengthOK:
+		// A definition with no layout or a bad length already raised its own
+		// finding; its Instrument ID cannot be read, so the IDs are not compared.
+		if defID, _, _, _, ok := instrDefAllFields(e.cfg.Feed, f.Header.SchemaVersion, f.Messages[i-1]); ok && defID != inst {
+			e.Emit("STRIKE.FOLLOWS_DEFINITION", core.Violation, port, seq, ch, inst,
+				fmt.Sprintf("StrikeInterval instrument=%d follows the InstrumentDefinition of instrument=%d", inst, defID))
+		}
+	}
+
+	if !lengthOK {
+		return // MSG.LENGTH_PER_TYPE already fired; the body is not readable
+	}
+
+	// STRIKE.FIELDS: Source ID equals the Source ID of the definition before it.
+	if i > 0 && f.Messages[i-1].Type == wire.TypeInstrumentDef {
+		if defSrc, ok := instrDefSourceID(e.cfg.Feed, f.Header.SchemaVersion, f.Messages[i-1]); ok && defSrc != strikeSourceID(m) {
+			e.Emit("STRIKE.FIELDS", core.Violation, port, seq, ch, inst,
+				fmt.Sprintf("StrikeInterval source_id %d != InstrumentDefinition source_id %d", strikeSourceID(m), defSrc))
+		}
+	}
+
+	flags := strikeBoundFlags(m)
+	lower, upper := strikeLowerBound(m), strikeUpperBound(m)
+	hasLower, hasUpper := flags&strikeLowerPresent != 0, flags&strikeUpperPresent != 0
+
+	// STRIKE.FIELDS: the fields agree with Bound Flags.
+	fields := func(detail string) {
+		e.Emit("STRIKE.FIELDS", core.Violation, port, seq, ch, inst, detail)
+	}
+	if flags&strikeReservedBits != 0 {
+		fields(fmt.Sprintf("Bound Flags reserved bits 4-7 non-zero: 0x%02X", flags))
+	}
+	if !hasLower && flags&strikeLowerInclusive != 0 {
+		fields(fmt.Sprintf("Bound Flags 0x%02X: lower bound inclusive but not present", flags))
+	}
+	if !hasUpper && flags&strikeUpperInclusive != 0 {
+		fields(fmt.Sprintf("Bound Flags 0x%02X: upper bound inclusive but not present", flags))
+	}
+	if !hasLower && lower != 0 {
+		fields(fmt.Sprintf("Lower Bound=%d but the lower bound is not present (must be 0)", lower))
+	}
+	if !hasUpper && upper != 0 {
+		fields(fmt.Sprintf("Upper Bound=%d but the upper bound is not present (must be 0)", upper))
+	}
+	if ft := strikeFixingTime(m); strikePending(flags) && ft != 0 {
+		fields(fmt.Sprintf("Fixing Time=%d on a pending strike (must be 0)", ft))
+	}
+	if r := strikeReserved(m); r != 0 {
+		fields(fmt.Sprintf("reserved bytes 36-39 non-zero: 0x%08X", r))
+	}
+
+	// STRIKE.INTERVAL_NOT_EMPTY: with both bounds present, some value is inside.
+	if hasLower && hasUpper {
+		bothInclusive := flags&strikeLowerInclusive != 0 && flags&strikeUpperInclusive != 0
+		switch {
+		case lower > upper:
+			e.Emit("STRIKE.INTERVAL_NOT_EMPTY", core.Violation, port, seq, ch, inst,
+				fmt.Sprintf("Lower Bound %d > Upper Bound %d", lower, upper))
+		case lower == upper && !bothInclusive:
+			e.Emit("STRIKE.INTERVAL_NOT_EMPTY", core.Violation, port, seq, ch, inst,
+				fmt.Sprintf("Lower Bound = Upper Bound = %d with Bound Flags 0x%02X: an exclusive end makes the interval empty", lower, flags))
+		}
 	}
 }
 

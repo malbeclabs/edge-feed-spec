@@ -204,6 +204,37 @@ func manifestFields(m wire.Message) (valid uint8, seq uint16, count uint32) {
 	return manifestValid(m), manifestSeqField(m), manifestCount(m)
 }
 
+// --- StrikeInterval (0x09, 40 bytes total) ---
+// spec offset  4 = Instrument ID (u32 LE); Body[0]
+// spec offset  8 = Source ID (u16 LE);     Body[4]
+// spec offset 11 = Bound Flags (u8);       Body[7]
+// spec offset 12 = Lower Bound (i64 LE);   Body[8]
+// spec offset 20 = Upper Bound (i64 LE);   Body[16]
+// spec offset 28 = Fixing Time (u64 LE);   Body[24]
+// spec offset 36 = Reserved (4B);          Body[32]
+func strikeInstrumentID(m wire.Message) uint32 { return bodyU32LE(m, 0) }
+func strikeSourceID(m wire.Message) uint16     { return bodyU16LE(m, 4) }
+func strikeBoundFlags(m wire.Message) uint8    { return bodyU8(m, 7) }
+func strikeLowerBound(m wire.Message) int64    { return int64(bodyU64LE(m, 8)) }
+func strikeUpperBound(m wire.Message) int64    { return int64(bodyU64LE(m, 16)) }
+func strikeFixingTime(m wire.Message) uint64   { return bodyU64LE(m, 24) }
+func strikeReserved(m wire.Message) uint32     { return bodyU32LE(m, 32) }
+
+// Bound Flags bits.
+const (
+	strikeLowerPresent   = 0x01
+	strikeLowerInclusive = 0x02
+	strikeUpperPresent   = 0x04
+	strikeUpperInclusive = 0x08
+	strikeReservedBits   = 0xF0
+)
+
+// strikePending reports whether Bound Flags declares a pending strike: neither
+// bound is present.
+func strikePending(flags uint8) bool {
+	return flags&(strikeLowerPresent|strikeUpperPresent) == 0
+}
+
 // --- InstrumentDefinition (0x02) — feed- and schema-dependent layout ---
 //
 // Every offset lives in instrdef.go, keyed by (feed, schema). Nothing here
@@ -264,6 +295,17 @@ func instrDefAllFields(feed core.Feed, schema uint8, m wire.Message) (instrID ui
 		priceBound, _ = bodyU8At(m, l.PriceBound)
 	}
 	return instrID, manifestSeq, defaultMethod, priceBound, true
+}
+
+// instrDefSourceID reads Source ID from an InstrumentDefinition. ok is false
+// when the layout has no Source ID (schema 1, and midpoint), or when the message
+// is not the canonical length for its layout.
+func instrDefSourceID(feed core.Feed, schema uint8, m wire.Message) (uint16, bool) {
+	l, ok := instrDefLayoutFor(feed, schema)
+	if !ok || l.SourceID < 0 || int(m.Length) != int(l.MsgLen) {
+		return 0, false
+	}
+	return bodyU16LEAt(m, l.SourceID)
 }
 
 // bodyU8At, bodyU16LEAt and bodyU32LEAt read at a body offset, reporting whether

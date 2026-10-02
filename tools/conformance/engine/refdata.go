@@ -70,6 +70,26 @@ type validZeroEvent struct {
 	dirty    bool // the refdata window was gapped when the summary arrived
 }
 
+// strikeState is what the last accepted definition of an instrument showed
+// about its strike. The two STRIKE continuity rules judge the next accepted
+// definition against it, and then replace it. So one change is one finding: a
+// publisher that drops a strike is reported at the drop, not on every cycle after.
+type strikeState struct {
+	present bool   // a StrikeInterval followed the definition
+	fixed   bool   // and it was a fixed strike
+	seq     uint16 // the Manifest Seq of the definition
+}
+
+// strikeObs is what one accepted InstrumentDefinition showed about its strike.
+type strikeObs int
+
+const (
+	strikeAbsent     strikeObs = iota // no StrikeInterval follows the definition
+	strikeIsPending                   // a pending StrikeInterval follows
+	strikeIsFixed                     // a fixed StrikeInterval follows
+	strikeUnreadable                  // a StrikeInterval follows, but Tier 1 already rejected it
+)
+
 // channelRefdataState is the per-channel reference-data subscriber state.
 type channelRefdataState struct {
 	// subscriber algorithm state (verbatim from the supplement)
@@ -78,6 +98,16 @@ type channelRefdataState struct {
 	expectedCount uint32
 	// defs maps instrumentID → defInfo for the current epoch.
 	defs map[uint32]defInfo
+
+	// strikes maps instrumentID → strikeState.
+	//
+	// **Not the supplement's `state.strikes`.** A subscriber discards its strikes
+	// with its definitions on a Manifest Seq change. The validator keeps them
+	// across one change, because a publisher that drops a strike at the same
+	// moment as a set change still dropped it. An entry is discarded when its
+	// instrument leaves a set that completes, on Valid=0, and on a reset. An
+	// entry more than one Manifest Seq old is not compared: see onDefinitionStrike.
+	strikes map[uint32]strikeState
 
 	// seqEverSet is true once latestSeq has been set from a valid summary.
 	// Used to detect the first summary vs. subsequent ones (for regress check).
@@ -192,6 +222,7 @@ type channelRefdataState struct {
 func newChannelRefdataState() *channelRefdataState {
 	return &channelRefdataState{
 		defs:              make(map[uint32]defInfo),
+		strikes:           make(map[uint32]strikeState),
 		defsSeenThisCycle: make(map[uint32]struct{}),
 	}
 }
@@ -295,6 +326,7 @@ func (rs *refdataState) onResetChannel(only uint8) {
 		s.latestSeq = 0
 		s.expectedCount = 0
 		s.defs = make(map[uint32]defInfo)
+		s.strikes = make(map[uint32]strikeState)
 		s.seqEverSet = false
 		s.prevSummarySet = false
 		s.setSnapshotSet = false
@@ -446,6 +478,7 @@ func (rs *refdataState) onManifestSummary(ch uint8, valid uint8, seq uint16, cou
 		s.latestSeq = 0
 		s.expectedCount = 0
 		s.defs = make(map[uint32]defInfo)
+		s.strikes = make(map[uint32]strikeState)
 		s.prevSummarySet = false
 		s.seqEverSet = false
 		s.hadNonEmptySet = false
@@ -728,12 +761,15 @@ func (rs *refdataState) resolveValidZero(ch uint8, ev *validZeroEvent, resumed b
 // dirty is true when the refdata port had a gap.
 // defaultMethod and priceBound are feed-specific fields extracted by the caller;
 // they are stored in defInfo for consumption by feed validators (e.g. Task 17).
-func (rs *refdataState) onInstrumentDef(ch uint8, instrID uint32, manifestSeq uint16, defaultMethod, priceBound uint8, sendTS uint64, dirty bool, frameSeq uint64) {
+//
+// It reports whether the definition was accepted into the set. A definition that
+// was discarded gives no opportunity to the rules that judge accepted definitions.
+func (rs *refdataState) onInstrumentDef(ch uint8, instrID uint32, manifestSeq uint16, defaultMethod, priceBound uint8, sendTS uint64, dirty bool, frameSeq uint64) bool {
 	s := rs.channel(ch)
 
 	if !s.valid {
 		// No established state: silently discard.
-		return
+		return false
 	}
 
 	// REFDATA.STALE_SEQ_TAG_AFTER_BUMP: after a bump, defs must carry the new seq.
@@ -747,7 +783,7 @@ func (rs *refdataState) onInstrumentDef(ch uint8, instrID uint32, manifestSeq ui
 			fmt.Sprintf("InstrumentDef instrument=%d tagged with seq=%d, current seq=%d",
 				instrID, manifestSeq, s.latestSeq))
 		// Discard per the supplement: "definitions tagged with any other seq are discarded".
-		return
+		return false
 	}
 
 	// REFDATA.SET_CHANGE_NO_SEQ_BUMP: if the set is frozen (ready() was true at
@@ -792,6 +828,13 @@ func (rs *refdataState) onInstrumentDef(ch uint8, instrID uint32, manifestSeq ui
 		}
 		s.setSnapshotSeq = s.latestSeq
 		s.setSnapshotSet = true
+		// An instrument that left the published set takes its strike with it. A
+		// later instrument that reuses the Instrument ID starts with no history.
+		for id := range s.strikes {
+			if _, in := s.defs[id]; !in {
+				delete(s.strikes, id)
+			}
+		}
 		// Task 15: record that this channel has ever become ready, and when — the
 		// window NEVER_REACHES_READY grades is a deadline, so the moment is the
 		// half that decides pass from violation.
@@ -820,6 +863,110 @@ func (rs *refdataState) onInstrumentDef(ch uint8, instrID uint32, manifestSeq ui
 			s.prevDefFrameTSSet = true
 		}
 	}
+	return true
+}
+
+// strikeAfter classifies what follows the InstrumentDefinition at msgs[i].
+//
+// A StrikeInterval with a wrong length or a different Instrument ID is
+// strikeUnreadable, not strikeAbsent: MSG.LENGTH_PER_TYPE or
+// STRIKE.FOLLOWS_DEFINITION already reported it, and reading it as "no strike"
+// would report the same defect a second time as a dropped strike.
+func strikeAfter(msgs []wire.Message, i int, instrID uint32, wantLen uint8) strikeObs {
+	if i+1 >= len(msgs) || msgs[i+1].Type != wire.TypeStrikeInterval {
+		return strikeAbsent
+	}
+	next := msgs[i+1]
+	if next.Length != wantLen || strikeInstrumentID(next) != instrID {
+		return strikeUnreadable
+	}
+	if strikePending(strikeBoundFlags(next)) {
+		return strikeIsPending
+	}
+	return strikeIsFixed
+}
+
+// onDefinitionStrike judges the two strike continuity rules for one accepted
+// InstrumentDefinition, and then records what it showed.
+//
+// Each accepted definition is one opportunity for each rule, and each rule
+// reports exactly one finding for it (engine/denominator.go).
+//
+// The definition is compared with the last accepted definition of the same
+// instrument only when that one carried the current Manifest Seq or the one
+// before it. An instrument is in two successive sets only if the publisher kept
+// it, so those two definitions describe one instrument. Across a wider distance
+// the instrument can have left the set and its Instrument ID can name a new
+// instrument: the set between them never completed, so nothing here saw it leave.
+func (rs *refdataState) onDefinitionStrike(ch uint8, instrID uint32, obs strikeObs, dirty bool, frameSeq uint64) {
+	const (
+		presence   = "STRIKE.PRESENCE_STABLE"
+		staysFixed = "STRIKE.FIXED_STAYS_FIXED"
+	)
+	s := rs.channel(ch)
+	prev, had := s.strikes[instrID]
+
+	if obs == strikeUnreadable {
+		for _, rule := range []string{presence, staysFixed} {
+			rs.e.unverified(rule, core.ReasonSuperseded, core.PortRefData, frameSeq, ch, instrID,
+				"the StrikeInterval after this definition was already rejected by a structural rule")
+		}
+		return
+	}
+	present := obs != strikeAbsent
+	comparable := had && (prev.seq == s.latestSeq || prev.seq == s.latestSeq-1)
+
+	// A violation needs two definitions of one instrument, both seen whole. A gap
+	// between them can hide the removal of the instrument and the reuse of its ID.
+	violation := func(rule, detail string) {
+		st, reason := core.Violation, ""
+		if dirty {
+			st, reason = core.Unverifiable, core.ReasonLoss
+		}
+		rs.e.Emit(rule, st, core.PortRefData, frameSeq, ch, instrID, detail, reason)
+	}
+	stale := func(rule string) {
+		rs.e.unverified(rule, core.ReasonTransition, core.PortRefData, frameSeq, ch, instrID,
+			fmt.Sprintf("last definition of this instrument was at Manifest Seq %d, now %d: the instrument may have left the set between them",
+				prev.seq, s.latestSeq))
+	}
+
+	// STRIKE.PRESENCE_STABLE
+	switch {
+	case !had:
+		rs.e.unverified(presence, core.ReasonColdStart, core.PortRefData, frameSeq, ch, instrID,
+			"first definition seen for this instrument: adopted, nothing earlier to compare")
+	case !comparable:
+		stale(presence)
+	case prev.present == present:
+		rs.e.passed(presence, core.PortRefData, frameSeq, ch, instrID,
+			"the definition agrees with the one before it on whether a StrikeInterval follows")
+	case prev.present:
+		violation(presence, fmt.Sprintf(
+			"InstrumentDef instrument=%d has no StrikeInterval after it, but its last definition carried one", instrID))
+	default:
+		violation(presence, fmt.Sprintf(
+			"InstrumentDef instrument=%d carries a StrikeInterval, but its last definition carried none", instrID))
+	}
+
+	// STRIKE.FIXED_STAYS_FIXED
+	switch {
+	case !had || !prev.present || !prev.fixed:
+		rs.e.inapplicable(staysFixed, core.PortRefData, frameSeq, ch, instrID,
+			"the last definition of this instrument did not carry a fixed strike")
+	case !comparable:
+		stale(staysFixed)
+	case !present:
+		rs.e.unverified(staysFixed, core.ReasonSuperseded, core.PortRefData, frameSeq, ch, instrID,
+			"the definition carries no StrikeInterval, which STRIKE.PRESENCE_STABLE reports")
+	case obs == strikeIsFixed:
+		rs.e.passed(staysFixed, core.PortRefData, frameSeq, ch, instrID, "the strike is still fixed")
+	default:
+		violation(staysFixed, fmt.Sprintf(
+			"StrikeInterval instrument=%d is pending, but the one before it was fixed", instrID))
+	}
+
+	s.strikes[instrID] = strikeState{present: present, fixed: obs == strikeIsFixed, seq: s.latestSeq}
 }
 
 // --- Engine integration ---
@@ -854,7 +1001,7 @@ func (e *Engine) processRefdataFrame(f *wire.Frame, pt *portTracker) {
 	sendTS := f.Header.SendTS
 	frameSeq := f.Header.Sequence
 
-	for _, m := range f.Messages {
+	for i, m := range f.Messages {
 		switch m.Type {
 		case wire.TypeManifest:
 			valid, seq, count := manifestFields(m)
@@ -868,7 +1015,13 @@ func (e *Engine) processRefdataFrame(f *wire.Frame, pt *portTracker) {
 				// on would grade zero values as published data.
 				continue
 			}
-			e.refdata.onInstrumentDef(ch, instrID, manifestSeq, defaultMethod, priceBound, sendTS, dirty, frameSeq)
+			accepted := e.refdata.onInstrumentDef(ch, instrID, manifestSeq, defaultMethod, priceBound, sendTS, dirty, frameSeq)
+			// StrikeInterval has no case of its own: the supplement reads it only as
+			// the message after an accepted definition.
+			if accepted && carriesStrikeInterval(e.cfg.Feed, f.Header.SchemaVersion) {
+				wantLen := expectedMsgLen(e.cfg.Feed, f.Header.SchemaVersion, wire.TypeStrikeInterval)
+				e.refdata.onDefinitionStrike(ch, instrID, strikeAfter(f.Messages, i, instrID, wantLen), dirty, frameSeq)
+			}
 		}
 	}
 
