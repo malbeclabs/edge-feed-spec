@@ -170,7 +170,7 @@ Publishers SHOULD use the most accurate value available; receivers MUST accept a
 
 `5` (Perpetual Future) identifies a perpetual-futures instrument — no expiry, funding-based convergence to an index. Perpetual Future instruments' derived state (funding, mark/oracle price, open interest) is carried on the sibling [Perp Stats Feed](../perp-stats/spec.md); the top-of-book feed still carries their `Quote`/`Trade` and this `InstrumentDefinition`.
 
-`6` (Dated Future) identifies a futures contract with a fixed expiry. It converges to its underlying at delivery or final settlement, not by funding. A publisher that sends `6` MUST set `Expiry` to the contract's expiration, which is never `0`, and MUST set `Settle Type` to `1` (Cash) or `2` (Physical). These rules bind only a publisher that sends `6`. Dated Future instruments are not on the [Perp Stats Feed](../perp-stats/spec.md), which carries Perpetual Future instruments only.
+`6` (Dated Future) identifies a futures contract with a fixed expiry. It converges to its underlying at delivery or final settlement, not by funding. A publisher that sends `6` MUST set `Expiry` to the contract's expiry, which is never `0`, and MUST set `Settle Type` to `1` (Cash) or `2` (Physical). These rules bind only a publisher that sends `6`. Dated Future instruments are not on the [Perp Stats Feed](../perp-stats/spec.md), which carries Perpetual Future instruments only.
 
 #### Market Model Values
 

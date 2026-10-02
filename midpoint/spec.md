@@ -160,6 +160,8 @@ This definition is slimmed relative to the top-of-book feed: it omits Lot Size, 
 
 Publishers SHOULD use the most accurate value available; receivers MUST accept any `u8` value and treat unknown values as `0` (Unknown).
 
+`6` (Dated Future) has the meaning that the [top-of-book feed](../top-of-book/spec.md) gives it. A publisher that sends `6` MUST set `Expiry` to the contract's expiry, which is never `0`. This layout has no `Settle Type`, so the top-of-book `Settle Type` rule for `6` does not apply here.
+
 ### 0x03 Midpoint (40 bytes)
 
 The core message. A single derived mid price with explicit provenance.
@@ -299,7 +301,7 @@ Existing field layouts and semantics will not change within the `1.x` line. A ch
 
 ### Changes
 
-**1.2.0** — added Asset Class value `6` (Dated Future) to the value table, as top-of-book defines it. Additive: receivers already MUST accept any `u8` and treat unknown values as `0`. No wire-layout change; Schema Version remains `1`.
+**1.2.0** — added Asset Class value `6` (Dated Future) to the value table, as top-of-book defines it. A publisher that sends `6` MUST set a non-zero `Expiry`. The top-of-book `Settle Type` rule does not apply, because this layout has no `Settle Type`. Additive: receivers already MUST accept any `u8` and treat unknown values as `0`. No wire-layout change; Schema Version remains `1`.
 
 **1.1.0** — added Asset Class value `5` (Perpetual Future) to the value table, which this spec omitted while top-of-book and market-by-price carried it. Additive: receivers already MUST accept any `u8` and treat unknown values as `0`. No wire-layout change, and the 64-byte `InstrumentDefinition` variant is untouched; Schema Version remains `1`.
 
