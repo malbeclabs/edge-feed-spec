@@ -6,7 +6,7 @@ A Source ID identifies the **matching engine** whose activity the message descri
 
 **A Source ID names a matching engine, not a venue.** One venue may run several matching engines and therefore hold several Source IDs. Two engines are distinct where their order-matching rules differ, and equally where they match independently over disjoint instrument sets under identical rules; a capacity shard the venue can rebalance is a channel rather than an engine. [GLOSSARY.md](../GLOSSARY.md) carries the full test and is the authority for it. A new engine at an already-registered venue is a new ID rather than a reuse of that venue's existing one. Because IDs are never renumbered, this only ever adds, and an ID already assigned keeps meaning whichever engine has been publishing under it. Venues split their own engines on their own schedule, so treat the set as open rather than assuming the current table is final.
 
-This document specifies version **1.5.0**: the reserved ranges, the current assignment set, and the process for requesting a new ID.
+This document specifies version **1.5.1**: the reserved ranges, the current assignment set, and the process for requesting a new ID.
 
 ## Reserved Ranges
 
@@ -28,7 +28,7 @@ This document specifies version **1.5.0**: the reserved ranges, the current assi
 | `5` | Setai Commodities | `SETAI_COMMODITIES` | Setai | Futures, Options on Futures | Interface versioned separately from `4`. |
 | `6` | Binance USD-Margined Futures | `BINANCE` | Binance | Perpetual Futures, Dated Futures | The venue's own `futuresType` for this engine is `U_MARGINED`. Spot is a separate matching engine at this venue and holds ID `8`. Coin-margined futures and options are separate matching engines too, unclaimed, and will share this `Code`. |
 | `7` | XYZ | `HYPERLIQUID` | Hyperliquid | Perpetual DEX | HIP-3 builder-deployed DEX. Matches the `xyz:`-prefixed perps on real-world assets, a set disjoint from ID `1`'s native perps. Shares ID `1`'s `Code`. The other builder DEXes at this venue are separate matching engines, unclaimed; see below. |
-| `8` | Binance Spot | `BINANCE` | Binance | Spot | The spot matching engine at the venue that holds ID `6`. Different order-matching rules. Shares ID `6`'s `Code`. No publisher stamps this ID today; see below. |
+| `8` | Binance Spot | `BINANCE` | Binance | Spot | The spot matching engine at the venue that holds ID `6`. Different order-matching rules. Shares ID `6`'s `Code`. |
 
 `Code` is the machine-readable short name **for the venue**. It matches the `Venue` column and takes the same name TradingView uses. Uppercase, never an abbreviation, each space and hyphen a single underscore.
 
@@ -90,7 +90,7 @@ The assignment does **not** rest on the second half of the rule. The engines can
 
 `Name` is `Binance Spot`. It says spot and nothing narrower, because the engine matches every spot pair whatever the quote asset. On 18 September 2026 the venue listed 1,368 pairs in the `TRADING` state, against 566 instruments on the engine that holds ID `6`. `Code` is `BINANCE`, which ID `6` already carries, under the rule that a `Code` names the venue.
 
-No publisher stamps this ID today. The ID is assigned here so that the number is fixed before a publisher needs it; when a publisher starts, which instruments it carries is a deployment concern and out of scope here, exactly as group and port assignment is.
+A publisher stamps this ID. The registry assigned the ID before a publisher needed it, so that the number was fixed first. Which instruments a publisher carries under it is a deployment concern and out of scope here, exactly as group and port assignment is.
 
 ## Adding a New Source ID
 
@@ -110,6 +110,8 @@ Assigning a new Source ID is an additive change and is therefore a **MINOR** rel
 Because assigned IDs are stable and MUST NOT be renumbered, reordered, removed, or reused, this registry has no mechanism by which a MAJOR release could arise. A subscriber pinned to any `1.x` version of this registry will find that every ID it knows still names the same matching engine; the set of instruments a publisher stamps with it is a deployment concern and may be corrected. A later version only adds IDs it has not seen. Subscribers MUST treat an unrecognized Source ID as an unknown matching engine rather than an error, exactly as if they were running against an older copy of this registry.
 
 ### Changes
+
+**1.5.1** — editorial. ID `8`'s row and section said no publisher stamps the ID. A publisher stamps it at this release. The section records this. The row no longer records publisher status, because that status is a deployment concern. No assignment changed and no ID was renumbered.
 
 **1.5.0** — assigned Source ID `8` to the spot matching engine at Binance. It is the second engine registered at that venue, so it shares ID `6`'s `Code` under the `1.3.0` rule. Distinct from ID `6` under the first half of the engine rule, which is the rules-differ test: spot matches an exchange of two assets settled at the match, and the USD-margined engine matches margined contracts with funding and liquidation. Stated that the assignment does not rest on the second half, because the two engines share symbol strings and their instrument sets are therefore not disjoint as strings. Updated ID `6`'s row and its section, which recorded spot as unclaimed. No publisher stamps ID `8` today.
 
