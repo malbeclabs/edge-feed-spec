@@ -6,7 +6,7 @@ A Source ID identifies the **matching engine** whose activity the message descri
 
 **A Source ID names a matching engine, not a venue.** One venue may run several matching engines and therefore hold several Source IDs. Two engines are distinct where their order-matching rules differ, and equally where they match independently over disjoint instrument sets under identical rules; a capacity shard the venue can rebalance is a channel rather than an engine. [GLOSSARY.md](../GLOSSARY.md) carries the full test and is the authority for it. A new engine at an already-registered venue is a new ID rather than a reuse of that venue's existing one. Because IDs are never renumbered, this only ever adds, and an ID already assigned keeps meaning whichever engine has been publishing under it. Venues split their own engines on their own schedule, so treat the set as open rather than assuming the current table is final.
 
-This document specifies version **1.5.1**: the reserved ranges, the current assignment set, and the process for requesting a new ID.
+This document specifies version **1.6.0**: the reserved ranges, the current assignment set, and the process for requesting a new ID.
 
 ## Reserved Ranges
 
@@ -26,9 +26,10 @@ This document specifies version **1.5.1**: the reserved ranges, the current assi
 | `3` | Kalshi | `KALSHI` | Kalshi | Perpetual Futures, Prediction Market | Registered under the codename `Lashay` until the venue launched. Carries two matching engines and is due to split; see below. |
 | `4` | Setai Financials | `SETAI_FINANCIALS` | Setai | Futures | Interface versioned separately from `5`. |
 | `5` | Setai Commodities | `SETAI_COMMODITIES` | Setai | Futures, Options on Futures | Interface versioned separately from `4`. |
-| `6` | Binance USD-Margined Futures | `BINANCE` | Binance | Perpetual Futures, Dated Futures | The venue's own `futuresType` for this engine is `U_MARGINED`. Spot is a separate matching engine at this venue and holds ID `8`. Coin-margined futures and options are separate matching engines too, unclaimed, and will share this `Code`. |
+| `6` | Binance USD-Margined Futures | `BINANCE` | Binance | Perpetual Futures, Dated Futures | The venue's own `futuresType` for this engine is `U_MARGINED`. Spot is a separate matching engine at this venue and holds ID `8`. Coin-margined futures is one too and holds ID `9`. Options is one too, unclaimed, and will share this `Code`. |
 | `7` | XYZ | `HYPERLIQUID` | Hyperliquid | Perpetual DEX | HIP-3 builder-deployed DEX. Matches the `xyz:`-prefixed perps on real-world assets, a set disjoint from ID `1`'s native perps. Shares ID `1`'s `Code`. The other builder DEXes at this venue are separate matching engines, unclaimed; see below. |
 | `8` | Binance Spot | `BINANCE` | Binance | Spot | The spot matching engine at the venue that holds ID `6`. Different order-matching rules. Shares ID `6`'s `Code`. |
+| `9` | Binance Coin-Margined Futures | `BINANCE` | Binance | Perpetual Futures, Dated Futures | The venue's own `futuresType` for this engine is `COIN_MARGINED`. Matches an instrument set disjoint from ID `6`'s; see below. Shares ID `6`'s `Code`. |
 
 `Code` is the machine-readable short name **for the venue**. It matches the `Venue` column and takes the same name TradingView uses. Uppercase, never an abbreviation, each space and hyphen a single underscore.
 
@@ -54,7 +55,7 @@ Splitting them assigns a new ID to one engine and changes what that engine's pub
 
 ### ID `6` is one of a venue's four matching engines
 
-Binance runs at least four: spot, USD-margined futures, coin-margined futures, options. Separate stacks, different order-matching rules, separate rate limits, and for spot a different transport generation, since spot offers a binary SBE market data interface while the USD-margined stack is JSON only. Four engines, four Source IDs, one shared `Code`. This claims the USD-margined engine. ID `8` claims spot. Coin-margined futures and options are unclaimed rather than overlooked.
+Binance runs at least four: spot, USD-margined futures, coin-margined futures, options. Spot runs on a separate stack under different order-matching rules and separate rate limits, and offers a binary SBE market data interface where the USD-margined stack is JSON only. The two futures engines share a deployment; see ID `9`. Four engines, four Source IDs, one shared `Code`. This claims the USD-margined engine. ID `8` claims spot. ID `9` claims coin-margined futures. Options are unclaimed rather than overlooked.
 
 The `Name` is not "Perpetual". This engine also matches dated quarterly and weekly futures, and a Source ID names the matching engine rather than the subset a publisher chooses to carry. "USD-Margined" expands the venue's own machine-readable `futuresType` of `U_MARGINED`, and names the coin-margined engine for free.
 
@@ -92,6 +93,18 @@ The assignment does **not** rest on the second half of the rule. The engines can
 
 A publisher stamps this ID. The registry assigned the ID before a publisher needed it, so that the number was fixed first. Which instruments a publisher carries under it is a deployment concern and out of scope here, exactly as group and port assignment is.
 
+### ID `9` is the coin-margined futures engine at the venue that holds IDs `6` and `8`
+
+This ID is distinct from ID `6` under the **second** half of the engine rule alone: the two engines match independently over disjoint instrument sets.
+
+The boundary is durable. A coin-margined contract is margined and settled in its base asset, and a USD-margined contract in its quote asset. These contract terms fix which set an instrument is in, so no instrument crosses between them. They are evidence of the boundary, not different order-matching rules, as with the ID `7` controls. The venue also versions the two interfaces separately, and labels each engine on the wire with its `futuresType`. Both engines trade continuously, so a trading calendar or session lifecycle does not separate them.
+
+The two engines share gateways, a book update ID counter and a REST rate limit. That is the shape of the deployment, which [GLOSSARY.md](../GLOSSARY.md) says not to read. IDs `1` and `7` are the precedent. No DoubleZero Edge feed carries the counter, and an order on one engine cannot change a book on the other, so a message from one engine tells a subscriber nothing about the other.
+
+`Name` expands the venue's `futuresType` of `COIN_MARGINED`, as ID `6`'s `Name` expands `U_MARGINED`. `Code` is `BINANCE`.
+
+No publisher stamps this ID today. Which instruments a publisher carries under it is a deployment concern and out of scope here.
+
 ## Adding a New Source ID
 
 To request a new Source ID, open a pull request against this file that:
@@ -110,6 +123,8 @@ Assigning a new Source ID is an additive change and is therefore a **MINOR** rel
 Because assigned IDs are stable and MUST NOT be renumbered, reordered, removed, or reused, this registry has no mechanism by which a MAJOR release could arise. A subscriber pinned to any `1.x` version of this registry will find that every ID it knows still names the same matching engine; the set of instruments a publisher stamps with it is a deployment concern and may be corrected. A later version only adds IDs it has not seen. Subscribers MUST treat an unrecognized Source ID as an unknown matching engine rather than an error, exactly as if they were running against an older copy of this registry.
 
 ### Changes
+
+**1.6.0** — assigned Source ID `9` to the coin-margined futures matching engine at Binance. It shares ID `6`'s `Code`. Distinct from ID `6` under the second half of the engine rule alone. Recorded that the two futures engines share a deployment, and corrected the ID `6` section, which said all four of the venue's engines run on separate stacks under separate rate limits. Updated ID `6`'s row, which recorded coin-margined futures as unclaimed.
 
 **1.5.1** — editorial. ID `8`'s row and section said no publisher stamps the ID. A publisher stamps it at this release. The section records this. The row no longer records publisher status, because that status is a deployment concern. No assignment changed and no ID was renumbered.
 
