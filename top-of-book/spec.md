@@ -2,7 +2,7 @@
 
 The DoubleZero Top-of-Book & Trades Feed is a wire format for L1 price feeds delivered over the DoubleZero Edge service. It defines a compact, fixed-size, multicast-native binary protocol for publishing two-sided market data (best bid / best ask quotes and trades) from any venue with an order book.
 
-This document specifies version **3.0.1**: the frame header, application message header, and the set of message types sufficient to operate a working publisher and subscriber.
+This document specifies version **3.1.0**: the frame header, application message header, and the set of message types sufficient to operate a working publisher and subscriber.
 
 ---
 
@@ -164,10 +164,13 @@ Maps a numeric Instrument ID to human-readable metadata. Carried on the referenc
 | 3 | Prediction Scalar |
 | 4 | Prediction Categorical |
 | 5 | Perpetual Future |
+| 6 | Dated Future |
 
 Publishers SHOULD use the most accurate value available; receivers MUST accept any `u8` value and treat unknown values as `0` (Unknown).
 
 `5` (Perpetual Future) identifies a perpetual-futures instrument — no expiry, funding-based convergence to an index. Perpetual Future instruments' derived state (funding, mark/oracle price, open interest) is carried on the sibling [Perp Stats Feed](../perp-stats/spec.md); the top-of-book feed still carries their `Quote`/`Trade` and this `InstrumentDefinition`.
+
+`6` (Dated Future) identifies a futures contract with a fixed expiry. It converges to its underlying at delivery or final settlement, not by funding. A publisher that sends `6` MUST set `Expiry` to the contract's expiration, which is never `0`, and MUST set `Settle Type` to `1` (Cash) or `2` (Physical). These rules bind only a publisher that sends `6`. Dated Future instruments are not on the [Perp Stats Feed](../perp-stats/spec.md), which carries Perpetual Future instruments only.
 
 #### Market Model Values
 
@@ -310,7 +313,7 @@ The format is fixed-size and binary, so parsing requires no allocation, no strin
 
 ## Versioning and Forward Compatibility
 
-This document is version **3.0.1**, versioned independently of the sibling specs. The Schema Version byte in the frame header is `3` and equals this spec's MAJOR version, so it stays `3` for every `3.x.y` release and changes only on a breaking wire change. See the [Versioning Policy](../VERSIONING.md) for the full rule, the change classification, and the tag scheme.
+This document is version **3.1.0**, versioned independently of the sibling specs. The Schema Version byte in the frame header is `3` and equals this spec's MAJOR version, so it stays `3` for every `3.x.y` release and changes only on a breaking wire change. See the [Versioning Policy](../VERSIONING.md) for the full rule, the change classification, and the tag scheme.
 
 Future `3.x` versions of this specification MAY, without a Schema Version bump:
 
@@ -321,6 +324,8 @@ Future `3.x` versions of this specification MAY, without a Schema Version bump:
 Existing field layouts and semantics will not change within the `3.x` line. A change that moves or resizes a field, alters a message length, or redefines existing semantics requires a MAJOR release and a Schema Version bump, which old decoders MUST reject rather than parse.
 
 ### Changes
+
+**3.1.0** — added Asset Class value `6` (Dated Future), a futures contract with a fixed expiry, and defined it beside value `5`. A publisher that sends `6` MUST set a non-zero `Expiry` and a `Settle Type` of `1` or `2`; the rules bind only that value. Additive: receivers already MUST accept any `u8` and treat unknown values as `0`. No wire-layout change; Schema Version remains `3`.
 
 **3.0.1** — editorial. Qualified the bare uses of "source" on the `Quote` and `Trade` `Source ID` rows and in Design Principle 6, and added an *Identity Model* section stating that instrument identity is the `(channel_id, instrument_id)` tuple. Adopted the glossary's "published set". No wire change.
 
