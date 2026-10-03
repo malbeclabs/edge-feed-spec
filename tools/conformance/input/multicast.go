@@ -7,6 +7,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/net/ipv4"
+
 	"github.com/malbeclabs/edge-feed-spec/tools/conformance/core"
 )
 
@@ -75,6 +77,33 @@ type MulticastConfig struct {
 //
 // All sockets are opened before any goroutine is started so that a bind error
 // on a later port leaves no goroutines running.
+// joinGroup binds the port and joins the group, with loopback left on.
+//
+// Not net.ListenMulticastUDP, which sets IP_MULTICAST_LOOP false unconditionally
+// (net/udpsock_posix.go). That makes a publisher on the same host invisible to this checker on
+// every platform, which is the first thing anyone tries: the compose stack in this directory runs
+// network_mode: host, and a publisher being brought up is usually brought up beside it.
+func joinGroup(group net.IP, port int, iface *net.Interface) (*net.UDPConn, error) {
+	packetConn, err := net.ListenPacket("udp4", fmt.Sprintf(":%d", port))
+	if err != nil {
+		return nil, fmt.Errorf("binding port %d: %w", port, err)
+	}
+	conn, ok := packetConn.(*net.UDPConn)
+	if !ok {
+		_ = packetConn.Close()
+		return nil, fmt.Errorf("binding port %d did not give a UDP socket", port)
+	}
+	packet := ipv4.NewPacketConn(conn)
+	if err := packet.JoinGroup(iface, &net.UDPAddr{IP: group}); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("joining multicast group %s port %d: %w", group, port, err)
+	}
+	// Leave loopback on, so a publisher on this host is visible. Best effort: some platforms
+	// refuse it on a receiving socket, and there it is the sender's setting that decides.
+	_ = packet.SetMulticastLoopback(true)
+	return conn, nil
+}
+
 func NewMulticastSource(cfg MulticastConfig) (*MulticastSource, error) {
 	var iface *net.Interface
 	if cfg.Interface != "" {
@@ -102,14 +131,13 @@ func NewMulticastSource(cfg MulticastConfig) (*MulticastSource, error) {
 	}
 	entries := make([]portEntry, 0, len(cfg.Ports))
 	for logicalPort, udpPort := range cfg.Ports {
-		addr := &net.UDPAddr{IP: cfg.Group, Port: udpPort}
-		conn, err := net.ListenMulticastUDP("udp4", iface, addr)
+		conn, err := joinGroup(cfg.Group, udpPort, iface)
 		if err != nil {
 			cancel()
 			for _, e := range entries {
 				_ = e.conn.Close()
 			}
-			return nil, fmt.Errorf("joining multicast group %s port %d: %w", cfg.Group, udpPort, err)
+			return nil, err
 		}
 		entries = append(entries, portEntry{logicalPort, conn})
 		ms.conns = append(ms.conns, conn)
