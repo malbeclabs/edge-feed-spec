@@ -399,7 +399,20 @@ func TestStrikeRejectedMessageIsNotADrop(t *testing.T) {
 	short := wb.Frame(wire.MagicTOB).
 		Msg(wire.TypeInstrumentDef, 130, instrDefTOBBody(100, 1)).
 		Msg(wire.TypeStrikeInterval, 36, func(b *wb.Body) { b.Pad(32) }).Bytes()
-	for name, bad := range map[string][]byte{"different instrument id": wrongID, "wrong length": short} {
+	// The same message is rejected by STRIKE.FIELDS or STRIKE.INTERVAL_NOT_EMPTY.
+	// A pending strike here would otherwise fail STRIKE.FIXED_STAYS_FIXED as well.
+	badFields := strikePairTOB(100, 1, strikeBody(100, 0x02, 0, 0, 0))
+	emptyRange := strikePairTOB(100, 1, strikeBody(100, 0x0F, 9279999, 9270000, 0))
+	otherSource := strikePairTOB(100, 1, func(b *wb.Body) {
+		b.U32(100).U16(2).U8(0xFE).U8(0x03).I64(8394517).I64(0).U64(0).Pad(4)
+	})
+	for name, bad := range map[string][]byte{
+		"different instrument id": wrongID,
+		"wrong length":            short,
+		"bound flags defect":      badFields,
+		"empty interval":          emptyRange,
+		"source id differs":       otherSource,
+	} {
 		t.Run(name, func(t *testing.T) {
 			findings := processRefdata(t, core.FeedTOB, wire.MagicTOB, [][]byte{
 				buildManifestFrame(wire.MagicTOB, 1, 1, 1),
@@ -520,4 +533,32 @@ func TestStrikeDroppedAcrossAGapIsUnverifiable(t *testing.T) {
 	e.Flush()
 	wantStatuses(t, ac.findings, rulePresence, 100, core.Unverifiable, core.Unverifiable)
 	wantReasons(t, ac.findings, rulePresence, 100, core.ReasonColdStart, core.ReasonLoss)
+}
+
+// Equal ends across a gap do not prove a pass: the lost datagrams can hold a drop
+// and its reversal. The comparisons after the gap do not span it, so they pass
+// again. The window stays dirty for the era; the rule does not stay blind.
+func TestStrikeEqualEndsAcrossAGapAreNotAPass(t *testing.T) {
+	ac := &allCapture{}
+	e := New(Config{Feed: core.FeedTOB, ReorderWindow: 1}, ac)
+	for _, d := range []struct {
+		seq uint64
+		raw []byte
+	}{
+		{1, buildManifestFrame(wire.MagicTOB, 1, 1, 1)},
+		{2, strikePairTOB(100, 1, strikeFixedBody(100))},
+		// Sequence numbers 3 to 9 never arrive.
+		{10, strikePairTOB(100, 1, strikeFixedBody(100))},
+		{11, strikePairTOB(100, 1, strikeFixedBody(100))},
+		{12, buildManifestFrame(wire.MagicTOB, 1, 1, 1)},
+	} {
+		f, sf := wire.Decode(d.raw, wire.MagicTOB)
+		f.Header.Sequence = d.seq
+		e.Process(srcA, f, core.PortRefData, sf)
+	}
+	e.Flush()
+	wantStatuses(t, ac.findings, rulePresence, 100, core.Unverifiable, core.Unverifiable, core.Pass)
+	wantReasons(t, ac.findings, rulePresence, 100, core.ReasonColdStart, core.ReasonLoss, "")
+	wantStatuses(t, ac.findings, ruleStaysFixed, 100, core.NA, core.Unverifiable, core.Pass)
+	wantReasons(t, ac.findings, ruleStaysFixed, 100, "", core.ReasonLoss, "")
 }

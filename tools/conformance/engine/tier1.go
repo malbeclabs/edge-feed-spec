@@ -345,11 +345,33 @@ func (e *Engine) checkTier1Strike(f *wire.Frame, i int, port core.Port, ch uint8
 		return // MSG.LENGTH_PER_TYPE already fired; the body is not readable
 	}
 
-	// STRIKE.FIELDS: Source ID equals the Source ID of the definition before it.
+	var def *wire.Message
 	if i > 0 && f.Messages[i-1].Type == wire.TypeInstrumentDef {
-		if defSrc, ok := instrDefSourceID(e.cfg.Feed, f.Header.SchemaVersion, f.Messages[i-1]); ok && defSrc != strikeSourceID(m) {
-			e.Emit("STRIKE.FIELDS", core.Violation, port, seq, ch, inst,
-				fmt.Sprintf("StrikeInterval source_id %d != InstrumentDefinition source_id %d", strikeSourceID(m), defSrc))
+		def = &f.Messages[i-1]
+	}
+	for _, d := range strikeDefects(e.cfg.Feed, f.Header.SchemaVersion, m, def) {
+		e.Emit(d.rule, core.Violation, port, seq, ch, inst, d.detail)
+	}
+}
+
+// strikeDefect is one STRIKE.FIELDS or STRIKE.INTERVAL_NOT_EMPTY violation.
+type strikeDefect struct{ rule, detail string }
+
+// strikeDefects returns the STRIKE.FIELDS and STRIKE.INTERVAL_NOT_EMPTY
+// violations of a StrikeInterval of canonical length. def is the
+// InstrumentDefinition before it, or nil.
+//
+// Tier 1 reports them, and the continuity rules use the same function to refuse
+// the message as state: a strike that a structural rule rejects is not a pending
+// or a fixed strike, and two lists would drift apart.
+func strikeDefects(feed core.Feed, schema uint8, m wire.Message, def *wire.Message) []strikeDefect {
+	var out []strikeDefect
+	fields := func(detail string) { out = append(out, strikeDefect{"STRIKE.FIELDS", detail}) }
+
+	// Source ID equals the Source ID of the definition before it.
+	if def != nil {
+		if defSrc, ok := instrDefSourceID(feed, schema, *def); ok && defSrc != strikeSourceID(m) {
+			fields(fmt.Sprintf("StrikeInterval source_id %d != InstrumentDefinition source_id %d", strikeSourceID(m), defSrc))
 		}
 	}
 
@@ -357,10 +379,7 @@ func (e *Engine) checkTier1Strike(f *wire.Frame, i int, port core.Port, ch uint8
 	lower, upper := strikeLowerBound(m), strikeUpperBound(m)
 	hasLower, hasUpper := flags&strikeLowerPresent != 0, flags&strikeUpperPresent != 0
 
-	// STRIKE.FIELDS: the fields agree with Bound Flags.
-	fields := func(detail string) {
-		e.Emit("STRIKE.FIELDS", core.Violation, port, seq, ch, inst, detail)
-	}
+	// The fields agree with Bound Flags.
 	if flags&strikeReservedBits != 0 {
 		fields(fmt.Sprintf("Bound Flags reserved bits 4-7 non-zero: 0x%02X", flags))
 	}
@@ -388,13 +407,14 @@ func (e *Engine) checkTier1Strike(f *wire.Frame, i int, port core.Port, ch uint8
 		bothInclusive := flags&strikeLowerInclusive != 0 && flags&strikeUpperInclusive != 0
 		switch {
 		case lower > upper:
-			e.Emit("STRIKE.INTERVAL_NOT_EMPTY", core.Violation, port, seq, ch, inst,
-				fmt.Sprintf("Lower Bound %d > Upper Bound %d", lower, upper))
+			out = append(out, strikeDefect{"STRIKE.INTERVAL_NOT_EMPTY",
+				fmt.Sprintf("Lower Bound %d > Upper Bound %d", lower, upper)})
 		case lower == upper && !bothInclusive:
-			e.Emit("STRIKE.INTERVAL_NOT_EMPTY", core.Violation, port, seq, ch, inst,
-				fmt.Sprintf("Lower Bound = Upper Bound = %d with Bound Flags 0x%02X: an exclusive end makes the interval empty", lower, flags))
+			out = append(out, strikeDefect{"STRIKE.INTERVAL_NOT_EMPTY",
+				fmt.Sprintf("Lower Bound = Upper Bound = %d with Bound Flags 0x%02X: an exclusive end makes the interval empty", lower, flags)})
 		}
 	}
+	return out
 }
 
 // checkTier1Message runs per-type field-level Tier-1 checks.

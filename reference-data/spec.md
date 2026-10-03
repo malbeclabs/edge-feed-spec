@@ -28,7 +28,7 @@ A channel adopting this mechanism uses **one multicast group with two destinatio
 | Port | Purpose | Carries |
 |------|---------|---------|
 | mktdata | Live market data | Feed-specific market data path messages (e.g., `Quote`, `Trade`, `Midpoint`), `Heartbeat`, `EndOfSession` |
-| refdata | Instrument metadata and channel state | `InstrumentDefinition`, `ManifestSummary`, `StrikeInterval` |
+| refdata | Instrument metadata and channel state | `InstrumentDefinition`, `ManifestSummary`, and `StrikeInterval` in a feed that lists it |
 
 The frame header and application message header are identical on both ports. A single decoder implementation handles both. Concrete port assignments are out of scope for this supplement; each feed deployment publishes its port mapping out of band (e.g., in service discovery or in operator documentation).
 
@@ -91,7 +91,7 @@ A venue can fix a strike after it lists the instrument. Until the venue fixes th
 | 28 | Fixing Time | `ts_ns` | The time at which the venue fixed the strike. `0` while the strike is pending. `0` when the venue fixed the strike at listing. `0` when the time is not available. |
 | 36 | Reserved | 4B | Padding. A publisher MUST set these bytes to `0`. |
 
-The message is feed-independent. `Instrument ID` is the key, and the message reads no field of `InstrumentDefinition`. Thus it applies to the 130-byte `InstrumentDefinition` and to the 64-byte variant of the Midpoint feed.
+The message is feed-independent. `Instrument ID` is the key. A subscriber compares two fields with the `InstrumentDefinition` before the message: `Instrument ID` always, and `Source ID` where the `InstrumentDefinition` of the feed carries one. The message uses no other field of `InstrumentDefinition`. Thus it applies to the 130-byte `InstrumentDefinition` and to the 64-byte variant of the Midpoint feed.
 
 The Type ID is `0x09`. The DoubleZero Edge family shares one Type ID space, and no feed in the family uses `0x09` for a different payload. A feed adopts this message when its spec lists `0x09` in its message table. The Top-of-Book & Trades feed and the Market-by-Price feed do. In a feed that does not list it, `0x09` is reserved for this payload.
 
@@ -253,7 +253,7 @@ A subscriber reads the strike of an instrument from the datagram that carries it
 2. **An `InstrumentDefinition` with a `StrikeInterval` after it gives a fixed strike or a pending strike.** An `InstrumentDefinition` without one means that the contract does not pay on a strike. A subscriber that joins late does not wait a cycle to know which case applies.
 3. **`ready()` does not change.** A subscriber that holds every definition also holds every strike, fixed or pending.
 4. **The last `StrikeInterval` for an instrument is the current strike.** A subscriber replaces the strike that it holds each time it accepts the definition.
-5. **A subscriber MUST ignore a `StrikeInterval` that does not immediately follow an `InstrumentDefinition` with the same `Instrument ID`.**
+5. **A subscriber MUST ignore a `StrikeInterval` that does not immediately follow an `InstrumentDefinition` with the same `Instrument ID`.** A subscriber MUST also ignore it when its `Source ID` differs from the `Source ID` of that `InstrumentDefinition`, where the `InstrumentDefinition` carries one.
 
 Rule 2 applies only to a publisher that implements this message. `MINOR` versions are not visible on the wire, so a subscriber cannot tell from a datagram whether a publisher implements `StrikeInterval`. The operator of a feed states it out of band.
 
@@ -284,7 +284,7 @@ Worked example for the Top-of-Book & Trades Feed at the recommended settings (N=
 1000 × 130 / 30 + 24 / 1 = 4,333 + 24 ≈ 4,357 bytes/sec ≈ 35 kbps
 ```
 
-Definitions pack into frames at 9 per frame (1,170 + 24-byte frame header = 1,194 bytes), giving `1000 / 9 ≈ 112` frames per cycle, or roughly one frame every 268 ms — comfortably within any modern network's burst tolerance.
+Definitions pack into datagrams at 9 per datagram (1,170 + 24-byte datagram header = 1,194 bytes), giving `1000 / 9 ≈ 112` datagrams per cycle, or roughly one datagram every 268 ms — comfortably within any modern network's burst tolerance.
 
 An instrument with a `StrikeInterval` uses 170 bytes each cycle and not 130. A datagram of the maximum size, 1,232 bytes, holds 7 pairs (1,190 + 24-byte datagram header = 1,214 bytes). It holds 9 definitions without a `StrikeInterval`. If all 1000 instruments have a strike, the rate is `1000 × 170 / 30 + 24 ≈ 5,691 bytes/sec ≈ 46 kbps`, in `1000 / 7 ≈ 143` datagrams per cycle.
 

@@ -78,6 +78,7 @@ type strikeState struct {
 	present bool   // a StrikeInterval followed the definition
 	fixed   bool   // and it was a fixed strike
 	seq     uint16 // the Manifest Seq of the definition
+	taints  uint64 // portTracker.taints when the definition arrived
 }
 
 // strikeObs is what one accepted InstrumentDefinition showed about its strike.
@@ -87,7 +88,7 @@ const (
 	strikeAbsent     strikeObs = iota // no StrikeInterval follows the definition
 	strikeIsPending                   // a pending StrikeInterval follows
 	strikeIsFixed                     // a fixed StrikeInterval follows
-	strikeUnreadable                  // a StrikeInterval follows, but Tier 1 already rejected it
+	strikeUnreadable                  // a StrikeInterval follows, but a structural rule rejects it
 )
 
 // channelRefdataState is the per-channel reference-data subscriber state.
@@ -868,16 +869,19 @@ func (rs *refdataState) onInstrumentDef(ch uint8, instrID uint32, manifestSeq ui
 
 // strikeAfter classifies what follows the InstrumentDefinition at msgs[i].
 //
-// A StrikeInterval with a wrong length or a different Instrument ID is
-// strikeUnreadable, not strikeAbsent: MSG.LENGTH_PER_TYPE or
-// STRIKE.FOLLOWS_DEFINITION already reported it, and reading it as "no strike"
-// would report the same defect a second time as a dropped strike.
-func strikeAfter(msgs []wire.Message, i int, instrID uint32, wantLen uint8) strikeObs {
+// A StrikeInterval that a structural rule rejects is strikeUnreadable, not
+// strikeAbsent and not a strike: a wrong length (MSG.LENGTH_PER_TYPE), a
+// different Instrument ID (STRIKE.FOLLOWS_DEFINITION), or any defect of
+// STRIKE.FIELDS or STRIKE.INTERVAL_NOT_EMPTY. Read as "no strike", it reports the
+// same defect a second time as a dropped strike. Read as a strike, it replaces the
+// last valid state with one the publisher did not validly send.
+func strikeAfter(feed core.Feed, schema uint8, msgs []wire.Message, i int, instrID uint32, wantLen uint8) strikeObs {
 	if i+1 >= len(msgs) || msgs[i+1].Type != wire.TypeStrikeInterval {
 		return strikeAbsent
 	}
 	next := msgs[i+1]
-	if next.Length != wantLen || strikeInstrumentID(next) != instrID {
+	if next.Length != wantLen || strikeInstrumentID(next) != instrID ||
+		len(strikeDefects(feed, schema, next, &msgs[i])) > 0 {
 		return strikeUnreadable
 	}
 	if strikePending(strikeBoundFlags(next)) {
@@ -898,7 +902,7 @@ func strikeAfter(msgs []wire.Message, i int, instrID uint32, wantLen uint8) stri
 // it, so those two definitions describe one instrument. Across a wider distance
 // the instrument can have left the set and its Instrument ID can name a new
 // instrument: the set between them never completed, so nothing here saw it leave.
-func (rs *refdataState) onDefinitionStrike(ch uint8, instrID uint32, obs strikeObs, dirty bool, frameSeq uint64) {
+func (rs *refdataState) onDefinitionStrike(ch uint8, instrID uint32, obs strikeObs, taints uint64, frameSeq uint64) {
 	const (
 		presence   = "STRIKE.PRESENCE_STABLE"
 		staysFixed = "STRIKE.FIXED_STAYS_FIXED"
@@ -915,15 +919,19 @@ func (rs *refdataState) onDefinitionStrike(ch uint8, instrID uint32, obs strikeO
 	}
 	present := obs != strikeAbsent
 	comparable := had && (prev.seq == s.latestSeq || prev.seq == s.latestSeq-1)
+	// A gap between the two definitions decides neither rule. It can hide a change
+	// and its reversal, so equal ends do not prove a pass. It can hide the removal
+	// of the instrument and the reuse of its ID, so different ends do not prove a
+	// violation. Only a gap between them counts: an older gap was before the first
+	// definition, and the comparison starts after it.
+	gapped := comparable && prev.taints != taints
 
-	// A violation needs two definitions of one instrument, both seen whole. A gap
-	// between them can hide the removal of the instrument and the reuse of its ID.
 	violation := func(rule, detail string) {
-		st, reason := core.Violation, ""
-		if dirty {
-			st, reason = core.Unverifiable, core.ReasonLoss
-		}
-		rs.e.Emit(rule, st, core.PortRefData, frameSeq, ch, instrID, detail, reason)
+		rs.e.Emit(rule, core.Violation, core.PortRefData, frameSeq, ch, instrID, detail)
+	}
+	lost := func(rule string) {
+		rs.e.unverified(rule, core.ReasonLoss, core.PortRefData, frameSeq, ch, instrID,
+			"a refdata datagram was lost between this definition and the last one of this instrument")
 	}
 	stale := func(rule string) {
 		rs.e.unverified(rule, core.ReasonTransition, core.PortRefData, frameSeq, ch, instrID,
@@ -938,6 +946,8 @@ func (rs *refdataState) onDefinitionStrike(ch uint8, instrID uint32, obs strikeO
 			"first definition seen for this instrument: adopted, nothing earlier to compare")
 	case !comparable:
 		stale(presence)
+	case gapped:
+		lost(presence)
 	case prev.present == present:
 		rs.e.passed(presence, core.PortRefData, frameSeq, ch, instrID,
 			"the definition agrees with the one before it on whether a StrikeInterval follows")
@@ -956,6 +966,8 @@ func (rs *refdataState) onDefinitionStrike(ch uint8, instrID uint32, obs strikeO
 			"the last definition of this instrument did not carry a fixed strike")
 	case !comparable:
 		stale(staysFixed)
+	case gapped:
+		lost(staysFixed)
 	case !present:
 		rs.e.unverified(staysFixed, core.ReasonSuperseded, core.PortRefData, frameSeq, ch, instrID,
 			"the definition carries no StrikeInterval, which STRIKE.PRESENCE_STABLE reports")
@@ -966,7 +978,7 @@ func (rs *refdataState) onDefinitionStrike(ch uint8, instrID uint32, obs strikeO
 			"StrikeInterval instrument=%d is pending, but the one before it was fixed", instrID))
 	}
 
-	s.strikes[instrID] = strikeState{present: present, fixed: obs == strikeIsFixed, seq: s.latestSeq}
+	s.strikes[instrID] = strikeState{present: present, fixed: obs == strikeIsFixed, seq: s.latestSeq, taints: taints}
 }
 
 // --- Engine integration ---
@@ -1020,7 +1032,8 @@ func (e *Engine) processRefdataFrame(f *wire.Frame, pt *portTracker) {
 			// the message after an accepted definition.
 			if accepted && carriesStrikeInterval(e.cfg.Feed, f.Header.SchemaVersion) {
 				wantLen := expectedMsgLen(e.cfg.Feed, f.Header.SchemaVersion, wire.TypeStrikeInterval)
-				e.refdata.onDefinitionStrike(ch, instrID, strikeAfter(f.Messages, i, instrID, wantLen), dirty, frameSeq)
+				obs := strikeAfter(e.cfg.Feed, f.Header.SchemaVersion, f.Messages, i, instrID, wantLen)
+				e.refdata.onDefinitionStrike(ch, instrID, obs, pt.taints, frameSeq)
 			}
 		}
 	}
