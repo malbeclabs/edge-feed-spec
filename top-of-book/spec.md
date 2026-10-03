@@ -2,7 +2,7 @@
 
 The DoubleZero Top-of-Book & Trades Feed is a wire format for L1 price feeds delivered over the DoubleZero Edge service. It defines a compact, fixed-size, multicast-native binary protocol for publishing two-sided market data (best bid / best ask quotes and trades) from any venue with an order book.
 
-This document specifies version **3.0.1**: the frame header, application message header, and the set of message types sufficient to operate a working publisher and subscriber.
+This document specifies version **3.1.0**: the frame header, application message header, and the set of message types sufficient to operate a working publisher and subscriber.
 
 ---
 
@@ -46,7 +46,7 @@ Each channel is delivered to **one multicast group on two destination ports**, p
 | Port | Carries |
 |------|---------|
 | mktdata | `Quote`, `Trade`, `Heartbeat`, `EndOfSession` |
-| refdata | `InstrumentDefinition`, `ManifestSummary` |
+| refdata | `InstrumentDefinition`, `ManifestSummary`, `StrikeInterval` |
 
 The frame header and application message header are identical on both ports. A subscriber bootstrapping from a cold start MUST bind both ports. A subscriber that already has out-of-band `InstrumentDefinition` data MAY bind only the market data port.
 
@@ -112,6 +112,7 @@ The unique key for an instrument in this feed is the tuple **`(channel_id, instr
 | `0x06` | EndOfSession | 12 | mktdata | No more data for this session |
 | `0x07` | ManifestSummary | 24 | refdata | Published instrument set summary (see supplement) |
 | `0x08` | Liquidation | 48 | mktdata | Annotation for a forced (liquidation/ADL) `Trade`, keyed on `Trade ID` |
+| `0x09` | StrikeInterval | 40 | refdata | Strike of a contract that pays on a threshold or a range (see supplement) |
 
 A decoder encountering an unknown type MUST skip the message using its Message Length field and continue parsing the frame.
 
@@ -282,6 +283,24 @@ Annotates a `Trade` that resulted from a forced liquidation or auto-deleveraging
 | 20 | Mark Price | `price` | Mark price at liquidation |
 | 28 | Liquidated User | 20B | Liquidated account address |
 
+### 0x09 StrikeInterval (40 bytes)
+
+The strike of one instrument as an interval: a lower bound, an upper bound, or both. Carried on the `refdata` port. Defined in the [Reference Data Distribution supplement](../reference-data/spec.md); the layout is reproduced here for convenience. The supplement is the authority for the meaning of `Bound Flags` and for the publisher and subscriber rules.
+
+A publisher sends this message only for an instrument whose contract pays on a strike. A publisher MUST put it immediately after the `InstrumentDefinition` of the same instrument, in the same datagram. A subscriber that does not implement it skips it by `Message Length`.
+
+| Offset | Field | Type | Description |
+|--------|-------|------|-------------|
+| 0  | Header | 4B | Type=`0x09`, Length=40 |
+| 4  | Instrument ID | `u32` | The instrument that this strike applies to. The same value as in the `InstrumentDefinition` that this message follows. |
+| 8  | Source ID | `u16` | The matching engine, as assigned by the [Source ID Registry](../sources/spec.md). The same value as in the `InstrumentDefinition`. |
+| 10 | Strike Exponent | `i8` | The decimal exponent of both bounds. Independent of `Price Exponent`. |
+| 11 | Bound Flags | `u8` | Bit 0: `Lower Bound` is present. Bit 1: `Lower Bound` is inclusive. Bit 2: `Upper Bound` is present. Bit 3: `Upper Bound` is inclusive. Bits 4–7: reserved. Bits 0 and 2 both clear: the strike is pending. |
+| 12 | Lower Bound | `i64` | The raw value of the lower bound. Uses `Strike Exponent`. `0` when bit 0 of `Bound Flags` is clear. |
+| 20 | Upper Bound | `i64` | The raw value of the upper bound. Uses `Strike Exponent`. `0` when bit 2 of `Bound Flags` is clear. |
+| 28 | Fixing Time | `ts_ns` | The time at which the venue fixed the strike. `0` while the strike is pending, when the venue fixed the strike at listing, and when the time is not available. |
+| 36 | Reserved | 4B | Padding. `0`. |
+
 ---
 
 ## Session Lifecycle
@@ -289,7 +308,7 @@ Annotates a `Trade` that resulted from a forced liquidation or auto-deleveraging
 A typical publisher session proceeds as follows:
 
 1. Publisher starts → increments `Reset Count` in the frame header and resets `Sequence Number` to 0.
-2. Begins emitting **InstrumentDefinition** for every active instrument on the reference data port, paced evenly across the definition cycle period (recommended 30 s). Definitions are retransmitted continuously, not just at startup.
+2. Begins emitting **InstrumentDefinition** for every active instrument on the reference data port, paced evenly across the definition cycle period (recommended 30 s). Definitions are retransmitted continuously, not just at startup. For an instrument whose contract pays on a strike, a **StrikeInterval** follows each definition in the same datagram.
 3. Begins emitting **ManifestSummary** with `Valid = 1` on the reference data port at the manifest cadence (recommended 1 s).
 4. Begins sending **Quote** (and optionally **Trade**) messages on the market data port as market data arrives. Multiple messages MAY be batched into a single frame.
 5. When the market data path is idle → sends **Heartbeat** every N seconds on the market data port.
@@ -310,7 +329,7 @@ The format is fixed-size and binary, so parsing requires no allocation, no strin
 
 ## Versioning and Forward Compatibility
 
-This document is version **3.0.1**, versioned independently of the sibling specs. The Schema Version byte in the frame header is `3` and equals this spec's MAJOR version, so it stays `3` for every `3.x.y` release and changes only on a breaking wire change. See the [Versioning Policy](../VERSIONING.md) for the full rule, the change classification, and the tag scheme.
+This document is version **3.1.0**, versioned independently of the other feed specs. The Schema Version byte in the frame header is `3` and equals this spec's MAJOR version, so it stays `3` for every `3.x.y` release and changes only on a breaking wire change. See the [Versioning Policy](../VERSIONING.md) for the full rule, the change classification, and the tag scheme.
 
 Future `3.x` versions of this specification MAY, without a Schema Version bump:
 
@@ -321,6 +340,8 @@ Future `3.x` versions of this specification MAY, without a Schema Version bump:
 Existing field layouts and semantics will not change within the `3.x` line. A change that moves or resizes a field, alters a message length, or redefines existing semantics requires a MAJOR release and a Schema Version bump, which old decoders MUST reject rather than parse.
 
 ### Changes
+
+**3.1.0** — additive. Added `0x09 StrikeInterval` (40 bytes) on the `refdata` port, defined in the [Reference Data Distribution supplement](../reference-data/spec.md) at its `1.1.0`. It carries the strike of a contract that pays on a threshold or a range, and follows the `InstrumentDefinition` of the same instrument in the same datagram. `InstrumentDefinition` does not change. An old decoder skips the type by Message Length, so the Schema Version byte stays `3`. Editorial in the same release: the Versioning section says `other feed specs` where it said `sibling specs`, as `GLOSSARY.md` requires.
 
 **3.0.1** — editorial. Qualified the bare uses of "source" on the `Quote` and `Trade` `Source ID` rows and in Design Principle 6, and added an *Identity Model* section stating that instrument identity is the `(channel_id, instrument_id)` tuple. Adopted the glossary's "published set". No wire change.
 

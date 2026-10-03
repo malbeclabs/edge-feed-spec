@@ -19,6 +19,9 @@ import "github.com/malbeclabs/edge-feed-spec/tools/conformance/core"
 type instrDefLayout struct {
 	MsgLen        uint8 // canonical Message Length, header included
 	InstrumentID  int
+	SourceID      int
+	Symbol        int
+	SymbolLen     int
 	ManifestSeq   int
 	PriceBound    int
 	DefaultMethod int
@@ -40,16 +43,16 @@ type instrDefLayout struct {
 // bytes later. instrdef_test.go pins that delta.
 var (
 	// top-of-book/v1.0.0 "0x02 InstrumentDefinition (80 bytes)":
-	// Instrument ID spec 4, Price Bound spec 77, Manifest Seq spec 78.
-	instrDefSchema1 = instrDefLayout{MsgLen: 80, InstrumentID: 0, ManifestSeq: 74, PriceBound: 73, DefaultMethod: -1}
+	// Instrument ID spec 4, Symbol spec 8 (char[16]), Price Bound spec 77, Manifest Seq spec 78.
+	instrDefSchema1 = instrDefLayout{MsgLen: 80, InstrumentID: 0, SourceID: -1, Symbol: 4, SymbolLen: 16, ManifestSeq: 74, PriceBound: 73, DefaultMethod: -1}
 
 	// top-of-book/spec.md and market-by-order/spec.md at schema 3:
-	// Instrument ID spec 4, Price Bound spec 127, Manifest Seq spec 128.
-	instrDefSchema3 = instrDefLayout{MsgLen: 130, InstrumentID: 0, ManifestSeq: 124, PriceBound: 123, DefaultMethod: -1}
+	// Instrument ID spec 4, Source ID spec 8, Symbol spec 10 (char[64]), Price Bound spec 127, Manifest Seq spec 128.
+	instrDefSchema3 = instrDefLayout{MsgLen: 130, InstrumentID: 0, SourceID: 4, Symbol: 6, SymbolLen: 64, ManifestSeq: 124, PriceBound: 123, DefaultMethod: -1}
 
 	// midpoint/spec.md, still at 1.0.x with the slimmed 64-byte variant:
-	// Instrument ID spec 4, Default Method spec 42, Price Bound spec 43, Manifest Seq spec 60.
-	instrDefMidpoint = instrDefLayout{MsgLen: 64, InstrumentID: 0, ManifestSeq: 56, PriceBound: 39, DefaultMethod: 38}
+	// Instrument ID spec 4, Symbol spec 8 (char[16]), Default Method spec 42, Price Bound spec 43, Manifest Seq spec 60.
+	instrDefMidpoint = instrDefLayout{MsgLen: 64, InstrumentID: 0, SourceID: -1, Symbol: 4, SymbolLen: 16, ManifestSeq: 56, PriceBound: 39, DefaultMethod: 38}
 )
 
 // instrDefLayoutFor returns the InstrumentDefinition layout for a feed at a schema

@@ -279,7 +279,7 @@ func (e *Engine) dirtyOn(port core.Port, ch uint8) bool {
 func (e *Engine) taintOn(port core.Port, ch uint8) {
 	for k, pt := range e.ports {
 		if k.port == port && k.ch == ch {
-			pt.dirtyWindow = true
+			pt.taint()
 		}
 	}
 }
@@ -301,7 +301,7 @@ func (e *Engine) taintOn(port core.Port, ch uint8) {
 func (e *Engine) taintPortWide(port core.Port) {
 	for k, pt := range e.ports {
 		if k.port == port {
-			pt.dirtyWindow = true
+			pt.taint()
 		}
 	}
 }
@@ -342,7 +342,7 @@ func (e *Engine) ObserveCaptureLoss(n uint64) {
 	}
 	e.captureLossEpoch++
 	for _, pt := range e.ports {
-		pt.dirtyWindow = true
+		pt.taint()
 		pt.captureDirty = true
 	}
 	// A snapshot group in flight is not touched here, and cannot be: the reorder
@@ -631,7 +631,7 @@ func (e *Engine) classify(item *bufferItem, pt *portTracker) {
 
 	// Forward gap: transport loss.
 	if res.gapBefore {
-		pt.dirtyWindow = true
+		pt.taint()
 		e.rep.TransportLoss(port)
 	}
 

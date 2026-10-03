@@ -100,6 +100,9 @@ const (
 	TypeSnapshotLevel = 0x42
 	// Shared with TOB and MBO, byte-identical, and carried by MBP.
 	TypeLiquidation = 0x08
+	// Defined by the reference-data supplement. A feed carries it when its spec
+	// lists it: top-of-book and market-by-price do.
+	TypeStrikeInterval = 0x09
 )
 
 type FrameHeader struct {

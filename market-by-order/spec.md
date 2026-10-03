@@ -4,7 +4,7 @@ The DoubleZero Market-by-Order Feed is a wire format for market-by-order (MBO) b
 
 This is a sibling protocol to the DoubleZero Top-of-Book & Trades Feed and the DoubleZero Midpoint Feed, not a layer on top. Where the top-of-book feed carries two-sided BBO data and trades and the midpoint feed carries a single derived price per instrument, this feed carries the full resting-order population of each instrument, plus a continuous in-band snapshot mechanism that lets subscribers bootstrap and recover from packet loss over multicast alone.
 
-This document specifies version **3.3.0**: the frame header, application message header, the message types sufficient to operate a working publisher and subscriber, and the sequence-number-anchored snapshot/delta recovery model that is the core of the design.
+This document specifies version **3.3.1**: the frame header, application message header, the message types sufficient to operate a working publisher and subscriber, and the sequence-number-anchored snapshot/delta recovery model that is the core of the design.
 
 ---
 
@@ -164,7 +164,7 @@ A decoder encountering an unknown type MUST skip the message using its `Message 
 
 ### Cross-Spec Type ID Policy
 
-A message Type ID that appears in more than one sibling feed MUST carry the same semantic meaning in each. The shared Type IDs at this writing are `0x01` (Heartbeat), `0x02` (InstrumentDefinition), `0x04` (Trade), `0x06` (EndOfSession), `0x07` (ManifestSummary), and `0x08` (Liquidation). Heartbeat, EndOfSession, and ManifestSummary are byte-for-byte identical across every sibling that carries them. Trade is byte-for-byte identical between the top-of-book feed and this feed (the midpoint feed leaves `0x04` reserved). Liquidation is byte-for-byte identical between the top-of-book feed and this feed. InstrumentDefinition shares the Type ID but each sibling defines its own layout — market-by-order, top-of-book, market-by-price, order-intent, and perp-stats share the 130-byte layout; the midpoint feed carries a slimmed 64-byte variant. Feed-specific payloads live in `0x10` and above. A Type ID used by one sibling for a given payload MUST NOT be reassigned to a different payload in another sibling; where a sibling does not carry that payload, the slot is reserved.
+A message Type ID that appears in more than one feed in the DoubleZero Edge family MUST carry the same semantic meaning in each. The shared Type IDs at this writing are `0x01` (Heartbeat), `0x02` (InstrumentDefinition), `0x04` (Trade), `0x06` (EndOfSession), `0x07` (ManifestSummary), `0x08` (Liquidation), and `0x09` (StrikeInterval). This feed does not carry StrikeInterval: `0x09` is reserved here for that payload, which the [Reference Data Distribution supplement](../reference-data/spec.md) defines. Heartbeat, EndOfSession, and ManifestSummary are byte-for-byte identical across every feed in the family that carries them. Trade is byte-for-byte identical between the top-of-book feed and this feed (the midpoint feed leaves `0x04` reserved). Liquidation is byte-for-byte identical between the top-of-book feed and this feed. InstrumentDefinition shares the Type ID but each feed in the family defines its own layout — market-by-order, top-of-book, market-by-price, order-intent, and perp-stats share the 130-byte layout; the midpoint feed carries a slimmed 64-byte variant. Feed-specific payloads live in `0x10` and above. A Type ID used by one feed in the family for a given payload MUST NOT be reassigned to a different payload in another feed in the family; where a feed in the family does not carry that payload, the slot is reserved.
 
 ---
 
@@ -782,7 +782,7 @@ The format is fixed-size and binary; parsing requires no allocation, no string h
 
 ## Versioning and Forward Compatibility
 
-This document is version **3.3.0**, versioned independently of the other feed specs. The Schema Version byte in the frame header is `3` and equals this spec's MAJOR version, so it stays `3` for every `3.x.y` release and changes only on a breaking wire change. See the [Versioning Policy](../VERSIONING.md) for the full rule, the change classification, and the tag scheme.
+This document is version **3.3.1**, versioned independently of the other feed specs. The Schema Version byte in the frame header is `3` and equals this spec's MAJOR version, so it stays `3` for every `3.x.y` release and changes only on a breaking wire change. See the [Versioning Policy](../VERSIONING.md) for the full rule, the change classification, and the tag scheme.
 
 Future `3.x` versions of this specification MAY, without a Schema Version bump:
 
@@ -799,6 +799,8 @@ Existing field layouts and semantics will not change within the `3.x` line. The 
 A subscriber MUST reject a frame whose Schema Version it does not implement rather than attempt a best-effort parse.
 
 ### Changes
+
+**3.3.1** — editorial. Added `0x09` (StrikeInterval) to the list of shared Type IDs in the Cross-Spec Type ID Policy, and recorded that this feed does not carry it and reserves the ID for that payload. The [Reference Data Distribution supplement](../reference-data/spec.md) defines the message at its `1.1.0`. No wire change and no new requirement: the policy already forbids a different payload on a Type ID that a feed in the family uses. The policy now names the DoubleZero Edge family where it said `sibling feed`, as `GLOSSARY.md` requires. The rule is the same.
 
 **3.3.0** — added Asset Class value `5` (Perpetual Future) to the value table, which this spec omitted while top-of-book and market-by-price carried it. Additive: receivers already MUST accept any `u8` and treat unknown values as `0`. No wire-layout change; Schema Version remains `3`.
 
