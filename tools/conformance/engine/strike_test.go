@@ -51,6 +51,24 @@ func strikePairTOB(instrID uint32, manifestSeq uint16, strike func(*wb.Body)) []
 		Msg(wire.TypeStrikeInterval, 40, strike).Bytes()
 }
 
+// instrDefTOBSymbolBody is instrDefTOBBody with a Symbol.
+func instrDefTOBSymbolBody(instrID uint32, manifestSeq uint16, symbol string) func(*wb.Body) {
+	return func(b *wb.Body) {
+		b.U32(instrID)     // Instrument ID (body off 0)
+		b.U16(1)           // Source ID (body off 4)
+		b.Char(symbol, 64) // Symbol (body off 6)
+		b.Pad(54)          // other fields (body off 70..123)
+		b.U16(manifestSeq) // Manifest Seq (body off 124) → total body 126 → msg 130
+	}
+}
+
+// strikePairTOBSymbol is strikePairTOB with a Symbol in the definition.
+func strikePairTOBSymbol(instrID uint32, manifestSeq uint16, symbol string, strike func(*wb.Body)) []byte {
+	return wb.Frame(wire.MagicTOB).
+		Msg(wire.TypeInstrumentDef, 130, instrDefTOBSymbolBody(instrID, manifestSeq, symbol)).
+		Msg(wire.TypeStrikeInterval, 40, strike).Bytes()
+}
+
 // statuses returns the statuses a rule reported for one instrument, in order.
 func statuses(findings []core.Finding, ruleID string, instrID uint32) []core.Status {
 	var out []core.Status
@@ -458,6 +476,46 @@ func TestStrikeForgottenWhenInstrumentLeavesTheSet(t *testing.T) {
 	wantStatuses(t, findings, rulePresence, 100, core.Unverifiable, core.Unverifiable)
 	wantReasons(t, findings, rulePresence, 100, core.ReasonColdStart, core.ReasonColdStart)
 	wantStatuses(t, findings, ruleStaysFixed, 100, core.NA, core.NA)
+}
+
+// A publisher can remove an instrument and give its Instrument ID to a new
+// instrument in one Manifest Seq change. The ID is in both sets, but the Symbol
+// differs, so the new instrument starts with no history: its pending strike is
+// not a return to pending, and a missing strike is not a drop.
+func TestStrikeNotComparedWhenTheIDIsReusedInTheNextSet(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		next []byte
+	}{
+		{"pending strike", strikePairTOBSymbol(100, 2, "KXBTC-B", strikePendingBody(100))},
+		{"no strike", wb.Frame(wire.MagicTOB).
+			Msg(wire.TypeInstrumentDef, 130, instrDefTOBSymbolBody(100, 2, "KXBTC-B")).Bytes()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			findings := processRefdata(t, core.FeedTOB, wire.MagicTOB, [][]byte{
+				buildManifestFrame(wire.MagicTOB, 1, 1, 1),
+				strikePairTOBSymbol(100, 1, "KXBTC-A", strikeFixedBody(100)),
+				buildManifestFrame(wire.MagicTOB, 1, 2, 1),
+				tc.next,
+			})
+			wantStatuses(t, findings, rulePresence, 100, core.Unverifiable, core.Unverifiable)
+			wantReasons(t, findings, rulePresence, 100, core.ReasonColdStart, core.ReasonColdStart)
+			wantStatuses(t, findings, ruleStaysFixed, 100, core.NA, core.NA)
+		})
+	}
+}
+
+// The Symbol comparison does not excuse the same instrument: with one Symbol in
+// both sets, a fixed strike that returns to pending is still a violation.
+func TestStrikeReturnsToPendingAcrossManifestSeqChangeWithOneSymbol(t *testing.T) {
+	findings := processRefdata(t, core.FeedTOB, wire.MagicTOB, [][]byte{
+		buildManifestFrame(wire.MagicTOB, 1, 1, 1),
+		strikePairTOBSymbol(100, 1, "KXBTC-A", strikeFixedBody(100)),
+		buildManifestFrame(wire.MagicTOB, 1, 2, 1),
+		strikePairTOBSymbol(100, 2, "KXBTC-A", strikePendingBody(100)),
+	})
+	wantStatuses(t, findings, rulePresence, 100, core.Unverifiable, core.Pass)
+	wantStatuses(t, findings, ruleStaysFixed, 100, core.NA, core.Violation)
 }
 
 // The same departure, but the set without the instrument never completes, so

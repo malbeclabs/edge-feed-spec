@@ -308,6 +308,17 @@ func instrDefSourceID(feed core.Feed, schema uint8, m wire.Message) (uint16, boo
 	return bodyU16LEAt(m, l.SourceID)
 }
 
+// instrDefSymbol reads the raw Symbol bytes from an InstrumentDefinition. ok is
+// false when the (feed, schema) pair has no layout, or when the message is not
+// the canonical length for its layout.
+func instrDefSymbol(feed core.Feed, schema uint8, m wire.Message) (string, bool) {
+	l, ok := instrDefLayoutFor(feed, schema)
+	if !ok || int(m.Length) != int(l.MsgLen) || l.Symbol+l.SymbolLen > len(m.Body) {
+		return "", false
+	}
+	return string(m.Body[l.Symbol : l.Symbol+l.SymbolLen]), true
+}
+
 // bodyU8At, bodyU16LEAt and bodyU32LEAt read at a body offset, reporting whether
 // the body is long enough. The unchecked bodyU8/bodyU16LE/bodyU32LE helpers above
 // are for fixed-length messages whose length checkTier1 already gated.

@@ -79,6 +79,13 @@ func TestSchema1And3DifferByFiftyBytesAfterSymbol(t *testing.T) {
 	if s1.InstrumentID != s3.InstrumentID {
 		t.Error("Instrument ID precedes both insertions and must not move")
 	}
+	// Symbol starts after Source ID (+2) and is the field that widened (+48).
+	if d := s3.Symbol - s1.Symbol; d != 2 {
+		t.Errorf("Symbol delta = %d, want 2", d)
+	}
+	if d := s3.SymbolLen - s1.SymbolLen; d != 48 {
+		t.Errorf("SymbolLen delta = %d, want 48", d)
+	}
 }
 
 // TestInstrDefLayoutManifestSeqIsLast pins the invariant that lets

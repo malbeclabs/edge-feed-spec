@@ -79,6 +79,7 @@ type strikeState struct {
 	fixed   bool   // and it was a fixed strike
 	seq     uint16 // the Manifest Seq of the definition
 	taints  uint64 // portTracker.taints when the definition arrived
+	symbol  string // the raw Symbol bytes of the definition
 }
 
 // strikeObs is what one accepted InstrumentDefinition showed about its strike.
@@ -902,13 +903,22 @@ func strikeAfter(feed core.Feed, schema uint8, msgs []wire.Message, i int, instr
 // it, so those two definitions describe one instrument. Across a wider distance
 // the instrument can have left the set and its Instrument ID can name a new
 // instrument: the set between them never completed, so nothing here saw it leave.
-func (rs *refdataState) onDefinitionStrike(ch uint8, instrID uint32, obs strikeObs, taints uint64, frameSeq uint64) {
+//
+// A publisher can also remove an instrument and give its Instrument ID to a new
+// instrument in one Manifest Seq change. No spec forbids that, and the ID is then
+// in two successive sets. Symbol tells the two instruments apart: a definition
+// with a different Symbol starts a new instrument, with no history.
+func (rs *refdataState) onDefinitionStrike(ch uint8, instrID uint32, symbol string, obs strikeObs, taints uint64, frameSeq uint64) {
 	const (
 		presence   = "STRIKE.PRESENCE_STABLE"
 		staysFixed = "STRIKE.FIXED_STAYS_FIXED"
 	)
 	s := rs.channel(ch)
 	prev, had := s.strikes[instrID]
+	reused := had && prev.symbol != symbol
+	if reused {
+		had = false
+	}
 
 	if obs == strikeUnreadable {
 		for _, rule := range []string{presence, staysFixed} {
@@ -941,6 +951,9 @@ func (rs *refdataState) onDefinitionStrike(ch uint8, instrID uint32, obs strikeO
 
 	// STRIKE.PRESENCE_STABLE
 	switch {
+	case reused:
+		rs.e.unverified(presence, core.ReasonColdStart, core.PortRefData, frameSeq, ch, instrID,
+			"the Symbol differs from the last definition with this Instrument ID: a new instrument, nothing earlier to compare")
 	case !had:
 		rs.e.unverified(presence, core.ReasonColdStart, core.PortRefData, frameSeq, ch, instrID,
 			"first definition seen for this instrument: adopted, nothing earlier to compare")
@@ -978,7 +991,7 @@ func (rs *refdataState) onDefinitionStrike(ch uint8, instrID uint32, obs strikeO
 			"StrikeInterval instrument=%d is pending, but the one before it was fixed", instrID))
 	}
 
-	s.strikes[instrID] = strikeState{present: present, fixed: obs == strikeIsFixed, seq: s.latestSeq, taints: taints}
+	s.strikes[instrID] = strikeState{present: present, fixed: obs == strikeIsFixed, seq: s.latestSeq, taints: taints, symbol: symbol}
 }
 
 // --- Engine integration ---
@@ -1033,7 +1046,10 @@ func (e *Engine) processRefdataFrame(f *wire.Frame, pt *portTracker) {
 			if accepted && carriesStrikeInterval(e.cfg.Feed, f.Header.SchemaVersion) {
 				wantLen := expectedMsgLen(e.cfg.Feed, f.Header.SchemaVersion, wire.TypeStrikeInterval)
 				obs := strikeAfter(e.cfg.Feed, f.Header.SchemaVersion, f.Messages, i, instrID, wantLen)
-				e.refdata.onDefinitionStrike(ch, instrID, obs, pt.taints, frameSeq)
+				// ok discarded: instrDefAllFields above already proved the layout and
+				// the canonical length, which is all instrDefSymbol checks.
+				symbol, _ := instrDefSymbol(e.cfg.Feed, f.Header.SchemaVersion, m)
+				e.refdata.onDefinitionStrike(ch, instrID, symbol, obs, pt.taints, frameSeq)
 			}
 		}
 	}
