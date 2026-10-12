@@ -143,12 +143,30 @@ type portTracker struct {
 	hashRingSize int // number of valid entries currently in the ring (≤ cap)
 	// buf is the bounded reorder buffer for this series.
 	buf portBuffer
+	// unclassified holds the items a drain has already taken out of buf and has not
+	// handed to the classifier yet — the tail of the batch the engine is walking.
+	//
+	// **A drain empties the heap before the first item is classified**, so buf alone
+	// answers "nothing is pending" while a whole serving period's definitions are still
+	// in flight. A check that decides on the set the engine has read so far has to see
+	// them; see Engine.classifyDrained and refdataUnclassifiedWithin.
+	unclassified []*bufferItem
+	// lastArrivalSendTS is the greatest SendTS this instance has delivered, counted on
+	// arrival rather than on classification, quarantined stragglers included. It tells a
+	// path that stopped sending from one that is behind: see refdataUnclassifiedWithin.
+	lastArrivalSendTS    uint64
+	lastArrivalSendTSSet bool
 	// arrivalCounter is incremented on each push and stored in bufferItem.arrival
 	// to provide stable heap ordering for equal-seq duplicates.
 	arrivalCounter uint64
 	// dirtyWindow is set when a gap was declared while the reorder window was
 	// non-empty (consumed by Task 18 gate.go).
 	dirtyWindow bool
+	// taints counts the times dirtyWindow was set, and is never reset. dirtyWindow
+	// stays true for the era, so it cannot say whether a gap fell *between* two
+	// observations. A rule that compares two observations stores this count with
+	// the first one: a different count at the second one means a gap between them.
+	taints uint64
 	// captureDirty is set when the *capture* admitted losing datagrams while this
 	// instance's window was open (see Engine.ObserveCaptureLoss). It never gates
 	// anything on its own: the taint that stops a gated rule from grading a
@@ -302,6 +320,13 @@ func (t *portTracker) advanceEra(newEra uint8) {
 	// that are clearly observable in the new era.
 	t.dirtyWindow = false
 	t.captureDirty = false
+}
+
+// taint marks the window dirty. Every write of dirtyWindow = true goes through it,
+// so taints counts each one.
+func (t *portTracker) taint() {
+	t.dirtyWindow = true
+	t.taints++
 }
 
 // enqueueResult is the structured result of enqueue. The caller must process

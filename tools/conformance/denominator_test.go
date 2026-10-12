@@ -37,7 +37,7 @@ import (
 // test can be defeated, so a rule belongs here only when its trigger is provably
 // absent, never because the assertion is inconvenient.
 //
-// Every entry below is a consequence of what buildMBOGoldenEntries does *not*
+// Every mbo entry below is a consequence of what buildMBOGoldenEntries does *not*
 // contain — it emits Manifest, InstrumentDefinition, OrderAdd, OrderCancel,
 // Heartbeat and two snapshot groups. So these are one gap in the capture rather than
 // four independent excuses, and adding an InstrumentReset with its recovery snapshot
@@ -53,6 +53,12 @@ var noOpportunity = map[string]string{
 	"mbo/RESET.SNAPSHOT_FOLLOWS":                       "the capture contains no InstrumentReset",
 	"mbo/RESET.RECOVERY_SNAPSHOT_ANCHOR_MATCHES_RESET": "the capture contains no InstrumentReset",
 	"mbo/RESET.NO_DANGLING_DELTAS_AT_OR_BELOW_ANCHOR":  "the capture contains no InstrumentReset",
+	// A separate gap, in a separate capture. nonconformant_mbp.pcap's refdata port
+	// holds six ManifestSummary messages and nothing else, and the strike rules judge
+	// accepted definitions. Their pass, cold-start and na branches are asserted in
+	// engine/strike_test.go, and the tob run above reports both rules.
+	"mbp/STRIKE.PRESENCE_STABLE":   "the capture contains no InstrumentDefinition",
+	"mbp/STRIKE.FIXED_STAYS_FIXED": "the capture contains no InstrumentDefinition",
 }
 
 func TestConditionalRulesReportADenominator(t *testing.T) {

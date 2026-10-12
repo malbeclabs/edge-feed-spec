@@ -1,6 +1,6 @@
 # dz-conformance
 
-A conformance subscriber for edge-feed publishers. Subscribes to one feed (TOB, Midpoint, MBO, or MBP) — live multicast or capture replay, `pcap` or `pcapng` — validates the feed against its subset of an 89-rule catalog drawn from the [edge-feed-spec](../../) (this repo), and returns a CI-friendly exit code. The subset is 32 to 69 rules depending on the feed — see [Rule catalog](#rule-catalog).
+A conformance subscriber for edge-feed publishers. Subscribes to one feed (TOB, Midpoint, MBO, or MBP) — live multicast or capture replay, `pcap` or `pcapng` — validates the feed against its subset of a 94-rule catalog drawn from the [edge-feed-spec](../../) (this repo), and returns a CI-friendly exit code. The subset is 32 to 69 rules depending on the feed — see [Rule catalog](#rule-catalog).
 
 Unlike a production consumer — which is tolerant of publisher quirks (skipping unknown types, ignoring reserved bits, recovering silently from loss) — this tool is **strict by design**: it flags every structural, sequence, and semantic violation its catalog covers, and never excuses one as a quirk. `core/registry.go` is the in-code source of truth for the full rule set.
 
@@ -136,18 +136,18 @@ For the MBO feed the engine reconstructs the order book independently from both 
 
 ## Rule catalog
 
-The full 89-rule catalog — rule ID, severity, tier, applicable feeds — is defined in `core/registry.go` (the in-code source of truth), with one-line per-rule summaries in `core/ruledoc.go`. `core/registry_test.go` and `core/ruledoc_test.go` guarantee the set stays complete and documented.
+The full 94-rule catalog — rule ID, severity, tier, applicable feeds — is defined in `core/registry.go` (the in-code source of truth), with one-line per-rule summaries in `core/ruledoc.go`. `core/registry_test.go` and `core/ruledoc_test.go` guarantee the set stays complete and documented.
 
-**No feed sees all 89.** Each rule carries the feeds it applies to, and a run reports only its own feed's subset — `rule_info` publishes exactly that subset at startup, so the denominator is visible before a frame arrives. The split today:
+**No feed sees all 94.** Each rule carries the feeds it applies to, and a run reports only its own feed's subset — `rule_info` publishes exactly that subset at startup, so the denominator is visible before a frame arrives. The split today:
 
 | Feed | Feed-specific rules | Shared rules | Total |
 |------|--------------------:|-------------:|------:|
 | `mbo` | 44 | 25 | 69 |
-| `tob` | 9 | 25 | 34 |
-| `mbp` | 8 | 25 | 33 |
+| `tob` | 14 | 25 | 39 |
+| `mbp` | 13 | 25 | 38 |
 | `midpoint` | 7 | 25 | 32 |
 
-`TestFeedRuleCounts` pins these numbers against `core.Rules`, so a new feed-scoped rule fails the build until this table is updated with it. The 25 shared rules are the frame/message structural set and the reference-data supplement, which every feed carries identically; `RESET.ANCHOR_SEQ_IS_CURRENT_FRAME` is counted feed-specific for both `mbo` and `mbp`, which is where the totals overlap. The market-by-order asymmetry is real rather than an artifact of counting: that feed's rules were written first and its per-order state model admits checks a price-aggregated book has no analogue for (dangling order IDs, overfill, duplicate live adds). What the gap does *not* mean is that the missing market-by-price checks are unwritable — see [Known limitations](#known-limitations).
+`TestFeedRuleCounts` pins these numbers against `core.Rules`, so a new feed-scoped rule fails the build until this table is updated with it. The 25 shared rules are the frame/message structural set and the reference-data supplement, which every feed carries identically; `RESET.ANCHOR_SEQ_IS_CURRENT_FRAME` is counted feed-specific for both `mbo` and `mbp`, and the five `STRIKE.*` rules for both `tob` and `mbp`, which is where the totals overlap. The `STRIKE.*` rules belong to the supplement's `StrikeInterval` message, and apply only to the feeds whose spec lists Type ID `0x09`. The market-by-order asymmetry is real rather than an artifact of counting: that feed's rules were written first and its per-order state model admits checks a price-aggregated book has no analogue for (dangling order IDs, overfill, duplicate live adds). What the gap does *not* mean is that the missing market-by-price checks are unwritable — see [Known limitations](#known-limitations).
 
 ## Quick start
 

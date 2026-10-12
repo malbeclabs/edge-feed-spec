@@ -9,7 +9,8 @@ package engine
 //   - REFDATA.MANIFEST_CADENCE          (config-gated, ExpectManifestCadence)
 //   - REFDATA.DEFINITION_CYCLE_COVERAGE (config-gated, ExpectDefinitionCycle)
 //   - REFDATA.NO_BURST_DEFINITIONS      (config-gated, ExpectDefinitionCycle)
-//   - REFDATA.NEVER_REACHES_READY       (config-gated, end-of-run, ExpectDefinitionCycle)
+//   - REFDATA.NEVER_REACHES_READY       (config-gated, per datagram,
+//     ExpectManifestCadence + ExpectDefinitionCycle)
 //
 // Timing baseline: all timing checks use the frame-level SendTS field (uint64
 // nanoseconds since epoch as written by the publisher).  This is deterministic
@@ -69,6 +70,28 @@ type validZeroEvent struct {
 	dirty    bool // the refdata window was gapped when the summary arrived
 }
 
+// strikeState is what the last accepted definition of an instrument showed
+// about its strike. The two STRIKE continuity rules judge the next accepted
+// definition against it, and then replace it. So one change is one finding: a
+// publisher that drops a strike is reported at the drop, not on every cycle after.
+type strikeState struct {
+	present bool   // a StrikeInterval followed the definition
+	fixed   bool   // and it was a fixed strike
+	seq     uint16 // the Manifest Seq of the definition
+	taints  uint64 // portTracker.taints when the definition arrived
+	symbol  string // the raw Symbol bytes of the definition
+}
+
+// strikeObs is what one accepted InstrumentDefinition showed about its strike.
+type strikeObs int
+
+const (
+	strikeAbsent     strikeObs = iota // no StrikeInterval follows the definition
+	strikeIsPending                   // a pending StrikeInterval follows
+	strikeIsFixed                     // a fixed StrikeInterval follows
+	strikeUnreadable                  // a StrikeInterval follows, but a structural rule rejects it
+)
+
 // channelRefdataState is the per-channel reference-data subscriber state.
 type channelRefdataState struct {
 	// subscriber algorithm state (verbatim from the supplement)
@@ -77,6 +100,16 @@ type channelRefdataState struct {
 	expectedCount uint32
 	// defs maps instrumentID → defInfo for the current epoch.
 	defs map[uint32]defInfo
+
+	// strikes maps instrumentID → strikeState.
+	//
+	// **Not the supplement's `state.strikes`.** A subscriber discards its strikes
+	// with its definitions on a Manifest Seq change. The validator keeps them
+	// across one change, because a publisher that drops a strike at the same
+	// moment as a set change still dropped it. An entry is discarded when its
+	// instrument leaves a set that completes, on Valid=0, and on a reset. An
+	// entry more than one Manifest Seq old is not compared: see onDefinitionStrike.
+	strikes map[uint32]strikeState
 
 	// seqEverSet is true once latestSeq has been set from a valid summary.
 	// Used to detect the first summary vs. subsequent ones (for regress check).
@@ -126,9 +159,48 @@ type channelRefdataState struct {
 	lastServingSendTS    uint64
 	lastServingSendTSSet bool
 
+	// lastRefdataSendTS is the most recent SendTS seen on this channel's refdata port,
+	// whatever the datagram carried.
+	//
+	// **NEVER_REACHES_READY closes its window on this, not on the serving span alone.**
+	// The span advances only on Valid=1 summaries, so a publisher that reaches the
+	// deadline and then stops summarising — while still sending definitions, heartbeats
+	// or invalid manifests — never closes its own window, and in a process that does not
+	// exit the rule stays silent: #50's shape reached through silence instead of through
+	// exit. A definition arriving after the deadline is proof the deadline passed, even
+	// though it does not extend the serving period, and charging the period with it would
+	// be the bug the two-field split above exists to avoid.
+	//
+	// **Period-scoped, like firstSendTS, and cleared wherever that is.** It is one end of
+	// a span whose other end is the period's first summary, so a value from an earlier
+	// period measures nothing: a publisher that served to t=100s and then reset is graded
+	// on 100s of a window its new era never used, and the first summary of that era is an
+	// instant Violation.
+	lastRefdataSendTS    uint64
+	lastRefdataSendTSSet bool
+
 	// everReady is true once channelReady has ever been true for this channel.
 	// Used by NEVER_REACHES_READY.
 	everReady bool
+
+	// readySendTS is the wire SendTS of the datagram at which channelReady first
+	// became true in the current serving period. NEVER_REACHES_READY needs the
+	// moment, not just the fact: the rule asks whether ready was reached *within*
+	// manifest cadence + definition cycle, and everReady alone cannot answer that.
+	// Without it a channel that reaches ready long after the window still passes
+	// whenever no Valid=1 summary lands between the window closing and readiness,
+	// because nothing ever measures a span past the window.
+	readySendTS    uint64
+	readySendTSSet bool
+
+	// neverReadyDecided is true once REFDATA.NEVER_REACHES_READY has reported this
+	// serving period, so the verdict is emitted exactly once whether it was reached
+	// mid-run or at end of run. Cleared wherever a period is: a reset, and the start
+	// of the Valid=1 period that replaces one a Valid=0 closed. Deliberately NOT
+	// cleared by the Valid=0 itself — that summary does not close the period (the
+	// next one's start does), so clearing there would let the same period report
+	// twice.
+	neverReadyDecided bool
 
 	// cycleStartSendTS is the SendTS of the ManifestSummary that opened the
 	// current retransmission cycle. A cycle spans from one ManifestSummary to
@@ -152,6 +224,7 @@ type channelRefdataState struct {
 func newChannelRefdataState() *channelRefdataState {
 	return &channelRefdataState{
 		defs:              make(map[uint32]defInfo),
+		strikes:           make(map[uint32]strikeState),
 		defsSeenThisCycle: make(map[uint32]struct{}),
 	}
 }
@@ -255,6 +328,7 @@ func (rs *refdataState) onResetChannel(only uint8) {
 		s.latestSeq = 0
 		s.expectedCount = 0
 		s.defs = make(map[uint32]defInfo)
+		s.strikes = make(map[uint32]strikeState)
 		s.seqEverSet = false
 		s.prevSummarySet = false
 		s.setSnapshotSet = false
@@ -266,7 +340,12 @@ func (rs *refdataState) onResetChannel(only uint8) {
 		s.firstSendTSSet = false
 		s.lastServingSendTS = 0
 		s.lastServingSendTSSet = false
+		s.lastRefdataSendTS = 0
+		s.lastRefdataSendTSSet = false
 		s.everReady = false
+		s.readySendTS = 0
+		s.readySendTSSet = false
+		s.neverReadyDecided = false
 		s.cycleStartSendTS = 0
 		s.cycleStartSendTSSet = false
 		s.defsSeenThisCycle = make(map[uint32]struct{})
@@ -401,6 +480,7 @@ func (rs *refdataState) onManifestSummary(ch uint8, valid uint8, seq uint16, cou
 		s.latestSeq = 0
 		s.expectedCount = 0
 		s.defs = make(map[uint32]defInfo)
+		s.strikes = make(map[uint32]strikeState)
 		s.prevSummarySet = false
 		s.seqEverSet = false
 		s.hadNonEmptySet = false
@@ -544,10 +624,17 @@ func (rs *refdataState) onManifestSummary(ch uint8, valid uint8, seq uint16, cou
 	// window, or the next period inherits the previous one's readiness and is
 	// credited with the wall-clock time the channel spent invalid.
 	if !s.valid && s.firstSendTSSet {
-		rs.e.checkNeverReachesReady(ch, s)
+		rs.e.decideNeverReachesReady(ch, s, frameSeq, true)
 		s.everReady = false
+		s.readySendTS = 0
+		s.readySendTSSet = false
 		s.firstSendTSSet = false
 		s.lastServingSendTSSet = false
+		s.lastRefdataSendTS = 0
+		s.lastRefdataSendTSSet = false
+		// The period that just decided is closed; the one opening here is a fresh
+		// subscriber and gets its own window to reach ready.
+		s.neverReadyDecided = false
 	}
 
 	// Update previous-summary tracking (for COUNT_CHANGE_NO_SEQ_BUMP).
@@ -556,6 +643,7 @@ func (rs *refdataState) onManifestSummary(ch uint8, valid uint8, seq uint16, cou
 	s.prevSummarySet = true
 	s.seqEverSet = true
 
+	seqAdvanced := s.valid && isLaterSeq(seq, s.latestSeq)
 	if !s.valid || isLaterSeq(seq, s.latestSeq) {
 		// New or advancing seq: reset defs and update state.
 		s.valid = true
@@ -571,6 +659,25 @@ func (rs *refdataState) onManifestSummary(ch uint8, valid uint8, seq uint16, cou
 	if !s.firstSendTSSet {
 		s.firstSendTS = sendTS
 		s.firstSendTSSet = true
+	} else if seqAdvanced {
+		// **A new Manifest Seq is a new serving period, so it gets a new deadline.**
+		// The block above cleared `defs`, which restarts the collection; leaving
+		// firstSendTS anchored at the period's first Valid=1 summary charged that fresh
+		// collection to the original window, so a publisher that added an instrument
+		// while the subscriber was still collecting was graded non-conformant on a must
+		// rule. Repro that used to fail: window 2 s, seq bump at t=1.5 s, set complete
+		// at t=2.5 s.
+		//
+		// Readiness resets with it: the channel is not ready for THIS period until the
+		// new set completes, and the verdict is re-decided because the period it latched
+		// is over.
+		s.firstSendTS = sendTS
+		s.lastRefdataSendTS = 0
+		s.lastRefdataSendTSSet = false
+		s.everReady = false
+		s.readySendTS = 0
+		s.readySendTSSet = false
+		s.neverReadyDecided = false
 	}
 	s.lastManifestSendTS = sendTS
 	s.lastManifestSendTSSet = true
@@ -656,12 +763,15 @@ func (rs *refdataState) resolveValidZero(ch uint8, ev *validZeroEvent, resumed b
 // dirty is true when the refdata port had a gap.
 // defaultMethod and priceBound are feed-specific fields extracted by the caller;
 // they are stored in defInfo for consumption by feed validators (e.g. Task 17).
-func (rs *refdataState) onInstrumentDef(ch uint8, instrID uint32, manifestSeq uint16, defaultMethod, priceBound uint8, sendTS uint64, dirty bool, frameSeq uint64) {
+//
+// It reports whether the definition was accepted into the set. A definition that
+// was discarded gives no opportunity to the rules that judge accepted definitions.
+func (rs *refdataState) onInstrumentDef(ch uint8, instrID uint32, manifestSeq uint16, defaultMethod, priceBound uint8, sendTS uint64, dirty bool, frameSeq uint64) bool {
 	s := rs.channel(ch)
 
 	if !s.valid {
 		// No established state: silently discard.
-		return
+		return false
 	}
 
 	// REFDATA.STALE_SEQ_TAG_AFTER_BUMP: after a bump, defs must carry the new seq.
@@ -675,7 +785,7 @@ func (rs *refdataState) onInstrumentDef(ch uint8, instrID uint32, manifestSeq ui
 			fmt.Sprintf("InstrumentDef instrument=%d tagged with seq=%d, current seq=%d",
 				instrID, manifestSeq, s.latestSeq))
 		// Discard per the supplement: "definitions tagged with any other seq are discarded".
-		return
+		return false
 	}
 
 	// REFDATA.SET_CHANGE_NO_SEQ_BUMP: if the set is frozen (ready() was true at
@@ -720,8 +830,21 @@ func (rs *refdataState) onInstrumentDef(ch uint8, instrID uint32, manifestSeq ui
 		}
 		s.setSnapshotSeq = s.latestSeq
 		s.setSnapshotSet = true
-		// Task 15: record that this channel has ever become ready.
+		// An instrument that left the published set takes its strike with it. A
+		// later instrument that reuses the Instrument ID starts with no history.
+		for id := range s.strikes {
+			if _, in := s.defs[id]; !in {
+				delete(s.strikes, id)
+			}
+		}
+		// Task 15: record that this channel has ever become ready, and when — the
+		// window NEVER_REACHES_READY grades is a deadline, so the moment is the
+		// half that decides pass from violation.
 		s.everReady = true
+		if !s.readySendTSSet {
+			s.readySendTS = sendTS
+			s.readySendTSSet = true
+		}
 		// Task 18: notify the MBO per-instrument tracker gate of the new survivor
 		// set so it can drop trackers for instruments removed by the seq bump.
 		// Pass ch so only trackers for this refdata channel are pruned.
@@ -742,6 +865,133 @@ func (rs *refdataState) onInstrumentDef(ch uint8, instrID uint32, manifestSeq ui
 			s.prevDefFrameTSSet = true
 		}
 	}
+	return true
+}
+
+// strikeAfter classifies what follows the InstrumentDefinition at msgs[i].
+//
+// A StrikeInterval that a structural rule rejects is strikeUnreadable, not
+// strikeAbsent and not a strike: a wrong length (MSG.LENGTH_PER_TYPE), a
+// different Instrument ID (STRIKE.FOLLOWS_DEFINITION), or any defect of
+// STRIKE.FIELDS or STRIKE.INTERVAL_NOT_EMPTY. Read as "no strike", it reports the
+// same defect a second time as a dropped strike. Read as a strike, it replaces the
+// last valid state with one the publisher did not validly send.
+func strikeAfter(feed core.Feed, schema uint8, msgs []wire.Message, i int, instrID uint32, wantLen uint8) strikeObs {
+	if i+1 >= len(msgs) || msgs[i+1].Type != wire.TypeStrikeInterval {
+		return strikeAbsent
+	}
+	next := msgs[i+1]
+	if next.Length != wantLen || strikeInstrumentID(next) != instrID ||
+		len(strikeDefects(feed, schema, next, &msgs[i])) > 0 {
+		return strikeUnreadable
+	}
+	if strikePending(strikeBoundFlags(next)) {
+		return strikeIsPending
+	}
+	return strikeIsFixed
+}
+
+// onDefinitionStrike judges the two strike continuity rules for one accepted
+// InstrumentDefinition, and then records what it showed.
+//
+// Each accepted definition is one opportunity for each rule, and each rule
+// reports exactly one finding for it (engine/denominator.go).
+//
+// The definition is compared with the last accepted definition of the same
+// instrument only when that one carried the current Manifest Seq or the one
+// before it. An instrument is in two successive sets only if the publisher kept
+// it, so those two definitions describe one instrument. Across a wider distance
+// the instrument can have left the set and its Instrument ID can name a new
+// instrument: the set between them never completed, so nothing here saw it leave.
+//
+// A publisher can also remove an instrument and give its Instrument ID to a new
+// instrument in one Manifest Seq change. No spec forbids that, and the ID is then
+// in two successive sets. Symbol tells the two instruments apart: a definition
+// with a different Symbol starts a new instrument, with no history.
+func (rs *refdataState) onDefinitionStrike(ch uint8, instrID uint32, symbol string, obs strikeObs, taints uint64, frameSeq uint64) {
+	const (
+		presence   = "STRIKE.PRESENCE_STABLE"
+		staysFixed = "STRIKE.FIXED_STAYS_FIXED"
+	)
+	s := rs.channel(ch)
+	prev, had := s.strikes[instrID]
+	reused := had && prev.symbol != symbol
+	if reused {
+		had = false
+	}
+
+	if obs == strikeUnreadable {
+		for _, rule := range []string{presence, staysFixed} {
+			rs.e.unverified(rule, core.ReasonSuperseded, core.PortRefData, frameSeq, ch, instrID,
+				"the StrikeInterval after this definition was already rejected by a structural rule")
+		}
+		return
+	}
+	present := obs != strikeAbsent
+	comparable := had && (prev.seq == s.latestSeq || prev.seq == s.latestSeq-1)
+	// A gap between the two definitions decides neither rule. It can hide a change
+	// and its reversal, so equal ends do not prove a pass. It can hide the removal
+	// of the instrument and the reuse of its ID, so different ends do not prove a
+	// violation. Only a gap between them counts: an older gap was before the first
+	// definition, and the comparison starts after it.
+	gapped := comparable && prev.taints != taints
+
+	violation := func(rule, detail string) {
+		rs.e.Emit(rule, core.Violation, core.PortRefData, frameSeq, ch, instrID, detail)
+	}
+	lost := func(rule string) {
+		rs.e.unverified(rule, core.ReasonLoss, core.PortRefData, frameSeq, ch, instrID,
+			"a refdata datagram was lost between this definition and the last one of this instrument")
+	}
+	stale := func(rule string) {
+		rs.e.unverified(rule, core.ReasonTransition, core.PortRefData, frameSeq, ch, instrID,
+			fmt.Sprintf("last definition of this instrument was at Manifest Seq %d, now %d: the instrument may have left the set between them",
+				prev.seq, s.latestSeq))
+	}
+
+	// STRIKE.PRESENCE_STABLE
+	switch {
+	case reused:
+		rs.e.unverified(presence, core.ReasonColdStart, core.PortRefData, frameSeq, ch, instrID,
+			"the Symbol differs from the last definition with this Instrument ID: a new instrument, nothing earlier to compare")
+	case !had:
+		rs.e.unverified(presence, core.ReasonColdStart, core.PortRefData, frameSeq, ch, instrID,
+			"first definition seen for this instrument: adopted, nothing earlier to compare")
+	case !comparable:
+		stale(presence)
+	case gapped:
+		lost(presence)
+	case prev.present == present:
+		rs.e.passed(presence, core.PortRefData, frameSeq, ch, instrID,
+			"the definition agrees with the one before it on whether a StrikeInterval follows")
+	case prev.present:
+		violation(presence, fmt.Sprintf(
+			"InstrumentDef instrument=%d has no StrikeInterval after it, but its last definition carried one", instrID))
+	default:
+		violation(presence, fmt.Sprintf(
+			"InstrumentDef instrument=%d carries a StrikeInterval, but its last definition carried none", instrID))
+	}
+
+	// STRIKE.FIXED_STAYS_FIXED
+	switch {
+	case !had || !prev.present || !prev.fixed:
+		rs.e.inapplicable(staysFixed, core.PortRefData, frameSeq, ch, instrID,
+			"the last definition of this instrument did not carry a fixed strike")
+	case !comparable:
+		stale(staysFixed)
+	case gapped:
+		lost(staysFixed)
+	case !present:
+		rs.e.unverified(staysFixed, core.ReasonSuperseded, core.PortRefData, frameSeq, ch, instrID,
+			"the definition carries no StrikeInterval, which STRIKE.PRESENCE_STABLE reports")
+	case obs == strikeIsFixed:
+		rs.e.passed(staysFixed, core.PortRefData, frameSeq, ch, instrID, "the strike is still fixed")
+	default:
+		violation(staysFixed, fmt.Sprintf(
+			"StrikeInterval instrument=%d is pending, but the one before it was fixed", instrID))
+	}
+
+	s.strikes[instrID] = strikeState{present: present, fixed: obs == strikeIsFixed, seq: s.latestSeq, taints: taints, symbol: symbol}
 }
 
 // --- Engine integration ---
@@ -776,7 +1026,7 @@ func (e *Engine) processRefdataFrame(f *wire.Frame, pt *portTracker) {
 	sendTS := f.Header.SendTS
 	frameSeq := f.Header.Sequence
 
-	for _, m := range f.Messages {
+	for i, m := range f.Messages {
 		switch m.Type {
 		case wire.TypeManifest:
 			valid, seq, count := manifestFields(m)
@@ -790,7 +1040,41 @@ func (e *Engine) processRefdataFrame(f *wire.Frame, pt *portTracker) {
 				// on would grade zero values as published data.
 				continue
 			}
-			e.refdata.onInstrumentDef(ch, instrID, manifestSeq, defaultMethod, priceBound, sendTS, dirty, frameSeq)
+			accepted := e.refdata.onInstrumentDef(ch, instrID, manifestSeq, defaultMethod, priceBound, sendTS, dirty, frameSeq)
+			// StrikeInterval has no case of its own: the supplement reads it only as
+			// the message after an accepted definition.
+			if accepted && carriesStrikeInterval(e.cfg.Feed, f.Header.SchemaVersion) {
+				wantLen := expectedMsgLen(e.cfg.Feed, f.Header.SchemaVersion, wire.TypeStrikeInterval)
+				obs := strikeAfter(e.cfg.Feed, f.Header.SchemaVersion, f.Messages, i, instrID, wantLen)
+				// ok discarded: instrDefAllFields above already proved the layout and
+				// the canonical length, which is all instrDefSymbol checks.
+				symbol, _ := instrDefSymbol(e.cfg.Feed, f.Header.SchemaVersion, m)
+				e.refdata.onDefinitionStrike(ch, instrID, symbol, obs, pt.taints, frameSeq)
+			}
 		}
+	}
+
+	// REFDATA.NEVER_REACHES_READY decides here rather than only at EndRun, so the
+	// rule is reachable in a process that never exits (#50). Terminal verdicts only;
+	// see decideNeverReachesReady.
+	//
+	// Look the channel up rather than channel(ch), which creates the entry: a refdata
+	// datagram carrying neither a ManifestSummary nor an InstrumentDefinition would
+	// otherwise materialize state for a channel that has no reference data at all —
+	// a runt decoding to the all-zero header, or a Heartbeat — and EndRun would then
+	// report a cold-start Unverified for it.
+	if s, ok := e.refdata.channels[ch]; ok {
+		// Advances the clock the window closes on — see lastRefdataSendTS — but only
+		// while the channel is SERVING. A definition or a heartbeat past the deadline is
+		// proof the deadline passed; a datagram sent while `Valid = 0` is not, because
+		// the serving period ended at the last Valid=1 summary and charging it with the
+		// invalid stretch is the bug the firstSendTS/lastServingSendTS split exists to
+		// avoid — a publisher that keeps its cadence while invalid would turn a 2 s
+		// period into a minute-long one and earn a violation on a must rule.
+		if s.valid && (!s.lastRefdataSendTSSet || f.Header.SendTS > s.lastRefdataSendTS) {
+			s.lastRefdataSendTS = f.Header.SendTS
+			s.lastRefdataSendTSSet = true
+		}
+		e.decideNeverReachesReady(ch, s, f.Header.Sequence, false)
 	}
 }

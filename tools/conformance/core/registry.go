@@ -24,6 +24,10 @@ var (
 	// listed mboOnly while its emit path fires for another feed produces findings
 	// with no matching rule_info row, and the Grafana join drops them silently.
 	mboMBP = []Feed{FeedMBO, FeedMBP}
+	// strikeFeeds is the feeds whose spec lists StrikeInterval (0x09), at their
+	// current schema. Keep it equal to engine.carriesStrikeInterval;
+	// TestStrikeFeedsMatchTheEngine pins it.
+	strikeFeeds = []Feed{FeedTOB, FeedMBP}
 )
 
 // Rules is the source of truth for the rule registry, transcribed from the
@@ -116,6 +120,12 @@ var Rules = []RuleMeta{
 	{"REFDATA.SEQ_BUMP_NOT_BY_ONE", Should, 2, StateCounters, allFeeds, false},
 	{"REFDATA.MANIFEST_SEQ_NONZERO_WHEN_VALID", Should, 2, StateRefdata, allFeeds, false},
 	{"MANIFEST.STATE_MACHINE", Should, 2, StateRefdata, allFeeds, false},
+	// --- Reference-data supplement: StrikeInterval (feeds that list 0x09) ---
+	{"STRIKE.FOLLOWS_DEFINITION", Must, 1, StateNone, strikeFeeds, false},
+	{"STRIKE.FIELDS", Must, 1, StateNone, strikeFeeds, false},
+	{"STRIKE.INTERVAL_NOT_EMPTY", Must, 1, StateNone, strikeFeeds, false},
+	{"STRIKE.PRESENCE_STABLE", Must, 2, StateRefdata, strikeFeeds, false},
+	{"STRIKE.FIXED_STAYS_FIXED", Must, 2, StateRefdata, strikeFeeds, false},
 	// --- Top-of-Book ---
 	{"TOB.QUOTE.STRUCT_LEN_TYPE", Must, 1, StateNone, tobOnly, false},
 	{"TOB.QUOTE.GONE_VS_ZERO_PRICE", Must, 1, StateNone, tobOnly, false},
@@ -176,6 +186,10 @@ var conditionalExec = map[string]struct{}{
 	"REFDATA.DEFINITION_CYCLE_COVERAGE": {},
 	"REFDATA.NO_BURST_DEFINITIONS":      {},
 	"REFDATA.NEVER_REACHES_READY":       {},
+	// Strike continuity: each accepted definition is one opportunity, and there is
+	// nothing to compare it with until the instrument has an earlier definition.
+	"STRIKE.PRESENCE_STABLE":   {},
+	"STRIKE.FIXED_STAYS_FIXED": {},
 }
 
 // ConditionalExec reports whether the rule's execution is conditional, and so
