@@ -128,7 +128,7 @@ func TestPromSourceAddrLabel(t *testing.T) {
 // CounterVec keeps each label value until the process stops.
 //
 // The first maxSourceAddrLabels addresses each get a label value. Each later
-// address gets sourceAddrOverflow, and its findings are still counted.
+// address gets sourceAddrOther, and its findings are still counted.
 func TestPromSourceAddrLabelIsBounded(t *testing.T) {
 	p := NewProm(prometheus.NewRegistry(), "", "", core.FeedMBP)
 
@@ -146,14 +146,14 @@ func TestPromSourceAddrLabelIsBounded(t *testing.T) {
 		addr = addr.Next()
 	}
 
-	// One series for each address under the limit, and one for the overflow.
+	// One series for each address under the limit, and one for the other addresses.
 	if got, want := testutil.CollectAndCount(p.violations), maxSourceAddrLabels+1; got != want {
 		t.Fatalf("violations_total has %d series, want %d: the source_addr label is not bounded", got, want)
 	}
-	// No finding is dropped: each address past the limit counts in the overflow series.
+	// No finding is dropped: each address past the limit counts in the sourceAddrOther series.
 	if got := testutil.ToFloat64(p.violations.WithLabelValues(
-		"mbp", "FRAME.MAGIC_MISMATCH", "must", sourceAddrOverflow)); got != extra {
-		t.Fatalf("violations_total{source_addr=%q}: want %d, got %v", sourceAddrOverflow, extra, got)
+		"mbp", "FRAME.MAGIC_MISMATCH", "must", sourceAddrOther)); got != extra {
+		t.Fatalf("violations_total{source_addr=%q}: want %d, got %v", sourceAddrOther, extra, got)
 	}
 
 	// An address that got a label value before the limit keeps it.

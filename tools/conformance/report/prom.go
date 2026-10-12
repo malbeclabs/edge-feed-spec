@@ -55,7 +55,7 @@ func NewProm(reg *prometheus.Registry, version, commit string, feed core.Feed) *
 	p.violations = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: promNamespace,
 		Name:      "violations_total",
-		Help:      "Total confirmed conformance violations by feed, rule, severity, and publisher source address. `source_addr` names the publisher whose datagrams the rule judged; it is EMPTY for a rule decided over state every path of the channel fills (the book, the snapshot groups, the reference data, the counters keyed on the channel), where no single publisher is the subject. An empty value is a statement, not an unknown. The value `overflow` holds every publisher past the first 32 addresses.",
+		Help:      "Total confirmed conformance violations by feed, rule, severity, and publisher source address. `source_addr` names the publisher whose datagrams the rule judged; it is EMPTY for a rule decided over state every path of the channel fills (the book, the snapshot groups, the reference data, the counters keyed on the channel), where no single publisher is the subject. An empty value is a statement, not an unknown. The value `other` holds every publisher past the first 32 addresses.",
 	}, []string{"feed", "rule_id", "severity", "source_addr"})
 
 	p.unverifiable = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -156,12 +156,12 @@ func NewProm(reg *prometheus.Registry, version, commit string, feed core.Feed) *
 // life of the process.
 const maxSourceAddrLabels = 32
 
-// sourceAddrOverflow is the source_addr label value for a finding that names a
+// sourceAddrOther is the source_addr label value for a finding that names a
 // publisher after maxSourceAddrLabels addresses have a value of their own. It is
 // not an address and it is not the empty value: the rule does have one path as
 // its subject, and the reporter does not name it. The finding is still counted,
-// so the overflow costs attribution and never coverage.
-const sourceAddrOverflow = "overflow"
+// so the limit costs attribution and never coverage.
+const sourceAddrOther = "other"
 
 // sourceAddrLabel renders the publisher that a finding judges. It returns "" when
 // the finding names no publisher, which is the case for a rule that is not
@@ -175,7 +175,7 @@ const sourceAddrOverflow = "overflow"
 //
 // Cardinality is bounded by maxSourceAddrLabels and not by the publishers on the
 // group. The first maxSourceAddrLabels addresses each get a label value. Each
-// later address gets sourceAddrOverflow. Only an instance-scoped rule carries an
+// later address gets sourceAddrOther. Only an instance-scoped rule carries an
 // address, so the other rules stay at one series apiece.
 func (p *Prom) sourceAddrLabel(f core.Finding) string {
 	if !f.SourceAddr.IsValid() {
@@ -185,7 +185,7 @@ func (p *Prom) sourceAddrLabel(f core.Finding) string {
 	defer p.srcMu.Unlock()
 	if _, ok := p.srcAddrs[f.SourceAddr]; !ok {
 		if len(p.srcAddrs) >= maxSourceAddrLabels {
-			return sourceAddrOverflow
+			return sourceAddrOther
 		}
 		p.srcAddrs[f.SourceAddr] = struct{}{}
 	}
