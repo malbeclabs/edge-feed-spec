@@ -22,7 +22,7 @@ import (
 // exists for. Two publishers serve one channel on one group; A goes silent for
 // 3.05 s against a 1 s heartbeat expectation while B publishes right through it.
 //
-// HEARTBEAT.CADENCE is StateCounters, so the finding is about one path's series
+// HEARTBEAT.CADENCE is StateInstanceCounters, so the finding is about one path's series
 // and must carry A's address and never B's. B did nothing wrong, and a verdict
 // that cannot tell them apart is reported against the feed — which is exactly
 // the state this replaces.
@@ -182,7 +182,7 @@ func TestZeroAddrIsNotAnAddress(t *testing.T) {
 // misattribution the catalog gate alone does NOT prevent, and the reason Process
 // sets the address on entry rather than leaving it to classify.
 //
-// FRAME.MKTDATA_SEQ_START is StateCounters, so it carries an address — but it is
+// FRAME.MKTDATA_SEQ_START is StateInstanceCounters, so it carries an address — but it is
 // emitted from Process, BEFORE the datagram that triggered it is classified. An
 // era advance normally classifies the old-era buffer first, which happens to set
 // the right address; when that buffer is already empty it classifies nothing, and
@@ -214,6 +214,48 @@ func TestResetStartViolationNamesTheResettingPublisher(t *testing.T) {
 		if f.SourceAddr != srcA {
 			t.Errorf("FRAME.MKTDATA_SEQ_START carries source_addr %v, want %v: A reset badly and B is being charged for it",
 				f.SourceAddr, srcA)
+		}
+	}
+}
+
+// TestChannelKeyedCounterNamesNoPublisher pins the line between the two kinds of
+// counter. BATCH.ID_MONOTONIC is StateCounters: the engine keys the last Batch ID
+// on the channel, so two publishers that serve one channel advance the same
+// counter.
+//
+// A sends Batch ID 10 and B sends Batch ID 5. Each path is correct on its own.
+// The violation comes from the merge, and B's datagram completes it. The finding
+// must name no publisher, because B did not cause it.
+func TestChannelKeyedCounterNamesNoPublisher(t *testing.T) {
+	const ruleID = "BATCH.ID_MONOTONIC"
+	meta, ok := core.Lookup(ruleID)
+	if !ok {
+		t.Fatalf("rule %q is not in the catalog", ruleID)
+	}
+	if meta.State.InstanceScoped() {
+		t.Fatalf("%s is instance-scoped in the catalog, but engine.mbo keys its state on the channel", ruleID)
+	}
+
+	cap := &captureAll{}
+	eng := New(Config{Feed: core.FeedMBO, ReorderWindow: 1}, cap)
+	// Flush drains in (channel, source) order, so A is classified before B.
+	for _, in := range []struct {
+		src     netip.Addr
+		batchID uint32
+	}{{srcA, 10}, {srcB, 5}} {
+		f, sf := wire.Decode(buildBatchBoundaryFrame(chArmA, in.batchID), wire.MagicMBO)
+		eng.Process(in.src, f, core.PortMktData, sf)
+	}
+	eng.Flush()
+
+	found := cap.findingsFor(ruleID)
+	if len(found) == 0 {
+		t.Fatalf("no %s finding, so the attribution is untested", ruleID)
+	}
+	for _, f := range found {
+		if f.SourceAddr.IsValid() {
+			t.Errorf("%s carries source_addr %v, want none: both paths advance the Batch ID of the channel",
+				ruleID, f.SourceAddr)
 		}
 	}
 }

@@ -2,7 +2,9 @@ package report
 
 import (
 	"net/http"
+	"net/netip"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/malbeclabs/edge-feed-spec/tools/conformance/core"
@@ -31,6 +33,12 @@ type Prom struct {
 	ruleInfo        *prometheus.GaugeVec
 	uptimeSeconds   prometheus.GaugeFunc
 
+	// srcAddrs holds the publisher addresses that have their own source_addr
+	// label value. See maxSourceAddrLabels. srcMu guards it, because the
+	// CounterVecs are safe for concurrent use and this map must not change that.
+	srcMu    sync.Mutex
+	srcAddrs map[netip.Addr]struct{}
+
 	startTime time.Time
 }
 
@@ -40,13 +48,14 @@ type Prom struct {
 func NewProm(reg *prometheus.Registry, version, commit string, feed core.Feed) *Prom {
 	p := &Prom{
 		registry:  reg,
+		srcAddrs:  make(map[netip.Addr]struct{}),
 		startTime: time.Now(),
 	}
 
 	p.violations = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: promNamespace,
 		Name:      "violations_total",
-		Help:      "Total confirmed conformance violations by feed, rule, severity, and publisher source address. `source_addr` names the publisher whose datagrams the rule judged; it is EMPTY for a rule decided over state every path of the channel fills (the book, the snapshot groups, the reference data), where no single publisher is the subject. An empty value is a statement, not an unknown.",
+		Help:      "Total confirmed conformance violations by feed, rule, severity, and publisher source address. `source_addr` names the publisher whose datagrams the rule judged; it is EMPTY for a rule decided over state every path of the channel fills (the book, the snapshot groups, the reference data, the counters keyed on the channel), where no single publisher is the subject. An empty value is a statement, not an unknown. The value `overflow` holds every publisher past the first 32 addresses.",
 	}, []string{"feed", "rule_id", "severity", "source_addr"})
 
 	p.unverifiable = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -135,8 +144,28 @@ func NewProm(reg *prometheus.Registry, version, commit string, feed core.Feed) *
 	return p
 }
 
-// sourceAddrLabel renders the publisher a finding judges, or "" when the finding
-// is about the channel as a whole (core.StateKind.InstanceScoped).
+// maxSourceAddrLabels is the number of publisher addresses that get their own
+// source_addr label value. A redundant feed has two publishers, so the limit is
+// far above a real deployment.
+//
+// The limit is necessary because the address is not ours to trust. An any-source
+// join accepts a datagram from any sender, and a publisher address is a tunnel
+// lease that can change under a live host. The engine evicts an old instance
+// (engine.maxChannelInstances), but a CounterVec keeps each label value until
+// the process stops. Without the limit, each new address adds series for the
+// life of the process.
+const maxSourceAddrLabels = 32
+
+// sourceAddrOverflow is the source_addr label value for a finding that names a
+// publisher after maxSourceAddrLabels addresses have a value of their own. It is
+// not an address and it is not the empty value: the rule does have one path as
+// its subject, and the reporter does not name it. The finding is still counted,
+// so the overflow costs attribution and never coverage.
+const sourceAddrOverflow = "overflow"
+
+// sourceAddrLabel renders the publisher that a finding judges. It returns "" when
+// the finding names no publisher, which is the case for a rule that is not
+// instance-scoped (core.StateKind.InstanceScoped).
 //
 // **The empty string is the honest value and must stay empty.** A placeholder such
 // as "unknown" or "0.0.0.0" reads as an address the checker failed to determine,
@@ -144,13 +173,21 @@ func NewProm(reg *prometheus.Registry, version, commit string, feed core.Feed) *
 // A consumer grouping by this label gets one series for the channel-scoped rules,
 // which is exactly one bucket for a set of verdicts that share a subject.
 //
-// Cardinality is bounded by the publishers on the group — two on every redundant
-// feed deployed today — and only instance-scoped rules multiply at all, so this
-// at most doubles the series of the 52 rules that carry it and leaves the other
-// 37 at one apiece.
-func sourceAddrLabel(f core.Finding) string {
+// Cardinality is bounded by maxSourceAddrLabels and not by the publishers on the
+// group. The first maxSourceAddrLabels addresses each get a label value. Each
+// later address gets sourceAddrOverflow. Only an instance-scoped rule carries an
+// address, so the other rules stay at one series apiece.
+func (p *Prom) sourceAddrLabel(f core.Finding) string {
 	if !f.SourceAddr.IsValid() {
 		return ""
+	}
+	p.srcMu.Lock()
+	defer p.srcMu.Unlock()
+	if _, ok := p.srcAddrs[f.SourceAddr]; !ok {
+		if len(p.srcAddrs) >= maxSourceAddrLabels {
+			return sourceAddrOverflow
+		}
+		p.srcAddrs[f.SourceAddr] = struct{}{}
 	}
 	return f.SourceAddr.String()
 }
@@ -166,7 +203,7 @@ func (p *Prom) Record(f core.Finding) {
 	feed := string(f.Feed)
 	sev := f.Severity.String()
 	result := statusString(f.Status)
-	src := sourceAddrLabel(f)
+	src := p.sourceAddrLabel(f)
 
 	p.checks.WithLabelValues(feed, f.RuleID, result, src).Inc()
 

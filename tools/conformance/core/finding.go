@@ -40,40 +40,52 @@ type StateKind int
 
 const (
 	StateNone StateKind = iota
+	// StateCounters is a counter the engine keys on the channel, or on the
+	// channel and the instrument. Every path of the channel advances it.
 	StateCounters
 	StateOrderIDSet
 	StateFullBook
 	StateRefdata
 	StateSnapshotGroup
+	// StateInstanceCounters is a counter the engine keys on the channel instance.
+	// It lives on engine.portTracker: the sequence series, the Reset Count, the
+	// Send Timestamp baseline and the Heartbeat baseline.
+	StateInstanceCounters
 )
 
-// InstanceScoped reports whether a rule holding this kind of state judges one
+// InstanceScoped reports whether a rule that holds this kind of state judges one
 // CHANNEL INSTANCE — "one path's view of one channel, keyed (source IP address,
-// Channel ID, destination port)" (GLOSSARY.md) — rather than the channel as a
-// whole.
+// Channel ID, destination port)" (GLOSSARY.md). If it does not, the rule judges
+// the channel.
 //
-// This is what decides whether a finding can name the publisher that caused it,
-// and it is read from the rule catalog rather than from where the finding was
-// emitted. The two are not the same: REFDATA.NEVER_REACHES_READY fires from
-// inside per-datagram classification, but it is decided over a set every path of
-// the channel contributes to (see refdataUnclassifiedWithin), so the path that
-// happened to deliver the settling datagram did not cause the verdict.
+// This decides whether a finding names a publisher. The rule catalog decides
+// it, and the place that emits the finding does not. The two are different:
+// REFDATA.NEVER_REACHES_READY fires during the classification of one datagram,
+// but every path of the channel fills the set that it judges (see
+// refdataUnclassifiedWithin). The path that delivered the last datagram did not
+// cause the verdict.
 //
-// The split follows the state each rule holds, and the GLOSSARY's own definition
-// of the instance draws it:
+// The split follows the key of the state that each rule reads:
 //
-//   - StateNone judges the datagram in front of it and nothing else, so its
-//     subject is whichever path sent that datagram.
-//   - StateCounters is the sequence series and the Reset Count, which the glossary
-//     names as the two things an instance OWNS. Two publishers serving one channel
-//     each advance their own, which is why engine.ports keys on the instance.
+//   - StateNone judges the datagram in front of it and nothing else. Its subject
+//     is the path that sent that datagram.
+//   - StateInstanceCounters is state on engine.portTracker, and engine.ports keys
+//     it on the instance. The glossary names the sequence series and the Reset
+//     Count as the two things an instance owns. Two publishers that serve one
+//     channel each advance their own.
+//   - StateCounters is state that engine.mbo, engine.mbp and engine.refdata key
+//     on the channel, or on the channel and the instrument: the per-instrument
+//     sequence, the Batch ID, the snapshot anchors and the Manifest Seq. Two
+//     publishers that serve one channel advance the same counter. The datagram
+//     in front of the engine can thus complete a verdict that its peer started.
 //   - StateOrderIDSet, StateFullBook, StateSnapshotGroup and StateRefdata are
-//     reconstructed from every path at once — engine.mbo, engine.mbp and
-//     engine.refdata all key on the channel — so no single address is their
-//     subject, and attributing one would name a publisher for a book its peer
-//     also filled.
+//     reconstructed from every path. They have the same keys as StateCounters.
+//
+// A rule moves to StateInstanceCounters only when all the state that it reads is
+// on the portTracker. The README section "Deeper state is keyed by channel, not
+// by instance" records the boundary.
 func (k StateKind) InstanceScoped() bool {
-	return k == StateNone || k == StateCounters
+	return k == StateNone || k == StateInstanceCounters
 }
 
 type Feed string

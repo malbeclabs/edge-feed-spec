@@ -122,3 +122,62 @@ func TestPromSourceAddrLabel(t *testing.T) {
 		t.Fatalf("unverifiable_total{source_addr=%s}: want 1, got %v", src, got)
 	}
 }
+
+// TestPromSourceAddrLabelIsBounded pins the series-capacity policy. A sender
+// that is not a publisher can put any source address on a datagram, and a
+// CounterVec keeps each label value until the process stops.
+//
+// The first maxSourceAddrLabels addresses each get a label value. Each later
+// address gets sourceAddrOverflow, and its findings are still counted.
+func TestPromSourceAddrLabelIsBounded(t *testing.T) {
+	p := NewProm(prometheus.NewRegistry(), "", "", core.FeedMBP)
+
+	const extra = 5
+	first := netip.MustParseAddr("10.0.0.1")
+	addr := first
+	for range maxSourceAddrLabels + extra {
+		p.Record(core.Finding{
+			Feed:       core.FeedMBP,
+			RuleID:     "FRAME.MAGIC_MISMATCH",
+			Severity:   core.Must,
+			Status:     core.Violation,
+			SourceAddr: addr,
+		})
+		addr = addr.Next()
+	}
+
+	// One series for each address under the limit, and one for the overflow.
+	if got, want := testutil.CollectAndCount(p.violations), maxSourceAddrLabels+1; got != want {
+		t.Fatalf("violations_total has %d series, want %d: the source_addr label is not bounded", got, want)
+	}
+	// No finding is dropped: each address past the limit counts in the overflow series.
+	if got := testutil.ToFloat64(p.violations.WithLabelValues(
+		"mbp", "FRAME.MAGIC_MISMATCH", "must", sourceAddrOverflow)); got != extra {
+		t.Fatalf("violations_total{source_addr=%q}: want %d, got %v", sourceAddrOverflow, extra, got)
+	}
+
+	// An address that got a label value before the limit keeps it.
+	p.Record(core.Finding{
+		Feed:       core.FeedMBP,
+		RuleID:     "FRAME.MAGIC_MISMATCH",
+		Severity:   core.Must,
+		Status:     core.Violation,
+		SourceAddr: first,
+	})
+	if got := testutil.ToFloat64(p.violations.WithLabelValues(
+		"mbp", "FRAME.MAGIC_MISMATCH", "must", first.String())); got != 2 {
+		t.Fatalf("violations_total{source_addr=%s}: want 2, got %v", first, got)
+	}
+
+	// A finding that names no publisher stays empty after the limit is reached.
+	p.Record(core.Finding{
+		Feed:     core.FeedMBP,
+		RuleID:   "MBP.SNAP.GROUP_STRUCTURE",
+		Severity: core.Must,
+		Status:   core.Violation,
+	})
+	if got := testutil.ToFloat64(p.violations.WithLabelValues(
+		"mbp", "MBP.SNAP.GROUP_STRUCTURE", "must", "")); got != 1 {
+		t.Fatalf("violations_total{source_addr=\"\"}: want 1, got %v", got)
+	}
+}

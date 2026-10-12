@@ -331,9 +331,9 @@ All metrics are prefixed `dz_conformance_`.
 
 | Name | Type | Labels | Meaning |
 |------|------|--------|---------|
-| `violations_total` | counter | `feed`, `rule_id`, `severity` | Confirmed conformance violations |
-| `unverifiable_total` | counter | `feed`, `rule_id`, `reason` | Checks that could not be verified, by cause. `reason` is a closed enum (`core.Reason*`): `loss`, `capture_loss`, `cold_start`, `reorder`, `pending`, `overflow`, `truncated`, `insufficient_window`, `superseded`, `untrusted`, `bound_subset`, `transition`, `unspecified` |
-| `checks_total` | counter | `feed`, `rule_id`, `result` | All checks by result — the **denominator** for every rule, see [Coverage vs. silence](#coverage-vs-silence) |
+| `violations_total` | counter | `feed`, `rule_id`, `severity`, `source_addr` | Confirmed conformance violations. See [The `source_addr` label](#the-source_addr-label) |
+| `unverifiable_total` | counter | `feed`, `rule_id`, `reason`, `source_addr` | Checks that could not be verified, by cause. `reason` is a closed enum (`core.Reason*`): `loss`, `capture_loss`, `cold_start`, `reorder`, `pending`, `overflow`, `truncated`, `insufficient_window`, `superseded`, `untrusted`, `bound_subset`, `transition`, `unspecified` |
+| `checks_total` | counter | `feed`, `rule_id`, `result`, `source_addr` | All checks by result — the **denominator** for every rule, see [Coverage vs. silence](#coverage-vs-silence). Sum over `source_addr` to get the denominator of the channel |
 | `transport_loss_total` | counter | `port` | Transport packet-loss events by port (`mktdata`, `refdata`, `snapshot`) |
 | `transport_corruption_total` | counter | `port`, `reason` | Transport corruption events |
 | `snapshot_audits_total` | counter | `result` | Snapshot oracle outcomes (`match`, `mismatch_suspected`, `mismatch_confirmed`, `unverifiable`) |
@@ -342,7 +342,25 @@ All metrics are prefixed `dz_conformance_`.
 | `rule_info` | gauge | `rule_id`, `severity`, `summary`, `spec_url` | Always 1; static per-rule metadata for the active feed. One series per applicable rule (set once at startup). Join by `rule_id` to label the counters with a human summary and a link to the spec section. |
 | `uptime_seconds` | gauge | — | Seconds since process start |
 
-Cardinality is bounded: `rule_id` is a fixed enum (from `core/registry.go`), `port` has 3 values, `reason` is a small enum. `rule_info` adds one series per feed-applicable rule with fixed `summary`/`spec_url` label values (sourced from the registry's `RuleDoc`); these bounded strings live **only** on `rule_info`, never on the high-rate counters.
+Cardinality is bounded: `rule_id` is a fixed enum (from `core/registry.go`), `port` has 3 values, `reason` is a small enum, and `source_addr` has at most 34 values (see below). `rule_info` adds one series per feed-applicable rule with fixed `summary`/`spec_url` label values (sourced from the registry's `RuleDoc`); these bounded strings live **only** on `rule_info`, never on the high-rate counters.
+
+### The `source_addr` label
+
+A validator subscribes to a group, so it receives every path of a channel merged. `source_addr` on `violations_total`, `unverifiable_total` and `checks_total` tells the paths apart. It has three kinds of value:
+
+| Value | Meaning |
+|-------|---------|
+| an IP address | The rule judges one **channel instance**, and this is the publisher of that instance. |
+| empty | The rule judges the channel. No single publisher is its subject. |
+| `overflow` | The rule judges one channel instance, but the label has no value left for its publisher. |
+
+**The rule catalog decides which rules carry an address.** A rule carries one only if all the state that it reads is keyed on the channel instance. `core.StateKind.InstanceScoped` gives the answer for each row of `core/registry.go`: the tier-1 rules (`StateNone`), which judge one datagram, and the five rules on the per-instance trackers (`StateInstanceCounters`) — `FRAME.SEQ_DUP_DIVERGENT`, `FRAME.SEQ_RESET_GAP`, `FRAME.SEND_TS_MONOTONIC`, `FRAME.MKTDATA_SEQ_START` and `HEARTBEAT.CADENCE`. That is 33 of the 89 rules. The other 56 read state that every path of the channel fills (see [Known limitations](#known-limitations)), so their label is always empty.
+
+**An empty value is a statement, not an unknown.** Do not resolve it to a publisher. To read the verdicts of a channel, select `source_addr=""`. To read the verdicts of one path, select its address. To get the total of a rule, sum over the label.
+
+**The label is bounded.** Nothing authorises a source address, and a `CounterVec` keeps each label value until the process stops. The first 32 addresses that a finding names each get a label value (`maxSourceAddrLabels` in `report/prom.go`). Each later address gets `overflow`. Those findings are still counted, so the overflow costs attribution and never coverage. A redundant feed has two publishers, so a series with `source_addr="overflow"` means that addresses change often or that a sender floods the group. A restart of the process clears the set.
+
+**Alerts.** `ConformanceMustViolation` and `ConformanceCoverageLoss` do not aggregate, so each publisher gets its own alert and `{{ $labels.source_addr }}` is available. The `> 5` threshold of `ConformanceCoverageLoss` applies to each series, and thus to each publisher.
 
 **Note:** both `build_info` labels are wired from build vars — set them with `-ldflags "-X main.version=… -X main.commit=…"`. They default to `version="dev"`, `commit="none"`.
 
