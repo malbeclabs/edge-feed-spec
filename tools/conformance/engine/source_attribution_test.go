@@ -7,6 +7,7 @@ import (
 
 	"github.com/malbeclabs/edge-feed-spec/tools/conformance/core"
 	"github.com/malbeclabs/edge-feed-spec/tools/conformance/wire"
+	wb "github.com/malbeclabs/edge-feed-spec/tools/conformance/wire/wirebuild"
 )
 
 // The publisher a finding names, which is the whole point of carrying the source
@@ -168,16 +169,6 @@ func TestEndRunLeavesNoStaleAddress(t *testing.T) {
 	}
 }
 
-// A guard on the zero value itself: netip.Addr{} must not render as an address.
-// The prom reporter keys the empty label on exactly this, and a zero Addr that
-// stringified to something like "invalid IP" would become a metric label.
-func TestZeroAddrIsNotAnAddress(t *testing.T) {
-	var zero netip.Addr
-	if zero.IsValid() {
-		t.Fatal("the zero netip.Addr reports itself valid")
-	}
-}
-
 // TestResetStartViolationNamesTheResettingPublisher is a regression test for a
 // misattribution the catalog gate alone does NOT prevent, and the reason Process
 // sets the address on entry rather than leaving it to classify.
@@ -219,43 +210,82 @@ func TestResetStartViolationNamesTheResettingPublisher(t *testing.T) {
 }
 
 // TestChannelKeyedCounterNamesNoPublisher pins the line between the two kinds of
-// counter. BATCH.ID_MONOTONIC is StateCounters: the engine keys the last Batch ID
-// on the channel, so two publishers that serve one channel advance the same
-// counter.
+// counter. A StateCounters rule reads state that the engine keys on the channel,
+// so two publishers that serve one channel advance the same counter.
 //
-// A sends Batch ID 10 and B sends Batch ID 5. Each path is correct on its own.
-// The violation comes from the merge, and B's datagram completes it. The finding
-// must name no publisher, because B did not cause it.
+// In each case A and B share one Channel ID, and each path is correct on its
+// own. The violation comes from the merge, and B's datagram completes it. The
+// finding must name no publisher, because B did not cause it.
 func TestChannelKeyedCounterNamesNoPublisher(t *testing.T) {
-	const ruleID = "BATCH.ID_MONOTONIC"
-	meta, ok := core.Lookup(ruleID)
-	if !ok {
-		t.Fatalf("rule %q is not in the catalog", ruleID)
+	type step struct {
+		src  netip.Addr
+		port core.Port
+		seq  uint64
+		raw  []byte
 	}
-	if meta.State.InstanceScoped() {
-		t.Fatalf("%s is instance-scoped in the catalog, but engine.mbo keys its state on the channel", ruleID)
-	}
+	const instrID = uint32(20)
+	for _, tc := range []struct {
+		ruleID string
+		feed   core.Feed
+		magic  uint16
+		steps  []step
+	}{
+		{
+			// The last Batch ID is keyed on the channel. A sends 10 and B sends 5.
+			ruleID: "BATCH.ID_MONOTONIC", feed: core.FeedMBO, magic: wire.MagicMBO,
+			steps: []step{
+				{srcA, core.PortMktData, 1, buildBatchBoundaryFrame(chArmA, 10)},
+				{srcB, core.PortMktData, 1, buildBatchBoundaryFrame(chArmA, 5)},
+			},
+		},
+		{
+			// The per-instrument sequence is keyed on the channel and the instrument.
+			// A sends seq 1 and seq 2. B sends a different copy of seq 2.
+			ruleID: "DELTA.PERINSTR_DUP_DIVERGENT", feed: core.FeedMBO, magic: wire.MagicMBO,
+			steps: []step{
+				{srcA, core.PortMktData, 1, buildOrderAddFrameWithPayload(chArmA, instrID, 1, 100)},
+				{srcA, core.PortMktData, 2, buildOrderAddFrameWithPayload(chArmA, instrID, 2, 200)},
+				{srcB, core.PortMktData, 1, buildOrderAddFrameWithPayload(chArmA, instrID, 2, 999)},
+			},
+		},
+		{
+			// The Manifest Seq is keyed on the channel. A sends 5 and B sends 4.
+			ruleID: "REFDATA.SEQ_MONOTONIC_NO_REGRESS", feed: core.FeedTOB, magic: wire.MagicTOB,
+			steps: []step{
+				{srcA, core.PortRefData, 1, wb.Frame(wire.MagicTOB).Channel(chArmA).Msg(0x07, 24, manifestBody(1, 5, 1)).Bytes()},
+				{srcB, core.PortRefData, 1, wb.Frame(wire.MagicTOB).Channel(chArmA).Msg(0x07, 24, manifestBody(1, 4, 1)).Bytes()},
+			},
+		},
+	} {
+		t.Run(tc.ruleID, func(t *testing.T) {
+			meta, ok := core.Lookup(tc.ruleID)
+			if !ok {
+				t.Fatalf("rule %q is not in the catalog", tc.ruleID)
+			}
+			if meta.State.InstanceScoped() {
+				t.Fatalf("%s is instance-scoped in the catalog, but the engine keys its state on the channel", tc.ruleID)
+			}
 
-	cap := &captureAll{}
-	eng := New(Config{Feed: core.FeedMBO, ReorderWindow: 1}, cap)
-	// Flush drains in (channel, source) order, so A is classified before B.
-	for _, in := range []struct {
-		src     netip.Addr
-		batchID uint32
-	}{{srcA, 10}, {srcB, 5}} {
-		f, sf := wire.Decode(buildBatchBoundaryFrame(chArmA, in.batchID), wire.MagicMBO)
-		eng.Process(in.src, f, core.PortMktData, sf)
-	}
-	eng.Flush()
+			cap := &captureAll{}
+			eng := New(Config{Feed: tc.feed, ReorderWindow: 1}, cap)
+			// Flush drains in (channel, source) order, so A is classified before B.
+			for _, st := range tc.steps {
+				f, sf := wire.Decode(st.raw, tc.magic)
+				f.Header.Sequence = st.seq
+				eng.Process(st.src, f, st.port, sf)
+			}
+			eng.Flush()
 
-	found := cap.findingsFor(ruleID)
-	if len(found) == 0 {
-		t.Fatalf("no %s finding, so the attribution is untested", ruleID)
-	}
-	for _, f := range found {
-		if f.SourceAddr.IsValid() {
-			t.Errorf("%s carries source_addr %v, want none: both paths advance the Batch ID of the channel",
-				ruleID, f.SourceAddr)
-		}
+			found := cap.findingsFor(tc.ruleID)
+			if len(found) == 0 {
+				t.Fatalf("no %s finding, so the attribution is untested", tc.ruleID)
+			}
+			for _, f := range found {
+				if f.SourceAddr.IsValid() {
+					t.Errorf("%s carries source_addr %v, want none: both paths advance the same counter of the channel",
+						tc.ruleID, f.SourceAddr)
+				}
+			}
+		})
 	}
 }

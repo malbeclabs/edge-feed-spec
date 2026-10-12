@@ -49,7 +49,9 @@ const (
 	StateSnapshotGroup
 	// StateInstanceCounters is a counter the engine keys on the channel instance.
 	// It lives on engine.portTracker: the sequence series, the Reset Count, the
-	// Send Timestamp baseline and the Heartbeat baseline.
+	// Send Timestamp baseline and the Heartbeat baseline. A tier-2 rule that reads
+	// only the message in front of it is also of this kind, because it judges
+	// one path and a tier-2 rule cannot be StateNone.
 	StateInstanceCounters
 )
 
@@ -72,7 +74,8 @@ const (
 //   - StateInstanceCounters is state on engine.portTracker, and engine.ports keys
 //     it on the instance. The glossary names the sequence series and the Reset
 //     Count as the two things an instance owns. Two publishers that serve one
-//     channel each advance their own.
+//     channel each advance their own. MBP.DELTA.ABSOLUTE_APPLY is also of this
+//     kind: it reads the fields of one message and no state between messages.
 //   - StateCounters is state that engine.mbo, engine.mbp and engine.refdata key
 //     on the channel, or on the channel and the instrument: the per-instrument
 //     sequence, the Batch ID, the snapshot anchors and the Manifest Seq. Two
