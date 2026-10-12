@@ -103,6 +103,13 @@ type instanceKey struct {
 
 // portTracker holds the sequencing state of one channel instance on one port.
 type portTracker struct {
+	// src is the instance's own half of its key, kept here so that classification
+	// can name the publisher it is judging. classify() receives the tracker and
+	// not the key, and it runs from two callers — Process, which has the address,
+	// and Flush, which iterates the map and would otherwise have to thread it
+	// through every drain path.
+	src netip.Addr
+
 	// lastSeq is nil until the first frame is classified (accepted).
 	lastSeq *uint64
 	// lastSendTS is the SendTS of the last accepted, forward-seq frame.
