@@ -38,7 +38,8 @@ Use the shared 130-byte layout from the top-of-book feed, unchanged.
 | Field | Midpoint rule |
 |---|---|
 | `Source ID` | The matching engine whose order book or trades the price is derived from. |
-| `Qty Exponent`, `Lot Size` | No field in this feed uses them. `0`. |
+| `Qty Exponent` | Exponent of `Volume`. |
+| `Lot Size` | No field in this feed uses it. `0`. |
 | `Contract Value` | `0`. |
 | `Settle Type` | `0`. |
 | `Tick Size` | Tick size of the matching engine. `0` if not available. |
@@ -48,7 +49,7 @@ Use the shared 130-byte layout from the top-of-book feed, unchanged.
 
 ### `Midpoint`
 
-The length stays 40 bytes.
+The length grows from 40 to 48 bytes.
 
 | Offset | 1.1.0 | 3.0.0 |
 |---|---|---|
@@ -56,13 +57,16 @@ The length stays 40 bytes.
 | 12 | `Book Timestamp` | `Input Timestamp`: the venue timestamp of the latest input. For VWAP, the end of the window. |
 | 28 | `Mid Price` | `Price` |
 | 36 | Reserved, 4 bytes | `Window` (`u32`, milliseconds) |
+| 40 | — | `Volume` (`qty`): sum of trade quantity in the window |
 
 ### Method
 
 New value `5` = VWAP: `Σ(price × qty) / Σ qty` over the trades in the window.
 
 - For VWAP, `Window` MUST NOT be `0`.
-- For all other methods, `Window` MUST be `0`.
+- For all other methods, `Window` and `Volume` MUST be `0`.
+- A window with no trades: `Volume` is `0`, the last `Price` carries over, and
+  the `synthetic` bit is set.
 - The window is `(Input Timestamp − Window, Input Timestamp]`. A trade is in the window if its venue timestamp is in this interval.
 
 Each Method value is now classified as a book method or a trade method.
@@ -80,11 +84,6 @@ Each Method value is now classified as a book method or a trade method.
 - The port roles.
 - The datagram header.
 - The `Heartbeat`, `EndOfSession` and `ManifestSummary` layouts.
-
-## Deferred
-
-A traded-quantity field for VWAP. It increases the `Midpoint` length, so it
-is a `MAJOR` change.
 
 ## Other documents
 

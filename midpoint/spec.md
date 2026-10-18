@@ -110,7 +110,7 @@ The unique key for an instrument in this feed is the tuple **`(channel_id, instr
 |---------|------|------|------|-------------|
 | `0x01` | Heartbeat | 16 | mktdata | Channel liveness signal |
 | `0x02` | InstrumentDefinition | 130 | refdata | Reference data for an instrument |
-| `0x03` | Midpoint | 40 | mktdata | Single-value derived price (the core message) |
+| `0x03` | Midpoint | 48 | mktdata | Single-value derived price (the core message) |
 | `0x06` | EndOfSession | 12 | mktdata | No more data for this session |
 | `0x07` | ManifestSummary | 24 | refdata | Published instrument set summary (see supplement) |
 
@@ -149,7 +149,7 @@ The layout is the same as the top-of-book feed's `InstrumentDefinition`. The Des
 | 82 | Leg2 | `char[8]` | Second leg/component (e.g., quote currency). |
 | 90 | Asset Class | `u8` | See Asset Class table. |
 | 91 | Price Exponent | `i8` | Implied decimal exponent for `Price`. e.g., `-2` means divide raw value by 100. MAY be finer than `Tick Size`. |
-| 92 | Qty Exponent | `i8` | No field in this feed uses it. `0`. |
+| 92 | Qty Exponent | `i8` | Implied decimal exponent for `Volume`. |
 | 93 | Market Model | `u8` | Market model of the matching engine. See Market Model table. |
 | 94 | Tick Size | `price` | Minimum price increment of the matching engine (interpreted via Price Exponent). `0` if not available. |
 | 102 | Lot Size | `qty` | No field in this feed uses it. `0`. |
@@ -182,7 +182,7 @@ Publishers SHOULD use the most accurate value available; receivers MUST accept a
 
 Publishers SHOULD use the most accurate value available; receivers MUST accept any `u8` value and treat unknown values as `0` (Unknown).
 
-### 0x03 Midpoint (40 bytes)
+### 0x03 Midpoint (48 bytes)
 
 The core message. A single derived price with explicit provenance.
 
@@ -190,7 +190,7 @@ The core message. A single derived price with explicit provenance.
  0                   1                   2                   3
  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|  Type (0x03)  |  Length (40)  |            Flags              |
+|  Type (0x03)  |  Length (48)  |            Flags              |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 |                       Instrument ID (u32)                     |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
@@ -207,11 +207,14 @@ The core message. A single derived price with explicit provenance.
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 |                         Window (u32)                          |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                       Volume (qty, u64)                       |
+|                                                               |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 ```
 
 | Offset | Field | Type | Description |
 |--------|-------|------|-------------|
-| 0  | Header | 4B | Type=`0x03`, Length=40 |
+| 0  | Header | 4B | Type=`0x03`, Length=48 |
 | 4  | Instrument ID | `u32` | Instrument this price applies to |
 | 8  | Source ID | `u16` | The matching engine whose order book or trades the price is derived from. MUST equal the `Source ID` in the instrument's `InstrumentDefinition`. |
 | 10 | Method | `u8` | How the price was computed. See Method table. MUST NOT be `0`. |
@@ -220,6 +223,7 @@ The core message. A single derived price with explicit provenance.
 | 20 | Compute Timestamp | `ts_ns` | When the publisher computed the price. `Compute Timestamp − Input Timestamp` is publisher-side processing lag. |
 | 28 | Price | `price` | The derived price, in the instrument's Price Exponent |
 | 36 | Window | `u32` | Length of the trade window in milliseconds. See *Window*. |
+| 40 | Volume | `qty` | Sum of `trade_qty` over the trades in the window, in the instrument's Qty Exponent. See *Window*. |
 
 #### Method Values
 
@@ -242,8 +246,10 @@ For method `5`:
 - `Window` MUST NOT be `0`.
 - The window is the interval `(Input Timestamp − W, Input Timestamp]`, where `W` is `Window × 1,000,000` nanoseconds.
 - A trade is in the window if its venue timestamp is in this interval. The start is exclusive. The end is inclusive.
+- `Volume` is the sum of `trade_qty` over the trades in the window.
+- If the window has no trades, `Volume` is `0`, the publisher carries over the last `Price`, and sets the `synthetic` bit.
 
-For all other methods, `Window` MUST be `0`.
+For all other methods, `Window` and `Volume` MUST be `0`.
 
 #### Quality Flag Semantics
 
@@ -314,7 +320,7 @@ The publisher MUST follow the cadence and atomicity rules in the [Reference Data
 
 ## Wire Efficiency
 
-A single Midpoint is **40 bytes** of application payload, or **64 bytes** including the frame header for a single-message frame. Multiple midpoints may be packed into one frame up to the 1,232-byte maximum; for example, 30 midpoints plus the frame header is 1,224 bytes.
+A single Midpoint is **48 bytes** of application payload, or **72 bytes** including the frame header for a single-message frame. Multiple midpoints may be packed into one frame up to the 1,232-byte maximum; for example, 25 midpoints plus the frame header is 1,224 bytes.
 
 The format is fixed-size and binary, so parsing requires no allocation, no string handling, and no schema negotiation on the market data path.
 
@@ -340,6 +346,7 @@ Existing field layouts and semantics will not change within the `3.x` line. A ch
 - `Midpoint` Method `0` is now Unknown, and publishers MUST NOT send it. It meant "use `Default Method`".
 - Added Method `5` (VWAP). Each Method value is now classified as a book method or a trade method.
 - `Midpoint` offset 36 is now `Window` (`u32`, milliseconds). It was reserved.
+- `Midpoint` grows from 40 to 48 bytes. Offset 40 is `Volume` (`qty`).
 - Renamed `Book Timestamp` to `Input Timestamp` and `Mid Price` to `Price`. Offsets do not change.
 - Quality Flags bits 1 and 2 apply to book methods only.
 - Added an *Identity Model* section.
