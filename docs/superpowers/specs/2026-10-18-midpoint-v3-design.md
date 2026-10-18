@@ -53,7 +53,7 @@ The length stays 40 bytes.
 | Offset | 1.1.0 | 3.0.0 |
 |---|---|---|
 | 10 | `Method`. `0` = use `Default Method` | `Method`. `0` = Unknown. A publisher MUST NOT send `0`. |
-| 12 | `Book Timestamp` | `Input Timestamp`: the venue timestamp of the latest input |
+| 12 | `Book Timestamp` | `Input Timestamp`: the venue timestamp of the latest input. For VWAP, the end of the window. |
 | 28 | `Mid Price` | `Price` |
 | 36 | Reserved, 4 bytes | `Window` (`u32`, milliseconds) |
 
@@ -63,8 +63,7 @@ New value `5` = VWAP: `Σ(price × qty) / Σ qty` over the trades in the window.
 
 - For VWAP, `Window` MUST NOT be `0`.
 - For all other methods, `Window` MUST be `0`.
-- The window ends at or before `Compute Timestamp`.
-- `Input Timestamp` is the venue timestamp of the last trade in the window.
+- The window is `(Input Timestamp − Window, Input Timestamp]`. A trade is in the window if its venue timestamp is in this interval.
 
 Each Method value is now classified as a book method or a trade method.
 
@@ -84,8 +83,8 @@ Each Method value is now classified as a book method or a trade method.
 
 ## Deferred
 
-A traded-quantity field for VWAP. It can be added later as a `MINOR` change.
-To do this, append the field and increase the message length.
+A traded-quantity field for VWAP. It increases the `Midpoint` length, so it
+is a `MAJOR` change.
 
 ## Other documents
 

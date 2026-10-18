@@ -216,7 +216,7 @@ The core message. A single derived price with explicit provenance.
 | 8  | Source ID | `u16` | The matching engine whose order book or trades the price is derived from. MUST equal the `Source ID` in the instrument's `InstrumentDefinition`. |
 | 10 | Method | `u8` | How the price was computed. See Method table. MUST NOT be `0`. |
 | 11 | Quality Flags | `u8` | Bit 0: stale, bit 1: one-sided input, bit 2: book crossed/locked, bit 3: synthetic. Bits 4–7: reserved. |
-| 12 | Input Timestamp | `ts_ns` | Venue timestamp of the latest input: the book state for a book method, the last trade for a trade method |
+| 12 | Input Timestamp | `ts_ns` | Venue timestamp. Book method: the book state. Method `4`: the trade. Method `5`: the end of the window. |
 | 20 | Compute Timestamp | `ts_ns` | When the publisher computed the price. `Compute Timestamp − Input Timestamp` is publisher-side processing lag. |
 | 28 | Price | `price` | The derived price, in the instrument's Price Exponent |
 | 36 | Window | `u32` | Length of the trade window in milliseconds. See *Window*. |
@@ -237,7 +237,11 @@ Publishers SHOULD use the most accurate value available; receivers MUST accept a
 
 #### Window
 
-For method `5`, `Window` MUST NOT be `0`. The window ends at or before `Compute Timestamp`. `Input Timestamp` is the venue timestamp of the last trade in the window.
+For method `5`:
+
+- `Window` MUST NOT be `0`.
+- The window is the interval `(Input Timestamp − W, Input Timestamp]`, where `W` is `Window × 1,000,000` nanoseconds.
+- A trade is in the window if its venue timestamp is in this interval. The start is exclusive. The end is inclusive.
 
 For all other methods, `Window` MUST be `0`.
 
@@ -260,7 +264,7 @@ A `Midpoint` with `Quality Flags == 0` indicates a clean, fresh computation.
 
 A subscriber consuming this feed has three timestamps available per price and can localize latency between any two:
 
-1. **Input Timestamp** (in `Midpoint`): venue's timestamp on the latest input.
+1. **Input Timestamp** (in `Midpoint`): venue's timestamp on the latest input, or the end of the window for method `5`.
 2. **Compute Timestamp** (in `Midpoint`): when the publisher finished computing this price.
 3. **Send Timestamp** (in the frame header): when the publisher handed the frame to the network.
 
