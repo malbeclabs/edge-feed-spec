@@ -102,7 +102,7 @@ Each item is a separate pull request.
 
 - `tools/conformance`: decode midpoint at `Schema Version = 3`.
   - Replace `MID.METHOD0_REQUIRES_DEFAULT` with a rule that rejects Method `0`.
-  - Add a rule for `Window`.
+  - Add rules for `Window` and `Volume`.
   - Keep the `Schema Version = 1` decoder for publishers that are already
     deployed.
 - Shared codec: midpoint message types and golden vectors.
