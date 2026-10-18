@@ -1,10 +1,10 @@
 # DoubleZero Midpoint Feed
 
-The DoubleZero Midpoint Feed is a wire format for single-value mid prices delivered over the DoubleZero Edge service. It defines a compact, fixed-size, multicast-native binary protocol for publishing one mid price per instrument, derived by the publisher from a venue's order book.
+The DoubleZero Midpoint Feed is a wire format for single-value derived prices delivered over the DoubleZero Edge service. It defines a compact, fixed-size, multicast-native binary protocol for publishing one price per instrument, derived by the publisher from a matching engine's order book or trades.
 
 This is a sibling protocol to the DoubleZero Top-of-Book & Trades Feed, not a layer on top. Where the top-of-book feed carries two-sided BBO data and trades, the midpoint feed carries a single derived price plus the provenance needed to interpret it. A publisher MAY operate both feeds for the same set of instruments; subscribers MAY consume one without the other.
 
-This document specifies version **1.1.0**: the frame header, application message header, and the message types sufficient to operate a working midpoint publisher and subscriber.
+This document specifies version **3.0.0**: the frame header, application message header, and the message types sufficient to operate a working midpoint publisher and subscriber.
 
 ---
 
@@ -15,9 +15,9 @@ This document specifies version **1.1.0**: the frame header, application message
 3. **Schema-versioned.** The frame header carries a version byte. New fields append to messages; old decoders ignore trailing bytes. Unknown message types are skipped using the Message Length field.
 4. **Multicast-native.** UDP multicast delivery. One frame per UDP datagram.
 5. **Instrument-ID based.** Numeric `u32` IDs on the market data path. Human-readable strings only in reference data.
-6. **Source-attributed.** Every price message carries a `u16` Source ID identifying the venue whose book the mid was computed from.
+6. **Source-attributed.** Every price message carries a `u16` Source ID. It names the matching engine whose order book or trades the price is derived from.
 7. **Single-value, not single-sided.** A midpoint message is one price. There is no degenerate "bid = ask" encoding; consumers that want a two-sided book should use the top-of-book feed.
-8. **Derivation-explicit.** Every midpoint declares *how* it was computed and carries the timestamps needed to localize latency. A derived price without provenance is a number without a contract.
+8. **Derivation-explicit.** Every price declares *how* it was computed and carries the timestamps needed to localize latency. A derived price without provenance is a number without a contract.
 
 ---
 
@@ -34,6 +34,7 @@ This document specifies version **1.1.0**: the frame header, application message
 | `char[N]` | N | Fixed-length ASCII, left-justified, null-padded on right |
 | `ts_ns` | 8 | Nanoseconds since Unix epoch (`u64`) |
 | `price` | 8 | Signed 64-bit integer with per-instrument implied exponent (`i64`) |
+| `qty` | 8 | Unsigned 64-bit integer with per-instrument implied exponent (`u64`) |
 
 ---
 
@@ -73,7 +74,7 @@ The frame header and application message header are identical on both ports. A s
 | Offset | Field | Type | Description |
 |--------|-------|------|-------------|
 | 0 | Magic | `u16` | `0x4D44` ("DM"). Frame delimiter. Distinct from the top-of-book feed's magic to prevent cross-protocol misrouting. |
-| 2 | Schema Version | `u8` | Wire format generation, equal to this spec's MAJOR version. `1` for all `1.x.y` releases. A subscriber MUST discard frames whose version it does not implement. |
+| 2 | Schema Version | `u8` | Wire format generation, equal to this spec's MAJOR version. `3` for all `3.x.y` releases. A subscriber MUST discard frames whose version it does not implement. |
 | 3 | Channel ID | `u8` | Logical channel for instrument sharding. |
 | 4 | Sequence Number | `u64` | Monotonically increasing per channel, starting from 0. Resets to 0 when `Reset Count` changes. Used for gap detection. |
 | 12 | Send Timestamp | `ts_ns` | When the publisher sent this frame. |
@@ -95,13 +96,21 @@ Every application message begins with:
 
 ---
 
+## Identity Model
+
+### Instrument IDs
+
+The unique key for an instrument in this feed is the tuple **`(channel_id, instrument_id)`**. `instrument_id` is a `u32` scoped to its channel; it need not be globally unique across channels. Subscribers consuming multiple channels MUST key their internal instrument map by the tuple.
+
+---
+
 ## Message Types
 
 | Type ID | Name | Size | Port | Description |
 |---------|------|------|------|-------------|
 | `0x01` | Heartbeat | 16 | mktdata | Channel liveness signal |
-| `0x02` | InstrumentDefinition | 64 | refdata | Reference data for an instrument |
-| `0x03` | Midpoint | 40 | mktdata | Single-value mid price (the core message) |
+| `0x02` | InstrumentDefinition | 130 | refdata | Reference data for an instrument |
+| `0x03` | Midpoint | 40 | mktdata | Single-value derived price (the core message) |
 | `0x06` | EndOfSession | 12 | mktdata | No more data for this session |
 | `0x07` | ManifestSummary | 24 | refdata | Published instrument set summary (see supplement) |
 
@@ -124,27 +133,31 @@ Sent every N seconds when there is no other traffic. Receivers use this for stal
 | 5 | Reserved | 3B | Padding |
 | 8 | Timestamp | `ts_ns` | Current time |
 
-### 0x02 InstrumentDefinition (64 bytes)
+### 0x02 InstrumentDefinition (130 bytes)
 
 Maps a numeric Instrument ID to human-readable metadata. Carried on the reference data port and retransmitted continuously per the [Reference Data Distribution supplement](../reference-data/spec.md). Not on the market data path.
 
-This definition is slimmed relative to the top-of-book feed: it omits Lot Size, Contract Value, and Settle Type, none of which apply to a derived value that does not trade. It adds a `Default Method` byte so that subscribers know how mids are computed when a `Midpoint` message uses method `0`.
+The layout is the same as the top-of-book feed's `InstrumentDefinition`. The Description column gives the rules for this feed.
 
 | Offset | Field | Type | Description |
 |--------|-------|------|-------------|
-| 0  | Header | 4B | Type=`0x02`, Length=64 |
-| 4  | Instrument ID | `u32` | Unique numeric ID for this instrument. SHOULD match the top-of-book feed's ID for the same instrument when both feeds are operated by the same publisher. |
-| 8  | Symbol | `char[16]` | Human-readable label, e.g. `"BTC-USDT"`. |
-| 24 | Leg1 | `char[8]` | First leg/component (e.g., base currency). |
-| 32 | Leg2 | `char[8]` | Second leg/component (e.g., quote currency). |
-| 40 | Asset Class | `u8` | See Asset Class table. |
-| 41 | Price Exponent | `i8` | Implied decimal exponent for price fields. e.g., `-2` means divide raw value by 100. |
-| 42 | Default Method | `u8` | Default computation method for `Midpoint` messages on this instrument. See Method table. |
-| 43 | Price Bound | `u8` | 0=Unbounded, 1=Bounded [0,1] (binary outcomes), 2=Non-negative only |
-| 44 | Tick Size | `price` | Minimum price increment (interpreted via Price Exponent). |
-| 52 | Expiry | `ts_ns` | Expiration timestamp. 0 for non-expiring. |
-| 60 | Manifest Seq | `u16` | The publisher's `Manifest Seq` at the time this definition was emitted. See supplement. |
-| 62 | Reserved | 2B | Padding |
+| 0 | Header | 4B | Type=`0x02`, Length=130 |
+| 4 | Instrument ID | `u32` | Unique numeric ID for this instrument. SHOULD match the top-of-book feed's ID for the same instrument when both feeds are operated by the same publisher. |
+| 8 | Source ID | `u16` | The matching engine whose order book or trades the price is derived from, as assigned by the [Source ID Registry](../sources/spec.md). |
+| 10 | Symbol | `char[64]` | Human-readable label, left-justified and null-padded (e.g., `"BTC-USDT"`). Truncate only if the venue's symbol exceeds 64 bytes. |
+| 74 | Leg1 | `char[8]` | First leg/component (e.g., base currency). |
+| 82 | Leg2 | `char[8]` | Second leg/component (e.g., quote currency). |
+| 90 | Asset Class | `u8` | See Asset Class table. |
+| 91 | Price Exponent | `i8` | Implied decimal exponent for `Price`. e.g., `-2` means divide raw value by 100. MAY be finer than `Tick Size`. |
+| 92 | Qty Exponent | `i8` | No field in this feed uses it. `0`. |
+| 93 | Market Model | `u8` | Market model of the matching engine. See Market Model table. |
+| 94 | Tick Size | `price` | Minimum price increment of the matching engine (interpreted via Price Exponent). `0` if not available. |
+| 102 | Lot Size | `qty` | No field in this feed uses it. `0`. |
+| 110 | Contract Value | `u64` | `0`. |
+| 118 | Expiry | `ts_ns` | Expiration timestamp. 0 for non-expiring. |
+| 126 | Settle Type | `u8` | `0`. |
+| 127 | Price Bound | `u8` | 0=Unbounded, 1=Bounded [0,1] (binary outcomes), 2=Non-negative only |
+| 128 | Manifest Seq | `u16` | The publisher's `Manifest Seq` at the time this definition was emitted. See supplement. |
 
 #### Asset Class Values
 
@@ -159,9 +172,19 @@ This definition is slimmed relative to the top-of-book feed: it omits Lot Size, 
 
 Publishers SHOULD use the most accurate value available; receivers MUST accept any `u8` value and treat unknown values as `0` (Unknown).
 
+#### Market Model Values
+
+| Value | Name |
+|-------|------|
+| 0 | Unknown |
+| 1 | CLOB |
+| 2 | AMM |
+
+Publishers SHOULD use the most accurate value available; receivers MUST accept any `u8` value and treat unknown values as `0` (Unknown).
+
 ### 0x03 Midpoint (40 bytes)
 
-The core message. A single derived mid price with explicit provenance.
+The core message. A single derived price with explicit provenance.
 
 ```
  0                   1                   2                   3
@@ -173,66 +196,75 @@ The core message. A single derived mid price with explicit provenance.
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 |         Source ID (u16)       |    Method     | Quality Flags |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                    Book Timestamp (ts_ns)                     |
+|                   Input Timestamp (ts_ns)                     |
 |                                                               |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 |                  Compute Timestamp (ts_ns)                    |
 |                                                               |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                      Mid Price (price, i64)                   |
+|                        Price (price, i64)                     |
 |                                                               |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-|                           Reserved                            |
+|                         Window (u32)                          |
 +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 ```
 
 | Offset | Field | Type | Description |
 |--------|-------|------|-------------|
 | 0  | Header | 4B | Type=`0x03`, Length=40 |
-| 4  | Instrument ID | `u32` | Instrument this midpoint applies to |
-| 8  | Source ID | `u16` | The venue whose order book this mid was computed from |
-| 10 | Method | `u8` | How the mid was computed. `0` means use the instrument's `Default Method`. See Method table. |
+| 4  | Instrument ID | `u32` | Instrument this price applies to |
+| 8  | Source ID | `u16` | The matching engine whose order book or trades the price is derived from. MUST equal the `Source ID` in the instrument's `InstrumentDefinition`. |
+| 10 | Method | `u8` | How the price was computed. See Method table. MUST NOT be `0`. |
 | 11 | Quality Flags | `u8` | Bit 0: stale, bit 1: one-sided input, bit 2: book crossed/locked, bit 3: synthetic. Bits 4–7: reserved. |
-| 12 | Book Timestamp | `ts_ns` | Venue timestamp of the underlying book state used for this mid |
-| 20 | Compute Timestamp | `ts_ns` | When the publisher computed the mid. `Compute Timestamp − Book Timestamp` is publisher-side processing lag. |
-| 28 | Mid Price | `price` | The midpoint, in the instrument's Price Exponent |
-| 36 | Reserved | 4B | Padding to 40 bytes; reserved for future appended fields |
+| 12 | Input Timestamp | `ts_ns` | Venue timestamp of the latest input: the book state for a book method, the last trade for a trade method |
+| 20 | Compute Timestamp | `ts_ns` | When the publisher computed the price. `Compute Timestamp − Input Timestamp` is publisher-side processing lag. |
+| 28 | Price | `price` | The derived price, in the instrument's Price Exponent |
+| 36 | Window | `u32` | Length of the trade window in milliseconds. See *Window*. |
 
 #### Method Values
 
-| Value | Name | Definition |
-|-------|------|------------|
-| 0 | Default | Use the instrument's `Default Method` from its `InstrumentDefinition`. A `Midpoint` MUST NOT use method `0` if no `InstrumentDefinition` with a non-zero `Default Method` has been published for the instrument. |
-| 1 | BBO Mid | `(best_bid + best_ask) / 2` from the venue's top of book |
-| 2 | Micro-Price | `(best_ask × bid_qty + best_bid × ask_qty) / (bid_qty + ask_qty)` |
-| 3 | Weighted Mid | Depth-weighted across multiple price levels; the depth and weighting are publisher-defined |
-| 4 | Last-Trade Fallback | The most recent trade price, used when the book is one-sided or empty |
-| 255 | Custom | Publisher-specific; documented out of band |
+| Value | Name | Input | Definition |
+|-------|------|-------|------------|
+| 0 | Unknown | — | Publishers MUST NOT send this value. |
+| 1 | BBO Mid | book | `(best_bid + best_ask) / 2` from the venue's top of book |
+| 2 | Micro-Price | book | `(best_ask × bid_qty + best_bid × ask_qty) / (bid_qty + ask_qty)` |
+| 3 | Weighted Mid | book | Depth-weighted across multiple price levels; the depth and weighting are publisher-defined |
+| 4 | Last-Trade Fallback | trade | The most recent trade price, used when the book is one-sided or empty |
+| 5 | VWAP | trade | `Σ(trade_price × trade_qty) / Σ trade_qty` over the trades in the window |
+| 255 | Custom | — | Publisher-specific; documented out of band |
 
 Publishers SHOULD use the most accurate value available; receivers MUST accept any `u8` value and treat unknown non-zero values as `255` (Custom).
+
+#### Window
+
+For method `5`, `Window` MUST NOT be `0`. The window ends at or before `Compute Timestamp`. `Input Timestamp` is the venue timestamp of the last trade in the window.
+
+For all other methods, `Window` MUST be `0`.
 
 #### Quality Flag Semantics
 
 | Bit | Name | Meaning |
 |-----|------|---------|
-| 0 | stale | The underlying book has not updated within the publisher's freshness window. The mid is the best available value but should be treated with reduced confidence. |
-| 1 | one-sided | The underlying book had liquidity on only one side at compute time. |
-| 2 | crossed-or-locked | The underlying book had `bid >= ask` at compute time. The mid is still well-defined for most methods but the book state was anomalous. |
-| 3 | synthetic | The mid value was not derived from the live book at compute time (e.g., last-trade fallback, carry-over from a previous tick, or any other rule that does not read the current book). |
+| 0 | stale | The inputs have not updated within the publisher's freshness window. The price is the best available value but should be treated with reduced confidence. |
+| 1 | one-sided | Book methods only. The underlying book had liquidity on only one side at compute time. |
+| 2 | crossed-or-locked | Book methods only. The underlying book had `bid >= ask` at compute time. The price is still well-defined for most methods but the book state was anomalous. |
+| 3 | synthetic | The price was not derived from the current inputs (e.g., last-trade fallback for a book method, carry-over from a previous tick, or any other rule that does not read the current inputs). |
 
-Bits 1 and 3 are independent: a one-sided book may still produce a non-synthetic mid if the publisher's method has a defined behavior for one-sided books. A synthetic mid may be set on a two-sided book if the publisher chose not to use it (e.g., during a known data-quality incident).
+For a trade method, bits 1 and 2 MUST be `0`.
 
-A `Midpoint` with `Quality Flags == 0` indicates a clean, two-sided, fresh computation.
+Bits 1 and 3 are independent: a one-sided book may still produce a non-synthetic price if the publisher's method has a defined behavior for one-sided books. A synthetic price may be set on a two-sided book if the publisher chose not to use it (e.g., during a known data-quality incident).
+
+A `Midpoint` with `Quality Flags == 0` indicates a clean, fresh computation.
 
 #### Three Timestamps
 
-A subscriber consuming this feed has three timestamps available per midpoint and can localize latency between any two:
+A subscriber consuming this feed has three timestamps available per price and can localize latency between any two:
 
-1. **Book Timestamp** (in `Midpoint`): venue's timestamp on the underlying book state.
-2. **Compute Timestamp** (in `Midpoint`): when the publisher finished computing this mid.
+1. **Input Timestamp** (in `Midpoint`): venue's timestamp on the latest input.
+2. **Compute Timestamp** (in `Midpoint`): when the publisher finished computing this price.
 3. **Send Timestamp** (in the frame header): when the publisher handed the frame to the network.
 
-`Compute − Book` is publisher-side processing lag. `Send − Compute` is publisher egress lag. `(receiver_now) − Send` is wire + receive lag.
+`Compute − Input` is publisher-side processing lag. `Send − Compute` is publisher egress lag. `(receiver_now) − Send` is wire + receive lag.
 
 ### 0x06 EndOfSession (12 bytes)
 
@@ -267,7 +299,7 @@ A typical publisher session proceeds as follows:
 1. Publisher starts → increments `Reset Count` in the frame header and resets `Sequence Number` to 0.
 2. Begins emitting **InstrumentDefinition** for every active instrument on the reference data port, paced evenly across the definition cycle period (recommended 30 s). Definitions are retransmitted continuously, not just at startup.
 3. Begins emitting **ManifestSummary** with `Valid = 1` on the reference data port at the manifest cadence (recommended 1 s).
-4. Begins sending **Midpoint** messages on the market data port as the underlying books update. Multiple messages MAY be batched into a single frame.
+4. Begins sending **Midpoint** messages on the market data port as the inputs update. Multiple messages MAY be batched into a single frame.
 5. When the market data path is idle → sends **Heartbeat** every N seconds on the market data port.
 6. When the published instrument set changes → bumps `Manifest Seq`, retags subsequent `InstrumentDefinition` retransmissions, and emits an updated `ManifestSummary` within the manifest cadence interval.
 7. On shutdown → sends **EndOfSession** on the market data port.
@@ -286,21 +318,30 @@ The format is fixed-size and binary, so parsing requires no allocation, no strin
 
 ## Versioning and Forward Compatibility
 
-This document is version **1.1.0**, versioned independently of the other feed specs. The Schema Version byte in the frame header is `1` and equals this spec's MAJOR version, so it stays `1` for every `1.x.y` release and changes only on a breaking wire change. See the [Versioning Policy](../VERSIONING.md) for the full rule, the change classification, and the tag scheme.
+This document is version **3.0.0**, versioned independently of the other feed specs. The Schema Version byte in the frame header is `3` and equals this spec's MAJOR version, so it stays `3` for every `3.x.y` release and changes only on a breaking wire change. See the [Versioning Policy](../VERSIONING.md) for the full rule, the change classification, and the tag scheme.
 
-Future `1.x` versions of this specification MAY, without a Schema Version bump:
+Future `3.x` versions of this specification MAY, without a Schema Version bump:
 
 - Append new fields to existing messages (old decoders ignore trailing bytes within the declared Message Length).
 - Define new message types in currently-reserved type ID ranges (old decoders skip unknown types using the Message Length field).
 - Define new values for enumerated fields such as Asset Class and Method (decoders MUST accept any `u8` value).
 
-Existing field layouts and semantics will not change within the `1.x` line. A change that moves or resizes a field, alters a message length, or redefines existing semantics requires a MAJOR release and a Schema Version bump, which old decoders MUST reject rather than parse.
+Existing field layouts and semantics will not change within the `3.x` line. A change that moves or resizes a field, alters a message length, or redefines existing semantics requires a MAJOR release and a Schema Version bump, which old decoders MUST reject rather than parse.
 
 ### Changes
+
+**3.0.0** — breaking. Schema Version is now `3`. A decoder built for `1.x` MUST reject these frames. There is no `2.x` release: `3` is the Schema Version of the other feeds that use the 130-byte `InstrumentDefinition`.
+
+- `InstrumentDefinition` uses the shared 130-byte layout of the top-of-book feed. It was 64 bytes. It adds `Source ID`, `Qty Exponent`, `Market Model`, `Lot Size`, `Contract Value` and `Settle Type`, and widens `Symbol` to `char[64]`. `Default Method` is removed.
+- `Midpoint` Method `0` is now Unknown, and publishers MUST NOT send it. It meant "use `Default Method`".
+- Added Method `5` (VWAP). Each Method value is now classified as a book method or a trade method.
+- `Midpoint` offset 36 is now `Window` (`u32`, milliseconds). It was reserved.
+- Renamed `Book Timestamp` to `Input Timestamp` and `Mid Price` to `Price`. Offsets do not change.
+- Quality Flags bits 1 and 2 apply to book methods only.
+- Added an *Identity Model* section.
 
 **1.1.0** — added Asset Class value `5` (Perpetual Future) to the value table, which this spec omitted while top-of-book and market-by-price carried it. Additive: receivers already MUST accept any `u8` and treat unknown values as `0`. No wire-layout change, and the 64-byte `InstrumentDefinition` variant is untouched; Schema Version remains `1`.
 
 **1.0.1** — editorial. Removed the *Relationship to Sibling Feeds* enumeration, relocating its `Magic` distinctness requirement verbatim to the [Versioning Policy](../VERSIONING.md) so it binds every feed rather than only the ones that happened to restate it, and adopted the glossary's "published set". No wire change.
 
 **1.0.0** — first stable release. Promoted from the `0.1.0` draft with no wire change; Schema Version was `1` before and after.
-

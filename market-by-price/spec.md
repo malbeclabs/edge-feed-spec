@@ -4,7 +4,7 @@ The DoubleZero Market-by-Price Feed is a wire format for price-aggregated (L2) b
 
 This is a sibling protocol to the DoubleZero Top-of-Book & Trades Feed, the DoubleZero Midpoint Feed, and the DoubleZero Market-by-Order Feed, not a layer on top. Where the top-of-book feed carries two-sided BBO data and trades, the midpoint feed carries a single derived price per instrument, and the market-by-order feed carries the full resting-order population, this feed carries the aggregate resting quantity at every price level of each instrument — the price-aggregated projection of the same book the market-by-order feed carries order-by-order — plus a continuous in-band snapshot mechanism that lets subscribers bootstrap and recover from packet loss over multicast alone.
 
-This document specifies version **3.2.0**: the frame header, application message header, the message types sufficient to operate a working publisher and subscriber, and the sequence-number-anchored snapshot/delta recovery model that is the core of the design.
+This document specifies version **3.2.1**: the frame header, application message header, the message types sufficient to operate a working publisher and subscriber, and the sequence-number-anchored snapshot/delta recovery model that is the core of the design.
 
 ---
 
@@ -178,7 +178,7 @@ A decoder encountering an unknown type MUST skip the message using its `Message 
 
 ### Cross-Spec Type ID Policy
 
-A message Type ID that appears in more than one feed in the DoubleZero Edge family MUST carry the same semantic meaning in each. The shared Type IDs at this writing are `0x01` (Heartbeat), `0x02` (InstrumentDefinition), `0x04` (Trade), `0x06` (EndOfSession), `0x07` (ManifestSummary), `0x08` (Liquidation), and `0x09` (StrikeInterval). Heartbeat, EndOfSession, ManifestSummary, and StrikeInterval are byte-for-byte identical across every feed in the family that carries them. Trade and Liquidation are byte-for-byte identical between the top-of-book feed, the market-by-order feed, and this feed. InstrumentDefinition shares the Type ID but each feed in the family defines its own layout — this feed, market-by-order, top-of-book, order-intent, and perp-stats share the 130-byte layout; the midpoint feed carries a slimmed 64-byte variant.
+A message Type ID that appears in more than one feed in the DoubleZero Edge family MUST carry the same semantic meaning in each. The shared Type IDs at this writing are `0x01` (Heartbeat), `0x02` (InstrumentDefinition), `0x04` (Trade), `0x06` (EndOfSession), `0x07` (ManifestSummary), `0x08` (Liquidation), and `0x09` (StrikeInterval). Heartbeat, EndOfSession, ManifestSummary, and StrikeInterval are byte-for-byte identical across every feed in the family that carries them. Trade and Liquidation are byte-for-byte identical between the top-of-book feed, the market-by-order feed, and this feed. InstrumentDefinition shares the Type ID but each feed in the family defines its own layout — this feed, market-by-order, top-of-book, order-intent, perp-stats, and midpoint share the 130-byte layout.
 
 Four payloads are shared with the market-by-order feed at its own Type IDs rather than renumbered into this feed's range, because they are the same payload and reassignment is what the policy forbids: `BatchBoundary` (`0x13`), `InstrumentReset` (`0x14`) and `SnapshotEnd` (`0x22`) are byte-for-byte identical, and `SnapshotBegin` (`0x20`) is a prefix-superset — its first 36 bytes are the market-by-order layout, with `Depth Bound` appended at offset 36. `InstrumentDefinition` is the precedent for one Type ID carrying different lengths across siblings (130 bytes here and in top-of-book, 64 in midpoint).
 
@@ -908,7 +908,7 @@ The format is fixed-size and binary; parsing requires no allocation, no string h
 
 ## Versioning and Forward Compatibility
 
-This document is version **3.2.0**, versioned independently of the other feed specs. The Schema Version byte in the frame header is `3` and equals this spec's MAJOR version, so it stays `3` for every `3.x.y` release and changes only on a breaking wire change. See the [Versioning Policy](../VERSIONING.md) for the full rule, the change classification, and the tag scheme.
+This document is version **3.2.1**, versioned independently of the other feed specs. The Schema Version byte in the frame header is `3` and equals this spec's MAJOR version, so it stays `3` for every `3.x.y` release and changes only on a breaking wire change. See the [Versioning Policy](../VERSIONING.md) for the full rule, the change classification, and the tag scheme.
 
 Future `3.x` versions of this specification MAY, without a Schema Version bump:
 
@@ -921,6 +921,8 @@ Future `3.x` versions of this specification MAY, without a Schema Version bump:
 Existing field layouts and semantics will not change within the `3.x` line. A change that moves or resizes a field, alters a message length, or redefines existing semantics requires a MAJOR release and a Schema Version bump, which old decoders MUST reject rather than parse.
 
 ### Changes
+
+**3.2.1** — editorial. The Cross-Spec Type ID Policy now lists the midpoint feed with the feeds that use the 130-byte `InstrumentDefinition`. The midpoint feed uses it from its `3.0.0`. No wire change.
 
 **3.2.0** — additive. Added `0x09 StrikeInterval` (40 bytes) on the `refdata` port, defined in the [Reference Data Distribution supplement](../reference-data/spec.md) at its `1.1.0`. It carries the strike of a contract that pays on a threshold or a range, and follows the `InstrumentDefinition` of the same instrument in the same datagram. `InstrumentDefinition` does not change. An old decoder skips the type by Message Length, so the Schema Version byte stays `3`. Editorial in the same release: the Cross-Spec Type ID Policy now names the DoubleZero Edge family where it said `sibling feed`, and the Versioning section says `other feed specs`, as `GLOSSARY.md` requires. The rule is the same.
 
