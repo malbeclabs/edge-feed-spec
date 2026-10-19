@@ -88,7 +88,8 @@ pinned binary per venue, and a wrong pin misreads field offsets and reports a
 which is worse than the drift it exists to catch.
 
 The versions it accepts are `wire.SupportedSchemas`, and the per-version field
-offsets are `tools/conformance/engine/instrdef.go`. It accepts only versions with a layout
+offsets are `tools/conformance/engine/instrdef.go` and, for the midpoint feed's
+`Midpoint`, `tools/conformance/engine/fields.go`. It accepts only versions with a layout
 transcribed from a released tag; it rejects every other version exactly as this
 section requires, including `2`, which no publisher deployed.
 

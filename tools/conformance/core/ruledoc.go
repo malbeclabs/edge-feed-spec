@@ -75,7 +75,7 @@ var ruleDocs = map[string]RuleDoc{
 	// This validator decodes more than one MAJOR version per feed (see
 	// VERSIONING.md, "One documented exception"); keep the set named here in
 	// sync with wire.SupportedSchemas so the two cannot drift apart.
-	"FRAME.SCHEMA_VERSION":                         {"Schema Version is one this validator decodes for the feed: 1 and 3, except midpoint, which accepts only 1; any other value is flagged."},
+	"FRAME.SCHEMA_VERSION":                         {"Schema Version is one this validator decodes for the feed: 1 and 3; any other value is flagged."},
 	"FRAME.SCHEMA_VERSION_SUPERSEDED":              {"Schema Version is one this validator decodes but not the feed spec's current MAJOR; the publisher is readable and behind."},
 	"FRAME.MSG_COUNT_RANGE":                        {"Message Count is 1–255 and equals the messages actually present in the frame."},
 	"FRAME.LENGTH_CONSISTENCY":                     {"Declared Frame Length is 24–1232 bytes and equals 24 + the sum of contained message lengths."},
@@ -178,10 +178,16 @@ var ruleDocs = map[string]RuleDoc{
 	"TOB.TRADE.FIELDS":                 {"Trade (0x04) fields are valid: Aggressor Side 0/1/2, flag bits 0–2, registered source id."},
 
 	// --- Midpoint ---
-	"MID.STRUCT_LEN_TYPE":          {"A Midpoint (0x03) is exactly 40 bytes, mktdata only, magic 0x4D44."},
-	"MID.METHOD_RANGE":             {"Method is a u8 (unknown non-zero = Custom); observability only."},
-	"MID.QUALITY_FLAGS":            {"Quality Flags use bits 0–3; bits 4–7 are reserved and zero."},
-	"MID.TIMESTAMP_ORDERING":       {"Book ≤ Compute ≤ frame Send timestamp."},
-	"MID.METHOD0_REQUIRES_DEFAULT": {"Method=0 only when a definition with a non-zero Default Method was published."},
-	"MID.PRICE_BOUND":              {"Mid Price respects the instrument's Price Bound (e.g. [0,1] for binary outcomes)."},
+	"MID.STRUCT_LEN_TYPE":              {"A Midpoint (0x03) is exactly 48 bytes at schema 3 and 40 at schema 1, mktdata only, magic 0x4D44."},
+	"MID.METHOD_RANGE":                 {"Method is a u8 (non-zero with no definition at the schema = Custom); observability only."},
+	"MID.QUALITY_FLAGS":                {"Quality Flags use bits 0–3; bits 4–7 are reserved and zero."},
+	"MID.TIMESTAMP_ORDERING":           {"Input ≤ Compute ≤ frame Send timestamp."},
+	"MID.METHOD0_REQUIRES_DEFAULT":     {"Schema 1: Method=0 only when a definition with a non-zero Default Method was published."},
+	"MID.METHOD_NOT_UNKNOWN":           {"Schema 3: Method is not 0 (Unknown)."},
+	"MID.VWAP_WINDOW_NONZERO":          {"Schema 3: a VWAP (Method 5) has a non-zero Window."},
+	"MID.VWAP_EMPTY_WINDOW_SYNTHETIC":  {"Schema 3: a VWAP with Volume 0 sets the synthetic Quality Flags bit."},
+	"MID.WINDOW_VOLUME_ONLY_VWAP":      {"Schema 3: every other defined Method has Window 0 and Volume 0."},
+	"MID.BOOK_FLAGS_TRADE_METHOD":      {"Schema 3: a trade method (4, 5) clears Quality Flags bits 1 and 2."},
+	"MID.SOURCE_ID_MATCHES_DEFINITION": {"Schema 3: Source ID equals the Source ID in the instrument's InstrumentDefinition."},
+	"MID.PRICE_BOUND":                  {"Price respects the instrument's Price Bound (e.g. [0,1] for binary outcomes)."},
 }

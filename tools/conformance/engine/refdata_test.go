@@ -171,12 +171,12 @@ func feedManifest(rd *refdataState, valid uint8, seq uint16, count uint32) {
 
 // feedDef feeds an InstrumentDefinition directly into the state.
 func feedDef(rd *refdataState, instrID uint32, manifestSeq uint16) {
-	rd.onInstrumentDef(1 /*channelID*/, instrID, manifestSeq, 0 /*defaultMethod*/, 0 /*priceBound*/, 0 /*sendTS*/, false /*clean*/, 0 /*frameSeq*/)
+	rd.onInstrumentDef(1 /*channelID*/, instrID, manifestSeq, defInfo{}, 0 /*sendTS*/, false /*clean*/, 0 /*frameSeq*/)
 }
 
 // feedDefDirty feeds a def on a dirty window.
 func feedDefDirty(rd *refdataState, instrID uint32, manifestSeq uint16) {
-	rd.onInstrumentDef(1 /*channelID*/, instrID, manifestSeq, 0 /*defaultMethod*/, 0 /*priceBound*/, 0 /*sendTS*/, true /*dirty*/, 0 /*frameSeq*/)
+	rd.onInstrumentDef(1 /*channelID*/, instrID, manifestSeq, defInfo{}, 0 /*sendTS*/, true /*dirty*/, 0 /*frameSeq*/)
 }
 
 // --- Tests ---
@@ -604,9 +604,10 @@ func buildInstrDefFrameTOB(instrID uint32, manifestSeq uint16) []byte {
 	return wb.Frame(wire.MagicTOB).Msg(0x02, 130, instrDefTOBBody(instrID, manifestSeq)).Bytes()
 }
 
-// buildInstrDefFrameMid builds a raw frame with a Midpoint InstrumentDef.
+// buildInstrDefFrameMid builds a raw frame with a schema-1 Midpoint
+// InstrumentDef. Schema 3 uses the TOB layout.
 func buildInstrDefFrameMid(instrID uint32, manifestSeq uint16) []byte {
-	return wb.Frame(wire.MagicMid).Msg(0x02, 64, instrDefMidBody(instrID, manifestSeq)).Bytes()
+	return wb.Frame(wire.MagicMid).Schema(1).Msg(0x02, 64, instrDefMidBody(instrID, manifestSeq)).Bytes()
 }
 
 // processRefdata runs a sequence of raw frames through the engine on the
@@ -666,13 +667,12 @@ func TestRefdataIntegration_ManifestSeqNonzero(t *testing.T) {
 }
 
 // TestRefdataIntegration_MidpointReadyPath verifies end-to-end integration
-// for the Midpoint feed, which uses a 64-byte InstrumentDefinition with
-// Manifest Seq at body offset 56 (spec offset 60) rather than the TOB/MBO
-// offset of body[74] (spec offset 78).
+// for the Midpoint feed at schema 3, which uses the TOB/MBO 130-byte
+// InstrumentDefinition.
 func TestRefdataIntegration_MidpointReadyPath(t *testing.T) {
 	frames := [][]byte{
 		buildManifestFrame(wire.MagicMid, 1, 1, 1),
-		buildInstrDefFrameMid(42, 1),
+		wb.Frame(wire.MagicMid).Msg(0x02, 130, instrDefTOBBody(42, 1)).Bytes(),
 	}
 	// No violations on a conformant Midpoint sequence.
 	findings := processRefdata(t, core.FeedMidpoint, wire.MagicMid, frames)
@@ -684,7 +684,7 @@ func TestRefdataIntegration_MidpointReadyPath(t *testing.T) {
 }
 
 // TestRefdataIntegration_MidpointStaleSeq verifies that the Midpoint integration
-// path reads the Manifest Seq from the correct body offset (56). An InstrumentDef
+// path reads the schema-1 Manifest Seq from the correct body offset (56). An InstrumentDef
 // with a mismatched seq fires REFDATA.STALE_SEQ_TAG_AFTER_BUMP.
 func TestRefdataIntegration_MidpointStaleSeq(t *testing.T) {
 	frames := [][]byte{

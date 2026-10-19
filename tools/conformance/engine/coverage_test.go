@@ -133,12 +133,18 @@ var testedRules = map[string]string{
 	"TOB.TRADE.FIELDS":                 "TestTier1Rules/TOB.TRADE.FIELDS (tier1_test.go)",
 
 	// --- Midpoint ---
-	"MID.STRUCT_LEN_TYPE":          "TestTier1Rules/MID.STRUCT_LEN_TYPE (tier1_test.go)",
-	"MID.METHOD_RANGE":             "TestTier1Rules/MID.METHOD_RANGE (tier1_test.go)",
-	"MID.QUALITY_FLAGS":            "TestTier1Rules/MID.QUALITY_FLAGS (tier1_test.go)",
-	"MID.TIMESTAMP_ORDERING":       "TestTier1Rules/MID.TIMESTAMP_ORDERING (tier1_test.go)",
-	"MID.METHOD0_REQUIRES_DEFAULT": "TestMidMethod0RequiresDefaultFires (midpoint_test.go)",
-	"MID.PRICE_BOUND":              "TestMidPriceBound1NegativePrice (midpoint_test.go)",
+	"MID.STRUCT_LEN_TYPE":              "TestTier1Rules/MID.STRUCT_LEN_TYPE (tier1_test.go)",
+	"MID.METHOD_RANGE":                 "TestTier1Rules/MID.METHOD_RANGE (tier1_test.go)",
+	"MID.QUALITY_FLAGS":                "TestTier1Rules/MID.QUALITY_FLAGS (tier1_test.go)",
+	"MID.TIMESTAMP_ORDERING":           "TestTier1Rules/MID.TIMESTAMP_ORDERING (tier1_test.go)",
+	"MID.METHOD0_REQUIRES_DEFAULT":     "TestMidMethod0RequiresDefaultFires (midpoint_test.go)",
+	"MID.PRICE_BOUND":                  "TestMidPriceBound1NegativePrice / TestMidPriceBoundAtSchema3 (midpoint_test.go)",
+	"MID.METHOD_NOT_UNKNOWN":           "TestTier1Rules/MID.METHOD_NOT_UNKNOWN (tier1_test.go) / TestMidMethodNotUnknownIsSchema3Only (midpoint_test.go)",
+	"MID.VWAP_WINDOW_NONZERO":          "TestTier1Rules/MID.VWAP_WINDOW_NONZERO (tier1_test.go)",
+	"MID.VWAP_EMPTY_WINDOW_SYNTHETIC":  "TestTier1Rules/MID.VWAP_EMPTY_WINDOW_SYNTHETIC (tier1_test.go)",
+	"MID.WINDOW_VOLUME_ONLY_VWAP":      "TestTier1Rules/MID.WINDOW_VOLUME_ONLY_VWAP (tier1_test.go) / TestMidWindowVolumeNotJudgedForAnUndefinedMethod (midpoint_test.go)",
+	"MID.BOOK_FLAGS_TRADE_METHOD":      "TestTier1Rules/MID.BOOK_FLAGS_TRADE_METHOD (tier1_test.go)",
+	"MID.SOURCE_ID_MATCHES_DEFINITION": "TestMidSourceIDMatchesDefinition / TestMidSourceIDAcrossSchemas (midpoint_test.go)",
 }
 
 // TestRuleCoverage asserts that every rule in core.Rules has an entry in

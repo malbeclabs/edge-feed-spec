@@ -37,7 +37,7 @@ func expectedMsgLen(feed core.Feed, schema uint8, typ uint8) uint8 {
 			return 60
 		}
 		if feed == core.FeedMidpoint {
-			return 40
+			return midpointLen(schema)
 		}
 		return 0 // MBO: 0x03 is reserved
 	case wire.TypeTrade: // 0x04
@@ -518,7 +518,7 @@ func (e *Engine) checkTier1Message(f *wire.Frame, m wire.Message, port core.Port
 
 	// Midpoint-specific checks (likewise).
 	if e.cfg.Feed == core.FeedMidpoint {
-		e.checkTier1Mid(m, port, ch, seq, lengthOK)
+		e.checkTier1Mid(m, f.Header.SchemaVersion, port, ch, seq, lengthOK)
 	}
 }
 
@@ -632,42 +632,93 @@ func (e *Engine) checkTier1TOB(m wire.Message, port core.Port, ch uint8, seq uin
 
 // checkTier1Mid runs Midpoint-only Tier-1 checks. lengthOK is false on a
 // non-canonical length; STRUCT_LEN_TYPE still fires but body reads are skipped.
-func (e *Engine) checkTier1Mid(m wire.Message, port core.Port, ch uint8, seq uint64, lengthOK bool) {
+//
+// The Method, Window, Volume and book-flag rules are schema 3 only. Schema 1
+// has no Window or Volume, and Method 0 meant "use the instrument default"
+// there; MID.METHOD0_REQUIRES_DEFAULT judges that.
+func (e *Engine) checkTier1Mid(m wire.Message, schema uint8, port core.Port, ch uint8, seq uint64, lengthOK bool) {
 	if m.Type != wire.TypeMidpoint { // 0x03 in Midpoint feed
 		return
 	}
 
-	// MID.STRUCT_LEN_TYPE: canonical length is 40.
-	if m.Length != 40 {
+	// MID.STRUCT_LEN_TYPE: canonical length is 40 at schema 1 and 48 at schema 3.
+	// An unsupported schema already raised FRAME.SCHEMA_VERSION.
+	want := midpointLen(schema)
+	if want == 0 {
+		return
+	}
+	if m.Length != want {
 		e.Emit("MID.STRUCT_LEN_TYPE", core.Violation, port, seq, ch, 0,
-			fmt.Sprintf("Midpoint length %d != 40", m.Length))
+			fmt.Sprintf("Midpoint length %d != %d at schema %d", m.Length, want, schema))
 	}
 	if !lengthOK {
 		return // body would be zero-padded — skip semantic field checks
 	}
 
 	method := midpointMethod(m)
-	// MID.METHOD_RANGE: defined values are 0–4 and 255; values 5–254 are
-	// technically unknown but the spec says treat as Custom (255).  Emit info
-	// for unknown non-zero, non-custom values.
-	if method > 4 && method != 255 {
+	// MID.METHOD_RANGE: a value with no definition at this schema is treated
+	// as Custom (255). Info only. Method 0 at schema 3 is not "unknown": it is
+	// forbidden, and MID.METHOD_NOT_UNKNOWN reports it.
+	if method != midMethodUnknown && !midDefinedMethod(schema, method) {
 		e.Emit("MID.METHOD_RANGE", core.Pass, port, seq, ch, 0,
-			fmt.Sprintf("Midpoint method %d outside defined range (treating as custom)", method))
+			fmt.Sprintf("Midpoint method %d has no definition at schema %d (treating as custom)", method, schema))
 	}
 
 	// MID.QUALITY_FLAGS: bits 4–7 must be zero (reserved).
 	qf := midpointQualityFlags(m)
-	if qf&0xF0 != 0 {
+	if qf&midQualityReservedBits != 0 {
 		e.Emit("MID.QUALITY_FLAGS", core.Violation, port, seq, ch, 0,
 			fmt.Sprintf("Midpoint quality_flags reserved bits 4-7 non-zero: 0x%02X", qf))
 	}
 
-	// MID.TIMESTAMP_ORDERING: compute_ts must be >= book_ts.
-	bookTS := midpointBookTS(m)
+	// MID.TIMESTAMP_ORDERING: compute_ts must be >= input_ts.
+	inputTS := midpointInputTS(m)
 	computeTS := midpointComputeTS(m)
-	if computeTS < bookTS {
+	if computeTS < inputTS {
 		e.Emit("MID.TIMESTAMP_ORDERING", core.Violation, port, seq, ch, 0,
-			fmt.Sprintf("compute_ts %d < book_ts %d", computeTS, bookTS))
+			fmt.Sprintf("compute_ts %d < input_ts %d", computeTS, inputTS))
+	}
+
+	if schema != 3 {
+		return
+	}
+
+	// MID.METHOD_NOT_UNKNOWN: "MUST NOT be 0".
+	if method == midMethodUnknown {
+		e.Emit("MID.METHOD_NOT_UNKNOWN", core.Violation, port, seq, ch, 0,
+			"Midpoint Method is 0 (Unknown)")
+		return // the rules below are per method, and 0 has none
+	}
+
+	window := midpointWindow(m)
+	volume := midpointVolume(m)
+	switch {
+	case method == midMethodVWAP:
+		// MID.VWAP_WINDOW_NONZERO: "Window MUST NOT be 0".
+		if window == 0 {
+			e.Emit("MID.VWAP_WINDOW_NONZERO", core.Violation, port, seq, ch, 0,
+				"Midpoint Method is VWAP and Window is 0")
+		}
+		// MID.VWAP_EMPTY_WINDOW_SYNTHETIC: no trades, so the price carries
+		// over, and "The publisher MUST set the synthetic bit".
+		if volume == 0 && qf&midQualitySynthetic == 0 {
+			e.Emit("MID.VWAP_EMPTY_WINDOW_SYNTHETIC", core.Violation, port, seq, ch, 0,
+				fmt.Sprintf("Midpoint Method is VWAP, Volume is 0 and Quality Flags 0x%02X clear the synthetic bit", qf))
+		}
+	case midDefinedMethod(schema, method):
+		// MID.WINDOW_VOLUME_ONLY_VWAP: "For all other methods, Window and
+		// Volume MUST be 0". Not judged for a method this schema does not
+		// define: a later MINOR release can define one that has a window.
+		if window != 0 || volume != 0 {
+			e.Emit("MID.WINDOW_VOLUME_ONLY_VWAP", core.Violation, port, seq, ch, 0,
+				fmt.Sprintf("Midpoint Method %d is not VWAP and Window is %d, Volume is %d", method, window, volume))
+		}
+	}
+
+	// MID.BOOK_FLAGS_TRADE_METHOD: "For a trade method, bits 1 and 2 MUST be 0".
+	if midTradeMethod(method) && qf&(midQualityOneSided|midQualityCrossed) != 0 {
+		e.Emit("MID.BOOK_FLAGS_TRADE_METHOD", core.Violation, port, seq, ch, 0,
+			fmt.Sprintf("Midpoint Method %d is a trade method and Quality Flags 0x%02X set a book-only bit", method, qf))
 	}
 }
 

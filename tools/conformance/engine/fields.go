@@ -169,19 +169,79 @@ func tradeAggressorSide(m wire.Message) uint8 { return bodyU8(m, 6) }
 func tradeFlags(m wire.Message) uint8         { return bodyU8(m, 7) }
 func tradeTradeID(m wire.Message) uint64      { return bodyU64LE(m, 32) }
 
-// --- Midpoint (0x03, 40 bytes total, Midpoint feed) ---
-// spec offset  4 = Instrument ID (u32);     Body[0]
-// spec offset 10 = Method (u8);             Body[6]
-// spec offset 11 = Quality Flags (u8);      Body[7]
-// spec offset 12 = Book Timestamp (u64);    Body[8]
-// spec offset 20 = Compute Timestamp (u64); Body[16]
-// spec offset 28 = Mid Price (i64);         Body[24]
+// --- Midpoint (0x03, Midpoint feed) ---
+// 40 bytes at schema 1, 48 at schema 3. The fields both schemas carry are at
+// the same offsets. Schema 1 names Input Timestamp "Book Timestamp" and Price
+// "Mid Price", and has reserved bytes where schema 3 has Source ID and Window.
+//
+// spec offset  4 = Instrument ID (u32);      Body[0]
+// spec offset  8 = Source ID (u16);          Body[4]   schema 3 only
+// spec offset 10 = Method (u8);              Body[6]
+// spec offset 11 = Quality Flags (u8);       Body[7]
+// spec offset 12 = Input Timestamp (u64);    Body[8]
+// spec offset 20 = Compute Timestamp (u64);  Body[16]
+// spec offset 28 = Price (i64);              Body[24]
+// spec offset 36 = Window (u32, ms);         Body[32]  schema 3 only
+// spec offset 40 = Volume (u64);             Body[36]  schema 3 only
 func midpointInstrumentID(m wire.Message) uint32 { return bodyU32LE(m, 0) }
+func midpointSourceID(m wire.Message) uint16     { return bodyU16LE(m, 4) }
 func midpointMethod(m wire.Message) uint8        { return bodyU8(m, 6) }
 func midpointQualityFlags(m wire.Message) uint8  { return bodyU8(m, 7) }
-func midpointBookTS(m wire.Message) uint64       { return bodyU64LE(m, 8) }
+func midpointInputTS(m wire.Message) uint64      { return bodyU64LE(m, 8) }
 func midpointComputeTS(m wire.Message) uint64    { return bodyU64LE(m, 16) }
-func midpointMidPrice(m wire.Message) int64      { return int64(bodyU64LE(m, 24)) }
+func midpointPrice(m wire.Message) int64         { return int64(bodyU64LE(m, 24)) }
+func midpointWindow(m wire.Message) uint32       { return bodyU32LE(m, 32) }
+func midpointVolume(m wire.Message) uint64       { return bodyU64LE(m, 36) }
+
+// midpointLen is the canonical Midpoint length at a schema version, or 0 when
+// the validator has no layout for it.
+func midpointLen(schema uint8) uint8 {
+	switch schema {
+	case 1:
+		return 40
+	case 3:
+		return 48
+	default:
+		return 0
+	}
+}
+
+// Midpoint Method values at schema 3, and their classes.
+const (
+	midMethodUnknown       = 0
+	midMethodBBOMid        = 1
+	midMethodMicroPrice    = 2
+	midMethodWeightedMid   = 3
+	midMethodLastTrade     = 4
+	midMethodVWAP          = 5
+	midMethodCustom        = 255
+	midQualityOneSided     = 0x02
+	midQualityCrossed      = 0x04
+	midQualitySynthetic    = 0x08
+	midQualityReservedBits = 0xF0
+)
+
+// midTradeMethod reports whether the schema-3 spec classifies method as a
+// trade method. Quality Flags bits 1 and 2 are for book methods only.
+func midTradeMethod(method uint8) bool {
+	return method == midMethodLastTrade || method == midMethodVWAP
+}
+
+// midDefinedMethod reports whether method has a definition at the schema. A
+// receiver treats any other non-zero value as Custom. So a rule written for a
+// defined method does not judge it: a later MINOR release can define it.
+func midDefinedMethod(schema, method uint8) bool {
+	switch method {
+	case midMethodBBOMid, midMethodMicroPrice, midMethodWeightedMid, midMethodLastTrade, midMethodCustom:
+		return true
+	case midMethodUnknown:
+		return schema == 1 // "use the instrument default" at schema 1
+	case midMethodVWAP:
+		return schema == 3
+	default:
+		return false
+	}
+}
 
 // bodyU32LE safely reads a uint32 from m.Body at the given body offset.
 func bodyU32LE(m wire.Message, off int) uint32 {
