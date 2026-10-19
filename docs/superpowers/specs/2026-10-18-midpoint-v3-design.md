@@ -66,7 +66,7 @@ New value `5` = VWAP: `Σ(price × qty) / Σ qty` over the trades in the window.
 - For VWAP, `Window` MUST NOT be `0`.
 - For all other methods, `Window` and `Volume` MUST be `0`.
 - A window with no trades: `Volume` is `0`, the last `Price` carries over, and
-  the `synthetic` bit is set.
+  the publisher MUST set the `synthetic` bit.
 - The window is `(Input Timestamp − Window, Input Timestamp]`. A trade is in the window if its venue timestamp is in this interval.
 
 Each Method value is now classified as a book method or a trade method.

@@ -247,7 +247,7 @@ For method `5`:
 - The window is the interval `(Input Timestamp − W, Input Timestamp]`, where `W` is `Window × 1,000,000` nanoseconds.
 - A trade is in the window if its venue timestamp is in this interval. The start is exclusive. The end is inclusive.
 - `Volume` is the sum of `trade_qty` over the trades in the window.
-- If the window has no trades, `Volume` is `0`, the publisher carries over the last `Price`, and sets the `synthetic` bit.
+- If the window has no trades, `Volume` is `0` and the publisher carries over the last `Price`. The publisher MUST set the `synthetic` bit.
 
 For all other methods, `Window` and `Volume` MUST be `0`.
 
