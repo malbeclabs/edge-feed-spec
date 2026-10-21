@@ -239,6 +239,8 @@ The core message. A single derived price with explicit provenance.
 
 Publishers SHOULD use the most accurate value available; receivers MUST accept any `u8` value and treat unknown non-zero values as `255` (Custom).
 
+A publisher that takes the price from the last trade MUST send method `4`. It MUST NOT send a book method for that price.
+
 #### Window
 
 For method `5`:
@@ -248,6 +250,7 @@ For method `5`:
 - A trade is in the window if its venue timestamp is in this interval. The start is exclusive. The end is inclusive.
 - `Volume` is the sum of `trade_qty` over the trades in the window.
 - If the window has no trades, `Volume` is `0` and the publisher carries over the last `Price`. The publisher MUST set the `synthetic` bit.
+- If the window has no trades and there is no last `Price`, the publisher MUST NOT send a `Midpoint` with method `5` for the instrument. This occurs before the first trade of the instrument.
 
 For all other methods, `Window` and `Volume` MUST be `0`.
 
@@ -258,7 +261,7 @@ For all other methods, `Window` and `Volume` MUST be `0`.
 | 0 | stale | The inputs have not updated within the publisher's freshness window. The price is the best available value but should be treated with reduced confidence. |
 | 1 | one-sided | Book methods only. The underlying book had liquidity on only one side at compute time. |
 | 2 | crossed-or-locked | Book methods only. The underlying book had `bid >= ask` at compute time. The price is still well-defined for most methods but the book state was anomalous. |
-| 3 | synthetic | The price was not derived from the current inputs (e.g., last-trade fallback for a book method, carry-over from a previous tick, or any other rule that does not read the current inputs). |
+| 3 | synthetic | The price was not derived from the current inputs (e.g., carry-over from a previous tick, or any other rule that does not read the current inputs). Method `4` reads the last trade, which is its input, so a last-trade fallback does not set this bit. |
 
 For a trade method, bits 1 and 2 MUST be `0`.
 
@@ -349,6 +352,8 @@ Existing field layouts and semantics will not change within the `3.x` line. A ch
 - `Midpoint` grows from 40 to 48 bytes. Offset 40 is `Volume` (`qty`).
 - Renamed `Book Timestamp` to `Input Timestamp` and `Mid Price` to `Price`. Offsets do not change.
 - Quality Flags bits 1 and 2 apply to book methods only.
+- A last-trade fallback is method `4` only. In `1.x` it also set the `synthetic` bit. Now it does not, because method `4` reads its input.
+- Method `5` has no `Midpoint` before the first trade of the instrument.
 - Added an *Identity Model* section.
 
 **1.1.0** — added Asset Class value `5` (Perpetual Future) to the value table, which this spec omitted while top-of-book and market-by-price carried it. Additive: receivers already MUST accept any `u8` and treat unknown values as `0`. No wire-layout change, and the 64-byte `InstrumentDefinition` variant is untouched; Schema Version remains `1`.

@@ -67,9 +67,17 @@ New value `5` = VWAP: `Σ(price × qty) / Σ qty` over the trades in the window.
 - For all other methods, `Window` and `Volume` MUST be `0`.
 - A window with no trades: `Volume` is `0`, the last `Price` carries over, and
   the publisher MUST set the `synthetic` bit.
+- A window with no trades and no last `Price`: the publisher MUST NOT send a
+  `Midpoint` with method `5` for the instrument. This occurs before the first
+  trade of the instrument.
 - The window is `(Input Timestamp − Window, Input Timestamp]`. A trade is in the window if its venue timestamp is in this interval.
 
 Each Method value is now classified as a book method or a trade method.
+
+A last-trade fallback has one encoding: method `4`. A publisher MUST NOT send a
+book method for a price that it takes from the last trade. In `1.x` a
+last-trade fallback set the `synthetic` bit. Method `4` reads its input, so in
+`3.0.0` it does not.
 
 ### Quality Flags
 
