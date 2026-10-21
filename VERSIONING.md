@@ -32,7 +32,7 @@ The current state of every feed:
 
 | Spec | Frame `Magic` | `Schema Version` | Version |
 |------|---------------|------------------|---------|
-| [Top-of-Book & Trades](./top-of-book/spec.md) | `0x445A` | `3` | 3.1.0 |
+| [Top-of-Book & Trades](./top-of-book/spec.md) | `0x445A` | `3` | 3.2.0 |
 | [Midpoint](./midpoint/spec.md) | `0x4D44` | `3` | 3.0.0 |
 | [Market-by-Order](./market-by-order/spec.md) | `0x4444` | `3` | 3.3.2 |
 | [Market-by-Price](./market-by-price/spec.md) | `0x4442` | `3` | 3.2.1 |
@@ -61,6 +61,8 @@ The additive row is only safe because every spec already requires decoders to sk
 Two changes already made under this rule, both `MINOR`, both with the `Schema Version` byte unchanged: `0x08 Liquidation` was added as a shared trade-companion message type, and Asset Class value `5` (Perpetual Future) was added.
 
 A third `MINOR` change was made with the byte at `3`: `0x09 StrikeInterval` was added as a reference-data message type. The Reference Data Distribution supplement defines it, and the Top-of-Book and Market-by-Price feeds list it.
+
+A fourth `MINOR` change was made with the byte at `3`: the last four bytes of the Top-of-Book `0x03 Quote`, which were padding inside its declared 60 bytes, became the `Venue Update ID` field. This is a field appended within the declared `Message Length`. The message length did not change, and no field moved.
 
 Two `MAJOR` changes have been made to the shared non-midpoint `InstrumentDefinition`. Version `2.0.0` widened `Symbol` from `char[16]` to `char[64]`, moving every later field and growing the message from 80 to 128 bytes. Version `3.0.0` inserted `Source ID` (`u16`) after `Instrument ID`, shifting every later field by two bytes and growing the message to 130 bytes. Five feeds use `Schema Version = 3` from that change. Midpoint kept its 64-byte variant until its own `3.0.0`.
 
