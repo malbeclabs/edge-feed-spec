@@ -186,7 +186,7 @@ var ruleDocs = map[string]RuleDoc{
 	"MID.METHOD_NOT_UNKNOWN":           {"Schema 3: Method is not 0 (Unknown)."},
 	"MID.VWAP_WINDOW_NONZERO":          {"Schema 3: a VWAP (Method 5) has a non-zero Window."},
 	"MID.VWAP_EMPTY_WINDOW_SYNTHETIC":  {"Schema 3: a VWAP with Volume 0 sets the synthetic Quality Flags bit."},
-	"MID.WINDOW_VOLUME_ONLY_VWAP":      {"Schema 3: every other defined Method has Window 0 and Volume 0."},
+	"MID.WINDOW_VOLUME_ONLY_VWAP":      {"Schema 3: every Method except VWAP has Window 0 and Volume 0."},
 	"MID.BOOK_FLAGS_TRADE_METHOD":      {"Schema 3: a trade method (4, 5) clears Quality Flags bits 1 and 2."},
 	"MID.SOURCE_ID_MATCHES_DEFINITION": {"Schema 3: Source ID equals the Source ID in the instrument's InstrumentDefinition."},
 	"MID.PRICE_BOUND":                  {"Price respects the instrument's Price Bound (e.g. [0,1] for binary outcomes)."},

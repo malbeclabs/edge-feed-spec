@@ -16,7 +16,9 @@ package engine
 //	    default") is a Violation when the instrument's InstrumentDefinition has
 //	    Default Method==0 (no real default defined). Gate: if the channel's
 //	    refdata is not yet ready() → NA. Non-zero Method, or schema 3, which has
-//	    no Default Method → not applicable.
+//	    no Default Method → not applicable. A definition with no Default Method
+//	    (a schema-3 definition for a schema-1 message) → unverifiable,
+//	    transition.
 //
 //	MID.SOURCE_ID_MATCHES_DEFINITION (must, T2, StateRefdata)
 //	    Schema 3 only. Source ID MUST equal the Source ID in the instrument's
@@ -106,6 +108,11 @@ func (e *Engine) checkMidpointRefdata(port core.Port, seq uint64, ch uint8, sche
 		// The message names its own method, so there is no default to require.
 		e.inapplicable("MID.METHOD0_REQUIRES_DEFAULT", port, seq, ch, instrID,
 			fmt.Sprintf("instrument %d: Midpoint Method=%d does not defer to the instrument default", instrID, method))
+	case di.hasSourceID:
+		// A schema-3 definition has no Default Method, so defaultMethod is 0
+		// by absence, not by declaration.
+		e.unverified("MID.METHOD0_REQUIRES_DEFAULT", core.ReasonTransition, port, seq, ch, instrID,
+			fmt.Sprintf("instrument %d: the accepted definition has no Default Method; it is schema 3", instrID))
 	case di.defaultMethod == 0:
 		e.Emit("MID.METHOD0_REQUIRES_DEFAULT", core.Violation, port, seq, ch, instrID,
 			fmt.Sprintf("instrument %d: Midpoint Method=0 but InstrumentDefinition Default Method=0 (no default defined)", instrID))

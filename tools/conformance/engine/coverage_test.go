@@ -142,7 +142,7 @@ var testedRules = map[string]string{
 	"MID.METHOD_NOT_UNKNOWN":           "TestTier1Rules/MID.METHOD_NOT_UNKNOWN (tier1_test.go) / TestMidMethodNotUnknownIsSchema3Only (midpoint_test.go)",
 	"MID.VWAP_WINDOW_NONZERO":          "TestTier1Rules/MID.VWAP_WINDOW_NONZERO (tier1_test.go)",
 	"MID.VWAP_EMPTY_WINDOW_SYNTHETIC":  "TestTier1Rules/MID.VWAP_EMPTY_WINDOW_SYNTHETIC (tier1_test.go)",
-	"MID.WINDOW_VOLUME_ONLY_VWAP":      "TestTier1Rules/MID.WINDOW_VOLUME_ONLY_VWAP (tier1_test.go) / TestMidWindowVolumeNotJudgedForAnUndefinedMethod (midpoint_test.go)",
+	"MID.WINDOW_VOLUME_ONLY_VWAP":      "TestTier1Rules/MID.WINDOW_VOLUME_ONLY_VWAP (tier1_test.go) / TestMidWindowVolumeJudgedForAnUndefinedMethod (midpoint_test.go)",
 	"MID.BOOK_FLAGS_TRADE_METHOD":      "TestTier1Rules/MID.BOOK_FLAGS_TRADE_METHOD (tier1_test.go)",
 	"MID.SOURCE_ID_MATCHES_DEFINITION": "TestMidSourceIDMatchesDefinition / TestMidSourceIDAcrossSchemas (midpoint_test.go)",
 }

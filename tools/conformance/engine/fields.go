@@ -228,8 +228,7 @@ func midTradeMethod(method uint8) bool {
 }
 
 // midDefinedMethod reports whether method has a definition at the schema. A
-// receiver treats any other non-zero value as Custom. So a rule written for a
-// defined method does not judge it: a later MINOR release can define it.
+// receiver treats any other non-zero value as Custom.
 func midDefinedMethod(schema, method uint8) bool {
 	switch method {
 	case midMethodBBOMid, midMethodMicroPrice, midMethodWeightedMid, midMethodLastTrade, midMethodCustom:

@@ -10,6 +10,8 @@ package engine
 //     silent when Price Bound==0; NA before refdata is ready.
 //   - MID.SOURCE_ID_MATCHES_DEFINITION (schema 3): pass, violation, NA at
 //     schema 1, and unverifiable against a schema-1 definition.
+//   - MID.METHOD0_REQUIRES_DEFAULT: unverifiable for a schema-1 Method 0
+//     against a schema-3 definition.
 //   - The schema-3 tier-1 rules where the tier-1 table cannot reach: method 0
 //     at schema 1, and a method with no definition.
 //
@@ -543,6 +545,19 @@ func TestMidMethod0RequiresDefaultNotApplicableAtSchema3(t *testing.T) {
 	}
 }
 
+// A schema-3 definition has no Default Method, so a schema-1 Method 0 against
+// it cannot be judged. This is the reverse of the Source ID transition.
+func TestMidMethod0RequiresDefaultAgainstSchema3Definition(t *testing.T) {
+	e, ac := newMidEngine()
+	reachedReadyMid3(e, 1, 42, 7, 0, 3, 100)
+	clearFindings(ac)
+	processMid(e, buildMidpointFrame(1, 42, 0, 500), core.PortMktData, 1)
+	fs := findingsFor(ac, "MID.METHOD0_REQUIRES_DEFAULT")
+	if len(fs) != 1 || fs[0].Status != core.Unverifiable || fs[0].Reason != core.ReasonTransition {
+		t.Errorf("schema-1 Method 0, schema-3 definition: findings = %+v, want one unverifiable/transition", fs)
+	}
+}
+
 // Price Bound is at a different offset in the 130-byte definition.
 func TestMidPriceBoundAtSchema3(t *testing.T) {
 	e, ac := newMidEngine()
@@ -566,10 +581,9 @@ func TestMidMethodNotUnknownIsSchema3Only(t *testing.T) {
 	}
 }
 
-// A method this schema does not define is treated as Custom, and a later
-// MINOR release may define it with a window. MID.WINDOW_VOLUME_ONLY_VWAP
-// does not judge it.
-func TestMidWindowVolumeNotJudgedForAnUndefinedMethod(t *testing.T) {
+// "For all other methods, Window and Volume MUST be 0" includes a method
+// this schema does not define. A receiver treats it as Custom.
+func TestMidWindowVolumeJudgedForAnUndefinedMethod(t *testing.T) {
 	e, ac := newMidEngine()
 	raw := wb.Frame(wire.MagicMid).
 		Msg(wire.TypeMidpoint, 48, func(b *wb.Body) {
@@ -577,8 +591,8 @@ func TestMidWindowVolumeNotJudgedForAnUndefinedMethod(t *testing.T) {
 		}).
 		Bytes()
 	processMid(e, raw, core.PortMktData, 1)
-	if n := len(findingsFor(ac, "MID.WINDOW_VOLUME_ONLY_VWAP")); n != 0 {
-		t.Errorf("MID.WINDOW_VOLUME_ONLY_VWAP: %d findings for method 6, want 0", n)
+	if !hasViolation(ac, "MID.WINDOW_VOLUME_ONLY_VWAP") {
+		t.Error("MID.WINDOW_VOLUME_ONLY_VWAP: expected Violation for method 6 with a window")
 	}
 	if n := len(findingsFor(ac, "MID.METHOD_RANGE")); n != 1 {
 		t.Errorf("MID.METHOD_RANGE: %d findings for method 6, want 1", n)

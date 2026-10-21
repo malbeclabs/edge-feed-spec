@@ -692,8 +692,8 @@ func (e *Engine) checkTier1Mid(m wire.Message, schema uint8, port core.Port, ch 
 
 	window := midpointWindow(m)
 	volume := midpointVolume(m)
-	switch {
-	case method == midMethodVWAP:
+	switch method {
+	case midMethodVWAP:
 		// MID.VWAP_WINDOW_NONZERO: "Window MUST NOT be 0".
 		if window == 0 {
 			e.Emit("MID.VWAP_WINDOW_NONZERO", core.Violation, port, seq, ch, 0,
@@ -705,10 +705,10 @@ func (e *Engine) checkTier1Mid(m wire.Message, schema uint8, port core.Port, ch 
 			e.Emit("MID.VWAP_EMPTY_WINDOW_SYNTHETIC", core.Violation, port, seq, ch, 0,
 				fmt.Sprintf("Midpoint Method is VWAP, Volume is 0 and Quality Flags 0x%02X clear the synthetic bit", qf))
 		}
-	case midDefinedMethod(schema, method):
+	default:
 		// MID.WINDOW_VOLUME_ONLY_VWAP: "For all other methods, Window and
-		// Volume MUST be 0". Not judged for a method this schema does not
-		// define: a later MINOR release can define one that has a window.
+		// Volume MUST be 0". This includes a method this schema does not
+		// define.
 		if window != 0 || volume != 0 {
 			e.Emit("MID.WINDOW_VOLUME_ONLY_VWAP", core.Violation, port, seq, ch, 0,
 				fmt.Sprintf("Midpoint Method %d is not VWAP and Window is %d, Volume is %d", method, window, volume))
