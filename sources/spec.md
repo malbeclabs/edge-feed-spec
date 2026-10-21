@@ -6,7 +6,9 @@ A Source ID identifies the **matching engine** whose activity the message descri
 
 **A Source ID names a matching engine, not a venue.** One venue may run several matching engines and therefore hold several Source IDs. Two engines are distinct where their order-matching rules differ, and equally where they match independently over disjoint instrument sets under identical rules; a capacity shard the venue can rebalance is a channel rather than an engine. [GLOSSARY.md](../GLOSSARY.md) carries the full test and is the authority for it. A new engine at an already-registered venue is a new ID rather than a reuse of that venue's existing one. Because IDs are never renumbered, this only ever adds, and an ID already assigned keeps meaning whichever engine has been publishing under it. Venues split their own engines on their own schedule, so treat the set as open rather than assuming the current table is final.
 
-This document specifies version **1.6.1**: the reserved ranges, the current assignment set, and the process for requesting a new ID.
+**One exception: a second interface.** An engine holds a second ID where a publisher reads it through a different interface of the venue, and the two interfaces differ in the fields that a subscriber orders or deduplicates messages on, such as `Source Timestamp` or `Venue Update ID`, so that copies under one ID could not be arbitrated against each other. Other differences between two interfaces, such as an extra field, a different precision or a different latency, do not qualify. Each such ID names the engine and the interface, and its section says what the interface does not carry. Two such IDs describe the same books and the same instruments. A subscriber MUST NOT merge their messages as copies by `Source ID`, and MUST NOT read them as two engines. ID `10` is the only use of this exception, and its section gives the case.
+
+This document specifies version **1.7.0**: the reserved ranges, the current assignment set, and the process for requesting a new ID.
 
 ## Reserved Ranges
 
@@ -28,8 +30,9 @@ This document specifies version **1.6.1**: the reserved ranges, the current assi
 | `5` | Setai Commodities | `SETAI_COMMODITIES` | Setai | Futures, Options on Futures | Interface versioned separately from `4`. |
 | `6` | Binance USD-Margined Futures | `BINANCE` | Binance | Perpetual Futures, Dated Futures | The venue's own `futuresType` for this engine is `U_MARGINED`. Spot is a separate matching engine at this venue and holds ID `8`. Coin-margined futures is one too and holds ID `9`. Options is one too, unclaimed, and will share this `Code`. |
 | `7` | XYZ | `HYPERLIQUID` | Hyperliquid | Perpetual DEX | HIP-3 builder-deployed DEX. Matches the `xyz:`-prefixed perps on real-world assets, a set disjoint from ID `1`'s native perps. Shares ID `1`'s `Code`. The other builder DEXes at this venue are separate matching engines, unclaimed; see below. |
-| `8` | Binance Spot | `BINANCE` | Binance | Spot | The spot matching engine at the venue that holds ID `6`. Different order-matching rules. Shares ID `6`'s `Code`. |
+| `8` | Binance Spot | `BINANCE` | Binance | Spot | The spot matching engine at the venue that holds ID `6`. Different order-matching rules. Shares ID `6`'s `Code`. Read through a second interface under ID `10`. |
 | `9` | Binance Coin-Margined Futures | `BINANCE` | Binance | Perpetual Futures, Dated Futures | The venue's own `futuresType` for this engine is `COIN_MARGINED`. Matches an instrument set disjoint from ID `6`'s; see below. Shares ID `6`'s `Code`. |
+| `10` | Binance Spot, JSON Interface | `BINANCE` | Binance | Spot | The engine that holds ID `8`, read through its keyless JSON interface. A second interface, not a second engine; see below. Shares ID `6`'s `Code`. |
 
 `Code` is the machine-readable short name **for the venue**. It matches the `Venue` column and takes the same name TradingView uses. Uppercase, never an abbreviation, each space and hyphen a single underscore.
 
@@ -105,13 +108,25 @@ The two engines share gateways, a book update ID counter and a REST rate limit. 
 
 No publisher stamps this ID today. Which instruments a publisher carries under it is a deployment concern and out of scope here.
 
+### ID `10` is the engine that holds ID `8`, read through a second interface
+
+This ID is not a second engine. It names the spot engine that holds ID `8`, read through the venue's JSON market data interface, which needs no credential. ID `8`'s publishers read the binary SBE interface, which needs a key that the venue can revoke. This is the case the exception above exists for.
+
+The two interfaces differ in the fields that a subscriber orders quotes on. The JSON best bid and offer carries no time, so a quote under this ID has `Source Timestamp` `0`. It carries the venue's book update counter, which a publisher writes as `Venue Update ID` (top-of-book `3.2.0`). The SBE best bid and offer carries a time in microseconds. Quotes under the two IDs therefore cannot be ordered against each other by `Source Timestamp`, and a subscriber that dedupes by `Source ID` would mix the two interfaces' limitations under one number.
+
+The instruments are the same. An instrument under this ID and one under ID `8` with the same `Symbol` are the same instrument, and their books are the same book.
+
+`Name` is `Binance Spot, JSON Interface`: ID `8`'s `Name` and the interface. `Code` is `BINANCE`.
+
+No publisher stamps this ID today. Which instruments a publisher carries under it is a deployment concern and out of scope here.
+
 ## Adding a New Source ID
 
 To request a new Source ID, open a pull request against this file that:
 
 1. Adds a row to the **Assigned Source IDs** table with the next unused ID in the production range.
 2. Names the matching engine in `Name`, gives the venue's uppercase `Code`, names the exchange running it in `Venue`, and fills in `Kind` and (optionally) `Notes`. Where the venue already holds rows, the `Code` is the one those rows carry, where they agree; IDs `4` and `5` predate this rule and keep their engine-level Codes.
-3. States what makes the engine distinct from any already-registered engine at the same venue, where there is one.
+3. States what makes the engine distinct from any already-registered engine at the same venue, where there is one. A second ID for an engine already registered states instead what its interface carries that the first does not, or the reverse, under the exception for a second interface.
 4. Does not renumber, reorder, or remove existing rows.
 
 ## Versioning
@@ -123,6 +138,8 @@ Assigning a new Source ID is an additive change and is therefore a **MINOR** rel
 Because assigned IDs are stable and MUST NOT be renumbered, reordered, removed, or reused, this registry has no mechanism by which a MAJOR release could arise. A subscriber pinned to any `1.x` version of this registry will find that every ID it knows still names the same matching engine; the set of instruments a publisher stamps with it is a deployment concern and may be corrected. A later version only adds IDs it has not seen. Subscribers MUST treat an unrecognized Source ID as an unknown matching engine rather than an error, exactly as if they were running against an older copy of this registry.
 
 ### Changes
+
+**1.7.0** — assigned Source ID `10` to the spot engine at Binance that holds ID `8`, read through its keyless JSON interface. Recorded an exception to the rule that an ID names one engine: an engine holds a second ID where a publisher reads it through a second interface that differs in the fields a subscriber orders or deduplicates messages on. ID `10` is the only use. It shares ID `6`'s `Code`. ID `8`'s row points at it. No existing assignment changed.
 
 **1.6.1** — editorial. The midpoint feed's `InstrumentDefinition` carries `Source ID` from midpoint `3.0.0`. No assignment changed.
 
