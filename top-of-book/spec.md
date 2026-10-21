@@ -2,7 +2,7 @@
 
 The DoubleZero Top-of-Book & Trades Feed is a wire format for L1 price feeds delivered over the DoubleZero Edge service. It defines a compact, fixed-size, multicast-native binary protocol for publishing two-sided market data (best bid / best ask quotes and trades) from any venue with an order book.
 
-This document specifies version **3.1.0**: the frame header, application message header, and the set of message types sufficient to operate a working publisher and subscriber.
+This document specifies version **3.2.0**: the frame header, application message header, and the set of message types sufficient to operate a working publisher and subscriber.
 
 ---
 
@@ -225,7 +225,33 @@ The core message. A single, fixed-size, two-sided BBO update.
 | 44 | Ask Quantity | `qty` | Size at best ask. Uses instrument's Qty Exponent. |
 | 52 | Bid Source Count | `u16` | Orders/sources at best bid. 0 if unavailable. |
 | 54 | Ask Source Count | `u16` | Orders/sources at best ask. 0 if unavailable. |
-| 56 | Reserved | 4B | Padding to 60 bytes. |
+| 56 | Venue Update ID | `u32` | Low 32 bits of the venue's per-instrument book update counter for the book state that this quote shows. `0` if unavailable. See [Venue Update ID](#venue-update-id). |
+
+#### Venue Update ID
+
+Some venues give a number to each change of the book of an instrument. The number increases with each change. The venue assigns it, so it is the same on each connection to the venue and on each publisher that reads it. `Venue Update ID` carries the low 32 bits of that number. When two or more paths publish one channel, a subscriber can use it to select one copy of each book state.
+
+A publisher:
+
+- MUST write the low 32 bits of the venue's counter for the book state that the quote shows. It MUST NOT make a value of its own, for example a count of the quotes that it sent.
+- MUST write `0` when the venue gives no counter for the instrument.
+- MUST write `0` when the low 32 bits of the venue's counter are `0`. It MUST NOT write a different value in its place.
+- MUST NOT write a nonzero value by accident. Before `3.2.0` these bytes were padding, and this spec did not give a value for them. A publisher with its own encoder MUST make sure that the encoder writes `0` here when it does not fill the field, because a subscriber reads a nonzero value as a venue counter.
+- SHOULD fill the field on every path of one Source ID and one channel, or on none. A subscriber cannot compare a quote that has a value with a quote that has none.
+
+A subscriber:
+
+- MUST read `0` as "unavailable", not as a value.
+- MUST compare two nonzero values with serial number arithmetic, as in RFC 1982. Value `a` is newer than value `b` if and only if `(a - b) mod 2^32` is between `1` and `2^31 - 1`, inclusive. For example, in Rust: `(a.wrapping_sub(b) as i32) > 0`. When `(a - b) mod 2^32` is `2^31`, neither value is newer.
+- MUST compare two values only when both describe the same instrument of the same Source ID.
+- MUST read two equal values as the same book state.
+- MUST NOT use a gap between two values to find lost datagrams. The venue's counter counts book changes at the venue, not quotes, so it can skip values. `Sequence Number` finds lost datagrams.
+
+A subscriber that receives one channel from two or more paths MAY forward a quote only when its value is newer than the last value that it forwarded for that instrument. Then each book state goes out one time, in the order of the venue, whatever the order of arrival. This ordering does not use `Source Timestamp`, so it also works when the venue gives no time for a quote, or when several quotes have the same time.
+
+Serial number arithmetic is correct only when two values are less than `2^31` updates apart. A subscriber that keeps a value for an instrument with no update for a long time can break this condition. A venue can also restart its counter, and then its new values can compare as older. For these two reasons, a subscriber that keeps the last value SHOULD discard it when no newer value arrives for a period that it selects.
+
+Once in each `2^32` updates of one instrument, the low 32 bits of the venue's counter are `0`. That quote then has no value, and a subscriber uses its rule for quotes without a value. This can send a second copy of that one quote, or drop it. A publisher does not write `1` in its place, because the next value from the venue is `1`, and a subscriber then drops a real update as a copy.
 
 ### 0x04 Trade (52 bytes)
 
@@ -329,17 +355,20 @@ The format is fixed-size and binary, so parsing requires no allocation, no strin
 
 ## Versioning and Forward Compatibility
 
-This document is version **3.1.0**, versioned independently of the other feed specs. The Schema Version byte in the frame header is `3` and equals this spec's MAJOR version, so it stays `3` for every `3.x.y` release and changes only on a breaking wire change. See the [Versioning Policy](../VERSIONING.md) for the full rule, the change classification, and the tag scheme.
+This document is version **3.2.0**, versioned independently of the other feed specs. The Schema Version byte in the frame header is `3` and equals this spec's MAJOR version, so it stays `3` for every `3.x.y` release and changes only on a breaking wire change. See the [Versioning Policy](../VERSIONING.md) for the full rule, the change classification, and the tag scheme.
 
 Future `3.x` versions of this specification MAY, without a Schema Version bump:
 
 - Append new fields to existing messages (old decoders ignore trailing bytes within the declared Message Length).
+- Define a field in bytes that the current version calls Reserved, within the declared Message Length (old decoders ignore those bytes). `Venue Update ID` in `0x03 Quote` is an example.
 - Define new message types in currently-reserved type ID ranges (old decoders skip unknown types using the Message Length field).
 - Define new values for enumerated fields such as Asset Class and Market Model (decoders MUST accept any `u8` value).
 
 Existing field layouts and semantics will not change within the `3.x` line. A change that moves or resizes a field, alters a message length, or redefines existing semantics requires a MAJOR release and a Schema Version bump, which old decoders MUST reject rather than parse.
 
 ### Changes
+
+**3.2.0** — additive. Defined offset 56 of `0x03 Quote` as `Venue Update ID` (`u32`): the low 32 bits of the venue's per-instrument book update counter, `0` if unavailable, compared with serial number arithmetic. The four bytes were padding inside the declared 60 bytes, so the Quote stays 60 bytes and no other field moves. A publisher that writes `0` there is conformant with no change. An old decoder ignores the bytes, so the Schema Version byte stays `3`. The Versioning section also lists a field defined in reserved bytes as a change that a `3.x` version can make.
 
 **3.1.0** — additive. Added `0x09 StrikeInterval` (40 bytes) on the `refdata` port, defined in the [Reference Data Distribution supplement](../reference-data/spec.md) at its `1.1.0`. It carries the strike of a contract that pays on a threshold or a range, and follows the `InstrumentDefinition` of the same instrument in the same datagram. `InstrumentDefinition` does not change. An old decoder skips the type by Message Length, so the Schema Version byte stays `3`. Editorial in the same release: the Versioning section says `other feed specs` where it said `sibling specs`, as `GLOSSARY.md` requires.
 
