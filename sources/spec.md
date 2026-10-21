@@ -6,7 +6,7 @@ A Source ID identifies the **matching engine** whose activity the message descri
 
 **A Source ID names a matching engine, not a venue.** One venue may run several matching engines and therefore hold several Source IDs. Two engines are distinct where their order-matching rules differ, and equally where they match independently over disjoint instrument sets under identical rules; a capacity shard the venue can rebalance is a channel rather than an engine. [GLOSSARY.md](../GLOSSARY.md) carries the full test and is the authority for it. A new engine at an already-registered venue is a new ID rather than a reuse of that venue's existing one. Because IDs are never renumbered, this only ever adds, and an ID already assigned keeps meaning whichever engine has been publishing under it. Venues split their own engines on their own schedule, so treat the set as open rather than assuming the current table is final.
 
-**One exception: a second interface.** An engine holds a second ID where a publisher reads it through a different interface of the venue, and the two interfaces carry different fields, so that a subscriber cannot treat a message from one as a copy of a message from the other. Each such ID names the engine and the interface, and its section says what the interface does not carry. Two such IDs describe the same books and the same instruments. A subscriber MUST NOT merge their messages as copies by `Source ID`, and MUST NOT read them as two engines. ID `10` is the only use of this exception, and its section gives the case.
+**One exception: a second interface.** An engine holds a second ID where a publisher reads it through a different interface of the venue, and the two interfaces differ in the fields that a subscriber orders or deduplicates messages on, such as `Source Timestamp` or `Venue Update ID`, so that copies under one ID could not be arbitrated against each other. Other differences between two interfaces, such as an extra field, a different precision or a different latency, do not qualify. Each such ID names the engine and the interface, and its section says what the interface does not carry. Two such IDs describe the same books and the same instruments. A subscriber MUST NOT merge their messages as copies by `Source ID`, and MUST NOT read them as two engines. ID `10` is the only use of this exception, and its section gives the case.
 
 This document specifies version **1.7.0**: the reserved ranges, the current assignment set, and the process for requesting a new ID.
 
@@ -112,7 +112,7 @@ No publisher stamps this ID today. Which instruments a publisher carries under i
 
 This ID is not a second engine. It names the spot engine that holds ID `8`, read through the venue's JSON market data interface, which needs no credential. ID `8`'s publishers read the binary SBE interface, which needs a key that the venue can revoke. This is the case the exception above exists for.
 
-The two interfaces carry different fields. The JSON best bid and offer carries no time, so a quote under this ID has `Source Timestamp` `0`. It carries the venue's book update counter, which a publisher writes as `Venue Update ID` (top-of-book `3.2.0`). The SBE best bid and offer carries a time in microseconds. Quotes under the two IDs therefore cannot be ordered against each other by `Source Timestamp`, and a subscriber that dedupes by `Source ID` would mix the two interfaces' limitations under one number.
+The two interfaces differ in the fields that a subscriber orders quotes on. The JSON best bid and offer carries no time, so a quote under this ID has `Source Timestamp` `0`. It carries the venue's book update counter, which a publisher writes as `Venue Update ID` (top-of-book `3.2.0`). The SBE best bid and offer carries a time in microseconds. Quotes under the two IDs therefore cannot be ordered against each other by `Source Timestamp`, and a subscriber that dedupes by `Source ID` would mix the two interfaces' limitations under one number.
 
 The instruments are the same. An instrument under this ID and one under ID `8` with the same `Symbol` are the same instrument, and their books are the same book.
 
@@ -139,7 +139,7 @@ Because assigned IDs are stable and MUST NOT be renumbered, reordered, removed, 
 
 ### Changes
 
-**1.7.0** — assigned Source ID `10` to the spot engine at Binance that holds ID `8`, read through its keyless JSON interface. Recorded an exception to the rule that an ID names one engine: an engine holds a second ID where a publisher reads it through a second interface that carries different fields. ID `10` is the only use. It shares ID `6`'s `Code`. ID `8`'s row points at it. No existing assignment changed.
+**1.7.0** — assigned Source ID `10` to the spot engine at Binance that holds ID `8`, read through its keyless JSON interface. Recorded an exception to the rule that an ID names one engine: an engine holds a second ID where a publisher reads it through a second interface that differs in the fields a subscriber orders or deduplicates messages on. ID `10` is the only use. It shares ID `6`'s `Code`. ID `8`'s row points at it. No existing assignment changed.
 
 **1.6.1** — editorial. The midpoint feed's `InstrumentDefinition` carries `Source ID` from midpoint `3.0.0`. No assignment changed.
 
