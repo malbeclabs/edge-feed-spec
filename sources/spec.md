@@ -2,11 +2,11 @@
 
 This supplement is the canonical registry of `Source ID` values carried in the `u16` Source ID field of DoubleZero Edge feed messages.
 
-A Source ID identifies the **matching engine** whose activity the message describes, as [GLOSSARY.md](../GLOSSARY.md) defines it. Every price message and every event message carries exactly one Source ID, as does every `InstrumentDefinition` from Schema Version 3 onward. The [midpoint feed](../midpoint/spec.md)'s 64-byte `InstrumentDefinition` variant predates the field and does not carry it; that feed is still at Schema Version 1. IDs assigned here are stable: once allocated, an ID MUST NOT be reused for a different matching engine.
+A Source ID identifies the **matching engine** whose activity the message describes, as [GLOSSARY.md](../GLOSSARY.md) defines it. Every price message and every event message carries exactly one Source ID, as does every `InstrumentDefinition` from Schema Version 3 onward. The midpoint feed's `InstrumentDefinition` carries it from midpoint `3.0.0`; the 64-byte layout of midpoint `1.x` does not. IDs assigned here are stable: once allocated, an ID MUST NOT be reused for a different matching engine.
 
 **A Source ID names a matching engine, not a venue.** One venue may run several matching engines and therefore hold several Source IDs. Two engines are distinct where their order-matching rules differ, and equally where they match independently over disjoint instrument sets under identical rules; a capacity shard the venue can rebalance is a channel rather than an engine. [GLOSSARY.md](../GLOSSARY.md) carries the full test and is the authority for it. A new engine at an already-registered venue is a new ID rather than a reuse of that venue's existing one. Because IDs are never renumbered, this only ever adds, and an ID already assigned keeps meaning whichever engine has been publishing under it. Venues split their own engines on their own schedule, so treat the set as open rather than assuming the current table is final.
 
-This document specifies version **1.6.0**: the reserved ranges, the current assignment set, and the process for requesting a new ID.
+This document specifies version **1.6.1**: the reserved ranges, the current assignment set, and the process for requesting a new ID.
 
 ## Reserved Ranges
 
@@ -123,6 +123,8 @@ Assigning a new Source ID is an additive change and is therefore a **MINOR** rel
 Because assigned IDs are stable and MUST NOT be renumbered, reordered, removed, or reused, this registry has no mechanism by which a MAJOR release could arise. A subscriber pinned to any `1.x` version of this registry will find that every ID it knows still names the same matching engine; the set of instruments a publisher stamps with it is a deployment concern and may be corrected. A later version only adds IDs it has not seen. Subscribers MUST treat an unrecognized Source ID as an unknown matching engine rather than an error, exactly as if they were running against an older copy of this registry.
 
 ### Changes
+
+**1.6.1** — editorial. The midpoint feed's `InstrumentDefinition` carries `Source ID` from midpoint `3.0.0`. No assignment changed.
 
 **1.6.0** — assigned Source ID `9` to the coin-margined futures matching engine at Binance. It shares ID `6`'s `Code`. Distinct from ID `6` under the second half of the engine rule alone. Recorded that the two futures engines share a deployment, and corrected the ID `6` section, which said all four of the venue's engines run on separate stacks under separate rate limits. Updated ID `6`'s row, which recorded coin-margined futures as unclaimed.
 

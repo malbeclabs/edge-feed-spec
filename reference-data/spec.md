@@ -4,7 +4,7 @@ This supplement defines a continuous in-band mechanism for DoubleZero Edge feeds
 
 The mechanism is payload-independent. Any feed in the DoubleZero Edge family that uses the shared 24-byte frame header and 4-byte application message header MAY adopt it. All six currently do: the Top-of-Book & Trades, Midpoint, Market-by-Order, Market-by-Price, Order-Intent, and Perp Stats feeds each carry `ManifestSummary` on their `refdata` port and a `Manifest Seq` field in their `InstrumentDefinition`.
 
-This document specifies version **1.1.0**: the two-port transport model, the `ManifestSummary` message, the `StrikeInterval` message, the publisher cadence requirements, and the subscriber algorithm.
+This document specifies version **1.1.1**: the two-port transport model, the `ManifestSummary` message, the `StrikeInterval` message, the publisher cadence requirements, and the subscriber algorithm.
 
 ---
 
@@ -91,7 +91,7 @@ A venue can fix a strike after it lists the instrument. Until the venue fixes th
 | 28 | Fixing Time | `ts_ns` | The time at which the venue fixed the strike. `0` while the strike is pending. `0` when the venue fixed the strike at listing. `0` when the time is not available. |
 | 36 | Reserved | 4B | Padding. A publisher MUST set these bytes to `0`. |
 
-The message is feed-independent. `Instrument ID` is the key. A subscriber compares two fields with the `InstrumentDefinition` before the message: `Instrument ID` always, and `Source ID` where the `InstrumentDefinition` of the feed carries one. The message uses no other field of `InstrumentDefinition`. Thus it applies to the 130-byte `InstrumentDefinition` and to the 64-byte variant of the Midpoint feed.
+The message is feed-independent. `Instrument ID` is the key. A subscriber compares two fields with the `InstrumentDefinition` before the message: `Instrument ID` always, and `Source ID` where the `InstrumentDefinition` of the feed carries one. The message uses no other field of `InstrumentDefinition`. Thus it applies to any `InstrumentDefinition` layout.
 
 The Type ID is `0x09`. The DoubleZero Edge family shares one Type ID space, and no feed in the family uses `0x09` for a different payload. A feed adopts this message when its spec lists `0x09` in its message table. The Top-of-Book & Trades feed and the Market-by-Price feed do. In a feed that does not list it, `0x09` is reserved for this payload.
 
@@ -288,7 +288,7 @@ Definitions pack into datagrams at 9 per datagram (1,170 + 24-byte datagram head
 
 An instrument with a `StrikeInterval` uses 170 bytes each cycle and not 130. A datagram of the maximum size, 1,232 bytes, holds 7 pairs (1,190 + 24-byte datagram header = 1,214 bytes). It holds 9 definitions without a `StrikeInterval`. If all 1000 instruments have a strike, the rate is `1000 × 170 / 30 + 24 ≈ 5,691 bytes/sec ≈ 46 kbps`, in `1000 / 7 ≈ 143` datagrams per cycle.
 
-For the Midpoint Feed (D=64), the rate is `1000 × 64 / 30 + 24 ≈ 2,157 bytes/sec ≈ 18 kbps`.
+The Midpoint Feed uses the same 130-byte definition, so the same rate applies.
 
 Both numbers are negligible compared to typical market data path throughput. The mechanism is designed to be operationally invisible at B-scale (~1,000 instruments per channel).
 
@@ -311,7 +311,7 @@ The subscriber sees a `ManifestSummary` within `M` seconds (worst case), then wa
 
 ## Forward Compatibility
 
-This document is version **1.1.0**. It is a supplement, not a feed: it defines a mechanism that rides on a host feed's frame header and therefore has no `Magic` and no `Schema Version` of its own. Frames carrying it are versioned by the host feed. It is versioned independently of the feed specs that adopt it, because a subscriber and publisher operating under the same version of this supplement interoperate correctly regardless of which feed specs they implement. See the [Versioning Policy](../VERSIONING.md) for the full scheme.
+This document is version **1.1.1**. It is a supplement, not a feed: it defines a mechanism that rides on a host feed's frame header and therefore has no `Magic` and no `Schema Version` of its own. Frames carrying it are versioned by the host feed. It is versioned independently of the feed specs that adopt it, because a subscriber and publisher operating under the same version of this supplement interoperate correctly regardless of which feed specs they implement. See the [Versioning Policy](../VERSIONING.md) for the full scheme.
 
 Future `1.x` versions of this supplement MAY, without a host-feed Schema Version bump:
 
@@ -326,6 +326,8 @@ The following is a known candidate that would be **breaking**, requiring a MAJOR
 The two-port transport model and the subscriber algorithm are stable for the `1.x` line.
 
 ### Changes
+
+**1.1.1** — editorial. Removed the references to the 64-byte midpoint `InstrumentDefinition` from the `StrikeInterval` rules and the bandwidth example. The midpoint feed uses the 130-byte definition from its `3.0.0`. No wire change.
 
 **1.1.0** — additive. Added the `StrikeInterval` message (`0x09`, 40 bytes), which carries the strike of a contract as an interval, with its publisher rules and the subscriber strike state. A subscriber that does not implement it skips it by `Message Length`; `ready()`, `Manifest Seq` and `ManifestSummary` do not change. Corrected the bandwidth worked example to the 130-byte `InstrumentDefinition` (was 128 bytes). No host-feed Schema Version change.
 
