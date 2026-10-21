@@ -39,8 +39,8 @@ The current state of every feed:
 | [Order-Intent](./order-intent/spec.md) | `0x494F` | `3` | 3.1.0 |
 | [Perp Stats](./perp-stats/spec.md) | `0x4450` | `3` | 3.0.1 |
 | [Reference Data Distribution](./reference-data/spec.md) | *(host feed's)* | *(host feed's)* | 1.1.1 |
-| [Source ID Registry](./sources/spec.md) | *(none)* | *(none)* | 1.6.1 |
-| [Glossary](./GLOSSARY.md) | *(none)* | *(none)* | 1.4.0 |
+| [Source ID Registry](./sources/spec.md) | *(none)* | *(none)* | 1.7.0 |
+| [Glossary](./GLOSSARY.md) | *(none)* | *(none)* | 1.5.0 |
 
 Midpoint went from `1.1.0` to `3.0.0` when it adopted the shared 130-byte `InstrumentDefinition`. It has no `2.x` release. The byte equals the spec `MAJOR`, so the values need not be consecutive.
 
