@@ -16,11 +16,11 @@ const (
 // SupportedSchemas returns the frame Schema Version bytes this validator decodes
 // for the given feed, identified by magic.
 //
-// Per VERSIONING.md the byte equals the spec's MAJOR version, so the set is
-// per-feed. Midpoint kept its slimmed 64-byte InstrumentDefinition when the
-// other five widened Symbol to char[64], so it is still at spec 1.x while its
-// siblings are at 3.x. Keying on magic rather than core.Feed avoids an import
-// cycle and is exact: magic identifies the feed.
+// Per VERSIONING.md the byte equals the spec's MAJOR version. Every feed this
+// validator grades is at 1 or 3. Midpoint went from 1 to 3 when it took the
+// shared 130-byte InstrumentDefinition. It has no 2.x release. Keying on magic
+// rather than core.Feed avoids an import cycle and is exact: magic identifies
+// the feed.
 //
 // **This validator accepts more than one MAJOR version, and that is deliberate.**
 // VERSIONING.md requires a decoder to reject a Schema Version it was not built
@@ -34,9 +34,6 @@ const (
 // layout against. A layout nobody has seen on the wire is a guess, and a guess
 // that silently decodes is worse than a rejection.
 func SupportedSchemas(magic uint16) []uint8 {
-	if magic == MagicMid {
-		return []uint8{1}
-	}
 	return []uint8{1, 3}
 }
 
@@ -48,9 +45,6 @@ func SupportedSchemas(magic uint16) []uint8 {
 // current version is readable and behind, and that is a fact an operator wants
 // reported rather than silently tolerated — see FRAME.SCHEMA_VERSION_SUPERSEDED.
 func CurrentSchema(magic uint16) uint8 {
-	if magic == MagicMid {
-		return 1
-	}
 	return 3
 }
 

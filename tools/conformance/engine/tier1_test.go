@@ -166,10 +166,33 @@ func tradeBody(aggressorSide uint8, price int64, qty uint64) func(*wb.Body) {
 }
 
 // midpointBody builds a conformant Midpoint body.
-func midpointBody(method, qualityFlags uint8, bookTS, computeTS uint64, midPrice int64) func(*wb.Body) {
+// midpointBody builds a schema-3 Midpoint body (48-byte msg). Window and
+// Volume are 0, which every method but VWAP requires.
+func midpointBody(method, qualityFlags uint8, inputTS, computeTS uint64, price int64) func(*wb.Body) {
+	return midpointBodyVWAP(method, qualityFlags, inputTS, computeTS, price, 0, 0)
+}
+
+// midpointBodyVWAP builds a schema-3 Midpoint body (48-byte msg) with Window
+// and Volume.
+func midpointBodyVWAP(method, qualityFlags uint8, inputTS, computeTS uint64, price int64, window uint32, volume uint64) func(*wb.Body) {
 	return func(b *wb.Body) {
 		b.U32(1)           // InstrumentID
 		b.U16(1)           // SourceID
+		b.U8(method)       // Method
+		b.U8(qualityFlags) // QualityFlags
+		b.U64(inputTS)     // InputTimestamp
+		b.U64(computeTS)   // ComputeTimestamp
+		b.I64(price)       // Price
+		b.U32(window)      // Window
+		b.U64(volume)      // Volume → total body 44 → msg 48
+	}
+}
+
+// midpointBodyV1 builds a schema-1 Midpoint body (40-byte msg).
+func midpointBodyV1(method, qualityFlags uint8, bookTS, computeTS uint64, midPrice int64) func(*wb.Body) {
+	return func(b *wb.Body) {
+		b.U32(1)           // InstrumentID
+		b.Pad(2)           // Reserved
 		b.U8(method)       // Method
 		b.U8(qualityFlags) // QualityFlags
 		b.U64(bookTS)      // BookTimestamp
@@ -220,15 +243,13 @@ func tier1Cases() []struct {
 			good:  wb.Frame(wire.MagicTOB).Schema(3).Msg(wire.TypeHeartbeat, 16, heartbeatBody(0)).Bytes(),
 		},
 		{
-			// Midpoint stayed at spec 1.x when its siblings went to 3.x, so the
-			// expectation is per-feed. This case fails if the check is ever
-			// re-hardcoded to a single global value.
+			// Midpoint went from 1 to 3 with no 2.x release, like its siblings.
 			rule:  "FRAME.SCHEMA_VERSION",
 			feed:  core.FeedMidpoint,
 			magic: wire.MagicMid,
 			port:  core.PortMktData,
 			bad:   wb.Frame(wire.MagicMid).Schema(2).Msg(wire.TypeHeartbeat, 16, heartbeatBody(0)).Bytes(),
-			good:  wb.Frame(wire.MagicMid).Schema(1).Msg(wire.TypeHeartbeat, 16, heartbeatBody(0)).Bytes(),
+			good:  wb.Frame(wire.MagicMid).Schema(3).Msg(wire.TypeHeartbeat, 16, heartbeatBody(0)).Bytes(),
 		},
 		{
 			// Schema 1 is decodable and behind: the feed's spec line is at 3, so a
@@ -496,9 +517,18 @@ func tier1Cases() []struct {
 			feed:  core.FeedMidpoint,
 			magic: wire.MagicMid,
 			port:  core.PortMktData,
-			// Wrong length for Midpoint (should be 40).
-			bad:  wb.Frame(wire.MagicMid).Msg(wire.TypeMidpoint, 20, func(b *wb.Body) { b.Pad(16) }).Bytes(),
-			good: wb.Frame(wire.MagicMid).Msg(wire.TypeMidpoint, 40, midpointBody(1, 0, 1000, 2000, 500)).Bytes(),
+			// Wrong length for Midpoint (should be 48 at schema 3).
+			bad:  wb.Frame(wire.MagicMid).Msg(wire.TypeMidpoint, 40, midpointBodyV1(1, 0, 1000, 2000, 500)).Bytes(),
+			good: wb.Frame(wire.MagicMid).Msg(wire.TypeMidpoint, 48, midpointBody(1, 0, 1000, 2000, 500)).Bytes(),
+		},
+		{
+			rule:  "MID.STRUCT_LEN_TYPE",
+			feed:  core.FeedMidpoint,
+			magic: wire.MagicMid,
+			port:  core.PortMktData,
+			// The schema-3 length at schema 1 (should be 40).
+			bad:  wb.Frame(wire.MagicMid).Schema(1).Msg(wire.TypeMidpoint, 48, midpointBody(1, 0, 1000, 2000, 500)).Bytes(),
+			good: wb.Frame(wire.MagicMid).Schema(1).Msg(wire.TypeMidpoint, 40, midpointBodyV1(1, 0, 1000, 2000, 500)).Bytes(),
 		},
 		{
 			rule:  "MID.METHOD_RANGE",
@@ -506,8 +536,8 @@ func tier1Cases() []struct {
 			magic: wire.MagicMid,
 			port:  core.PortMktData,
 			// method=50 is out of defined range (5–254 are unknown non-custom).
-			bad:  wb.Frame(wire.MagicMid).Msg(wire.TypeMidpoint, 40, midpointBody(50 /*unknown method*/, 0, 1000, 2000, 500)).Bytes(),
-			good: wb.Frame(wire.MagicMid).Msg(wire.TypeMidpoint, 40, midpointBody(1, 0, 1000, 2000, 500)).Bytes(),
+			bad:  wb.Frame(wire.MagicMid).Msg(wire.TypeMidpoint, 48, midpointBody(50 /*unknown method*/, 0, 1000, 2000, 500)).Bytes(),
+			good: wb.Frame(wire.MagicMid).Msg(wire.TypeMidpoint, 48, midpointBody(1, 0, 1000, 2000, 500)).Bytes(),
 		},
 		{
 			rule:  "MID.QUALITY_FLAGS",
@@ -515,24 +545,76 @@ func tier1Cases() []struct {
 			magic: wire.MagicMid,
 			port:  core.PortMktData,
 			// quality_flags bits 4-7 set (0xF0).
-			bad:  wb.Frame(wire.MagicMid).Msg(wire.TypeMidpoint, 40, midpointBody(1, 0xF0 /*reserved bits set*/, 1000, 2000, 500)).Bytes(),
-			good: wb.Frame(wire.MagicMid).Msg(wire.TypeMidpoint, 40, midpointBody(1, 0x03 /*only defined bits*/, 1000, 2000, 500)).Bytes(),
+			bad:  wb.Frame(wire.MagicMid).Msg(wire.TypeMidpoint, 48, midpointBody(1, 0xF0 /*reserved bits set*/, 1000, 2000, 500)).Bytes(),
+			good: wb.Frame(wire.MagicMid).Msg(wire.TypeMidpoint, 48, midpointBody(1, 0x03 /*only defined bits*/, 1000, 2000, 500)).Bytes(),
 		},
 		{
 			rule:  "MID.TIMESTAMP_ORDERING",
 			feed:  core.FeedMidpoint,
 			magic: wire.MagicMid,
 			port:  core.PortMktData,
-			// compute_ts < book_ts → violation.
-			bad:  wb.Frame(wire.MagicMid).Msg(wire.TypeMidpoint, 40, midpointBody(1, 0, 2000 /*book*/, 1000 /*compute < book*/, 500)).Bytes(),
-			good: wb.Frame(wire.MagicMid).Msg(wire.TypeMidpoint, 40, midpointBody(1, 0, 1000, 2000, 500)).Bytes(),
+			// compute_ts < input_ts → violation.
+			bad:  wb.Frame(wire.MagicMid).Msg(wire.TypeMidpoint, 48, midpointBody(1, 0, 2000 /*input*/, 1000 /*compute < input*/, 500)).Bytes(),
+			good: wb.Frame(wire.MagicMid).Msg(wire.TypeMidpoint, 48, midpointBody(1, 0, 1000, 2000, 500)).Bytes(),
+		},
+		// ---- Midpoint schema 3 ----
+		{
+			rule:  "MID.METHOD_NOT_UNKNOWN",
+			feed:  core.FeedMidpoint,
+			magic: wire.MagicMid,
+			port:  core.PortMktData,
+			bad:   wb.Frame(wire.MagicMid).Msg(wire.TypeMidpoint, 48, midpointBody(0, 0, 1000, 2000, 500)).Bytes(),
+			good:  wb.Frame(wire.MagicMid).Msg(wire.TypeMidpoint, 48, midpointBody(1, 0, 1000, 2000, 500)).Bytes(),
+		},
+		{
+			rule:  "MID.VWAP_WINDOW_NONZERO",
+			feed:  core.FeedMidpoint,
+			magic: wire.MagicMid,
+			port:  core.PortMktData,
+			bad:   wb.Frame(wire.MagicMid).Msg(wire.TypeMidpoint, 48, midpointBodyVWAP(5, 0, 1000, 2000, 500, 0, 7)).Bytes(),
+			good:  wb.Frame(wire.MagicMid).Msg(wire.TypeMidpoint, 48, midpointBodyVWAP(5, 0, 1000, 2000, 500, 60_000, 7)).Bytes(),
+		},
+		{
+			rule:  "MID.VWAP_EMPTY_WINDOW_SYNTHETIC",
+			feed:  core.FeedMidpoint,
+			magic: wire.MagicMid,
+			port:  core.PortMktData,
+			// Volume 0: stale is not synthetic.
+			bad:  wb.Frame(wire.MagicMid).Msg(wire.TypeMidpoint, 48, midpointBodyVWAP(5, 0x01, 1000, 2000, 500, 60_000, 0)).Bytes(),
+			good: wb.Frame(wire.MagicMid).Msg(wire.TypeMidpoint, 48, midpointBodyVWAP(5, 0x08, 1000, 2000, 500, 60_000, 0)).Bytes(),
+		},
+		{
+			rule:  "MID.WINDOW_VOLUME_ONLY_VWAP",
+			feed:  core.FeedMidpoint,
+			magic: wire.MagicMid,
+			port:  core.PortMktData,
+			bad:   wb.Frame(wire.MagicMid).Msg(wire.TypeMidpoint, 48, midpointBodyVWAP(1, 0, 1000, 2000, 500, 60_000, 0)).Bytes(),
+			good:  wb.Frame(wire.MagicMid).Msg(wire.TypeMidpoint, 48, midpointBodyVWAP(1, 0, 1000, 2000, 500, 0, 0)).Bytes(),
+		},
+		{
+			rule:  "MID.WINDOW_VOLUME_ONLY_VWAP",
+			feed:  core.FeedMidpoint,
+			magic: wire.MagicMid,
+			port:  core.PortMktData,
+			// Volume alone, on the other trade method.
+			bad:  wb.Frame(wire.MagicMid).Msg(wire.TypeMidpoint, 48, midpointBodyVWAP(4, 0, 1000, 2000, 500, 0, 7)).Bytes(),
+			good: wb.Frame(wire.MagicMid).Msg(wire.TypeMidpoint, 48, midpointBodyVWAP(4, 0, 1000, 2000, 500, 0, 0)).Bytes(),
+		},
+		{
+			rule:  "MID.BOOK_FLAGS_TRADE_METHOD",
+			feed:  core.FeedMidpoint,
+			magic: wire.MagicMid,
+			port:  core.PortMktData,
+			// One-sided on a VWAP. The same bit on a book method is good.
+			bad:  wb.Frame(wire.MagicMid).Msg(wire.TypeMidpoint, 48, midpointBodyVWAP(5, 0x02, 1000, 2000, 500, 60_000, 7)).Bytes(),
+			good: wb.Frame(wire.MagicMid).Msg(wire.TypeMidpoint, 48, midpointBody(1, 0x02, 1000, 2000, 500)).Bytes(),
 		},
 	}
 }
 
 // TestInstrumentDefinitionLengthIsFeedSpecific catches a shared length table
 // that either leaves the non-midpoint v3 definition at 128 bytes or changes
-// Midpoint's independent 64-byte layout with it.
+// Midpoint's schema-1 64-byte layout with it.
 func TestInstrumentDefinitionLengthIsFeedSpecific(t *testing.T) {
 	if got := expectedMsgLen(core.FeedTOB, 3, wire.TypeInstrumentDef); got != 130 {
 		t.Fatalf("TOB InstrumentDefinition length = %d, want 130", got)
@@ -580,7 +662,17 @@ func TestExpectedMsgLenIsSchemaAware(t *testing.T) {
 		t.Errorf("tob schema 1 instrdef = %d, want 80", got)
 	}
 	if got := expectedMsgLen(core.FeedMidpoint, 1, wire.TypeInstrumentDef); got != 64 {
-		t.Errorf("midpoint instrdef = %d, want 64", got)
+		t.Errorf("midpoint schema 1 instrdef = %d, want 64", got)
+	}
+	if got := expectedMsgLen(core.FeedMidpoint, 3, wire.TypeInstrumentDef); got != 130 {
+		t.Errorf("midpoint schema 3 instrdef = %d, want 130", got)
+	}
+	// Midpoint is the one feed whose own message also moves: 40 -> 48.
+	if got := expectedMsgLen(core.FeedMidpoint, 1, wire.TypeMidpoint); got != 40 {
+		t.Errorf("midpoint schema 1 Midpoint = %d, want 40", got)
+	}
+	if got := expectedMsgLen(core.FeedMidpoint, 3, wire.TypeMidpoint); got != 48 {
+		t.Errorf("midpoint schema 3 Midpoint = %d, want 48", got)
 	}
 	// An unsupported pair returns 0, which the callers already treat as
 	// "no canonical length known" and skip. It must not fall back to 130.
@@ -596,14 +688,15 @@ func TestExpectedMsgLenIsSchemaAware(t *testing.T) {
 	// arm in expectedMsgLen returns 0 for both schemas and compares equal; that
 	// is expected and asserts nothing about that type.
 	//
-	// Run per non-midpoint feed because expectedMsgLen's switch branches on
-	// feed as well as type (e.g. TypeQuote, TypeLiquidation, TypeLevelUpdate).
-	// Midpoint is excluded: it supports only schema 1, so "schema 1 vs schema
-	// 3" isn't a meaningful comparison for it.
-	for _, feed := range []core.Feed{core.FeedTOB, core.FeedMBO, core.FeedMBP} {
+	// Run per feed because expectedMsgLen's switch branches on feed as well as
+	// type (e.g. TypeQuote, TypeLiquidation, TypeLevelUpdate).
+	for _, feed := range []core.Feed{core.FeedTOB, core.FeedMidpoint, core.FeedMBO, core.FeedMBP} {
 		for typ := 0; typ <= 0xFF; typ++ {
 			if typ == wire.TypeInstrumentDef {
 				continue // pinned separately above: 0x02 is expected to differ.
+			}
+			if feed == core.FeedMidpoint && typ == wire.TypeMidpoint {
+				continue // pinned separately above: 0x03 is expected to differ.
 			}
 			if typ == wire.TypeStrikeInterval {
 				continue // pinned separately below: 0x09 does not exist at schema 1.

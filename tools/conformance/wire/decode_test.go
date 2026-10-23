@@ -70,8 +70,9 @@ func TestSchemaSupported(t *testing.T) {
 		{"mbo schema 1", wire.MagicMBO, 1, true},
 		{"mbo schema 3", wire.MagicMBO, 3, true},
 		{"mbp schema 3", wire.MagicMBP, 3, true},
-		{"midpoint kept its 64-byte variant at 1", wire.MagicMid, 1, true},
-		{"midpoint never widened to 3", wire.MagicMid, 3, false},
+		{"midpoint schema 1, the 64-byte variant", wire.MagicMid, 1, true},
+		{"midpoint schema 3 is current", wire.MagicMid, 3, true},
+		{"midpoint schema 2 was never released", wire.MagicMid, 2, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -152,7 +153,8 @@ func TestSupersededSchemaIsReported(t *testing.T) {
 		{"tob at current 3 is silent", wire.MagicTOB, 3, ""},
 		{"tob at supported-but-old 1", wire.MagicTOB, 1, "FRAME.SCHEMA_VERSION_SUPERSEDED"},
 		{"mbp at supported-but-old 1", wire.MagicMBP, 1, "FRAME.SCHEMA_VERSION_SUPERSEDED"},
-		{"midpoint at its own current 1 is silent", wire.MagicMid, 1, ""},
+		{"midpoint at current 3 is silent", wire.MagicMid, 3, ""},
+		{"midpoint at supported-but-old 1", wire.MagicMid, 1, "FRAME.SCHEMA_VERSION_SUPERSEDED"},
 		{"tob at unsupported 2 is the other rule", wire.MagicTOB, 2, "FRAME.SCHEMA_VERSION"},
 		{"tob at unsupported 4 is the other rule", wire.MagicTOB, 4, "FRAME.SCHEMA_VERSION"},
 	} {
