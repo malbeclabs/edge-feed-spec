@@ -2,7 +2,7 @@
 
 The DoubleZero Top-of-Book & Trades Feed is a wire format for L1 price feeds delivered over the DoubleZero Edge service. It defines a compact, fixed-size, multicast-native binary protocol for publishing two-sided market data (best bid / best ask quotes and trades) from any venue with an order book.
 
-This document specifies version **3.3.0**: the frame header, application message header, and the set of message types sufficient to operate a working publisher and subscriber.
+This document specifies version **3.2.0**: the frame header, application message header, and the set of message types sufficient to operate a working publisher and subscriber.
 
 ---
 
@@ -355,7 +355,7 @@ The format is fixed-size and binary, so parsing requires no allocation, no strin
 
 ## Versioning and Forward Compatibility
 
-This document is version **3.3.0**, versioned independently of the other feed specs. The Schema Version byte in the frame header is `3` and equals this spec's MAJOR version, so it stays `3` for every `3.x.y` release and changes only on a breaking wire change. See the [Versioning Policy](../VERSIONING.md) for the full rule, the change classification, and the tag scheme.
+This document is version **3.2.0**, versioned independently of the other feed specs. The Schema Version byte in the frame header is `3` and equals this spec's MAJOR version, so it stays `3` for every `3.x.y` release and changes only on a breaking wire change. See the [Versioning Policy](../VERSIONING.md) for the full rule, the change classification, and the tag scheme.
 
 Future `3.x` versions of this specification MAY, without a Schema Version bump:
 
@@ -368,9 +368,7 @@ Existing field layouts and semantics will not change within the `3.x` line. A ch
 
 ### Changes
 
-**3.3.0** — additive. Defined `0` in the `Source Timestamp` of `0x03 Quote` as "unavailable". A publisher writes `0` when the venue gives no time for the update. A subscriber MUST NOT read `0` as a time. The `Venue Update ID` rules already refer to a quote with no `Source Timestamp`. `Trade ID` and `Cumulative Volume` use the same rule for `0`. This adds a subscriber requirement, because a subscriber that keeps a non-decreasing floor on the field reads `0` as a time. It is therefore a `MINOR` release, as market-by-order `3.2.0` is. No wire-layout change. Schema Version remains `3`.
-
-**3.2.0** — additive. Defined offset 56 of `0x03 Quote` as `Venue Update ID` (`u32`): the low 32 bits of the venue's per-instrument book update counter, `0` if unavailable, compared with serial number arithmetic. The four bytes were padding inside the declared 60 bytes, so the Quote stays 60 bytes and no other field moves. The field is optional for a publisher. This release adds one publisher requirement: a publisher that does not fill the field writes `0` there. The shared encoder already writes `0`, so a publisher that uses it is conformant with no change. An old decoder ignores the bytes, so the Schema Version byte stays `3`. The Versioning section also lists a field defined in reserved bytes as a change that a `3.x` version can make.
+**3.2.0** — additive. Defined offset 56 of `0x03 Quote` as `Venue Update ID` (`u32`): the low 32 bits of the venue's per-instrument book update counter, `0` if unavailable, compared with serial number arithmetic. The four bytes were padding inside the declared 60 bytes, so the Quote stays 60 bytes and no other field moves. The field is optional for a publisher. This release adds one publisher requirement: a publisher that does not fill the field writes `0` there. The shared encoder already writes `0`, so a publisher that uses it is conformant with no change. An old decoder ignores the bytes, so the Schema Version byte stays `3`. The Versioning section also lists a field defined in reserved bytes as a change that a `3.x` version can make. The same release defines `0` in the `Source Timestamp` of `0x03 Quote` as "unavailable". A publisher writes `0` when the venue gives no time for the update. A subscriber MUST NOT read `0` as a time. The `Venue Update ID` rules refer to a quote with no `Source Timestamp`, and `Trade ID` and `Cumulative Volume` use the same rule for `0`.
 
 **3.1.0** — additive. Added `0x09 StrikeInterval` (40 bytes) on the `refdata` port, defined in the [Reference Data Distribution supplement](../reference-data/spec.md) at its `1.1.0`. It carries the strike of a contract that pays on a threshold or a range, and follows the `InstrumentDefinition` of the same instrument in the same datagram. `InstrumentDefinition` does not change. An old decoder skips the type by Message Length, so the Schema Version byte stays `3`. Editorial in the same release: the Versioning section says `other feed specs` where it said `sibling specs`, as `GLOSSARY.md` requires.
 
