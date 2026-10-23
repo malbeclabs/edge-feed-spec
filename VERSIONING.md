@@ -32,7 +32,7 @@ The current state of every feed:
 
 | Spec | Frame `Magic` | `Schema Version` | Version |
 |------|---------------|------------------|---------|
-| [Top-of-Book & Trades](./top-of-book/spec.md) | `0x445A` | `3` | 3.2.0 |
+| [Top-of-Book & Trades](./top-of-book/spec.md) | `0x445A` | `3` | 3.3.0 |
 | [Midpoint](./midpoint/spec.md) | `0x4D44` | `3` | 3.0.0 |
 | [Market-by-Order](./market-by-order/spec.md) | `0x4444` | `3` | 3.3.2 |
 | [Market-by-Price](./market-by-price/spec.md) | `0x4442` | `3` | 3.2.1 |

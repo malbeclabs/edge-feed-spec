@@ -2,7 +2,7 @@
 
 The DoubleZero Top-of-Book & Trades Feed is a wire format for L1 price feeds delivered over the DoubleZero Edge service. It defines a compact, fixed-size, multicast-native binary protocol for publishing two-sided market data (best bid / best ask quotes and trades) from any venue with an order book.
 
-This document specifies version **3.2.0**: the frame header, application message header, and the set of message types sufficient to operate a working publisher and subscriber.
+This document specifies version **3.3.0**: the frame header, application message header, and the set of message types sufficient to operate a working publisher and subscriber.
 
 ---
 
@@ -218,7 +218,7 @@ The core message. A single, fixed-size, two-sided BBO update.
 | 8 | Source ID | `u16` | Originating `source_id`, as assigned by the [Source ID Registry](../sources/spec.md). Publishers operating a single Source ID MAY use a fixed value (e.g., `1`). |
 | 10 | Update Flags | `u8` | Bit 0: bid updated, bit 1: ask updated, bit 2: bid gone, bit 3: ask gone |
 | 11 | Reserved | `u8` | Padding |
-| 12 | Source Timestamp | `ts_ns` | Timestamp from the originating venue |
+| 12 | Source Timestamp | `ts_ns` | Timestamp from the originating venue. `0` if the venue gives no time for this update. A subscriber MUST read `0` as "unavailable", not as a time. |
 | 20 | Bid Price | `price` | Best bid. Uses instrument's Price Exponent. 0 if bid gone. |
 | 28 | Bid Quantity | `qty` | Size at best bid. Uses instrument's Qty Exponent. |
 | 36 | Ask Price | `price` | Best ask. Uses instrument's Price Exponent. 0 if ask gone. |
@@ -355,7 +355,7 @@ The format is fixed-size and binary, so parsing requires no allocation, no strin
 
 ## Versioning and Forward Compatibility
 
-This document is version **3.2.0**, versioned independently of the other feed specs. The Schema Version byte in the frame header is `3` and equals this spec's MAJOR version, so it stays `3` for every `3.x.y` release and changes only on a breaking wire change. See the [Versioning Policy](../VERSIONING.md) for the full rule, the change classification, and the tag scheme.
+This document is version **3.3.0**, versioned independently of the other feed specs. The Schema Version byte in the frame header is `3` and equals this spec's MAJOR version, so it stays `3` for every `3.x.y` release and changes only on a breaking wire change. See the [Versioning Policy](../VERSIONING.md) for the full rule, the change classification, and the tag scheme.
 
 Future `3.x` versions of this specification MAY, without a Schema Version bump:
 
@@ -367,6 +367,8 @@ Future `3.x` versions of this specification MAY, without a Schema Version bump:
 Existing field layouts and semantics will not change within the `3.x` line. A change that moves or resizes a field, alters a message length, or redefines existing semantics requires a MAJOR release and a Schema Version bump, which old decoders MUST reject rather than parse.
 
 ### Changes
+
+**3.3.0** — additive. Defined `0` in the `Source Timestamp` of `0x03 Quote` as "unavailable". A publisher writes `0` when the venue gives no time for the update. A subscriber MUST NOT read `0` as a time. The `Venue Update ID` rules already refer to a quote with no `Source Timestamp`. `Trade ID` and `Cumulative Volume` use the same rule for `0`. This adds a subscriber requirement, because a subscriber that keeps a non-decreasing floor on the field reads `0` as a time. It is therefore a `MINOR` release, as market-by-order `3.2.0` is. No wire-layout change. Schema Version remains `3`.
 
 **3.2.0** — additive. Defined offset 56 of `0x03 Quote` as `Venue Update ID` (`u32`): the low 32 bits of the venue's per-instrument book update counter, `0` if unavailable, compared with serial number arithmetic. The four bytes were padding inside the declared 60 bytes, so the Quote stays 60 bytes and no other field moves. The field is optional for a publisher. This release adds one publisher requirement: a publisher that does not fill the field writes `0` there. The shared encoder already writes `0`, so a publisher that uses it is conformant with no change. An old decoder ignores the bytes, so the Schema Version byte stays `3`. The Versioning section also lists a field defined in reserved bytes as a change that a `3.x` version can make.
 
