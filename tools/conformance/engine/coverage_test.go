@@ -115,6 +115,13 @@ var testedRules = map[string]string{
 	"REFDATA.MANIFEST_SEQ_NONZERO_WHEN_VALID": "TestRefdataManifestSeqNonzeroWhenValid (refdata_test.go)",
 	"MANIFEST.STATE_MACHINE":                  "TestRefdataManifestStateMachine (refdata_test.go)",
 
+	// --- Reference-data supplement: StrikeInterval ---
+	"STRIKE.FOLLOWS_DEFINITION": "TestTier1Rules/STRIKE.FOLLOWS_DEFINITION (tier1_test.go) / TestStrikeFollowsDefinition (strike_test.go)",
+	"STRIKE.FIELDS":             "TestTier1Rules/STRIKE.FIELDS (tier1_test.go) / TestStrikeFields (strike_test.go)",
+	"STRIKE.INTERVAL_NOT_EMPTY": "TestTier1Rules/STRIKE.INTERVAL_NOT_EMPTY (tier1_test.go) / TestStrikeIntervalNotEmpty (strike_test.go)",
+	"STRIKE.PRESENCE_STABLE":    "TestStrikeDropped / TestStrikeAddedLate (strike_test.go)",
+	"STRIKE.FIXED_STAYS_FIXED":  "TestStrikeReturnsToPending (strike_test.go)",
+
 	// --- Top-of-Book ---
 	"TOB.QUOTE.STRUCT_LEN_TYPE":        "TestTier1Rules/TOB.QUOTE.STRUCT_LEN_TYPE (tier1_test.go)",
 	"TOB.QUOTE.GONE_VS_ZERO_PRICE":     "TestTier1Rules/TOB.QUOTE.GONE_VS_ZERO_PRICE (tier1_test.go)",

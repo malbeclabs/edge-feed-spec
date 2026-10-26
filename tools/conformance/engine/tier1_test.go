@@ -462,6 +462,34 @@ func tier1Cases() []struct {
 			bad:  wb.Frame(wire.MagicTOB).Msg(wire.TypeTrade, 52, tradeBody(5 /*bad agg*/, 100, 10)).Bytes(),
 			good: wb.Frame(wire.MagicTOB).Msg(wire.TypeTrade, 52, tradeBody(1, 100, 10)).Bytes(),
 		},
+		// ---- StrikeInterval (reference-data supplement) ----
+		{
+			rule:  "STRIKE.FOLLOWS_DEFINITION",
+			feed:  core.FeedTOB,
+			magic: wire.MagicTOB,
+			port:  core.PortRefData,
+			// A StrikeInterval alone in its datagram: no definition before it.
+			bad:  wb.Frame(wire.MagicTOB).Msg(wire.TypeStrikeInterval, 40, strikeBody(100, 0x03, 9279999, 0, 0)).Bytes(),
+			good: strikePairTOB(100, 1, strikeBody(100, 0x03, 9279999, 0, 0)),
+		},
+		{
+			rule:  "STRIKE.FIELDS",
+			feed:  core.FeedTOB,
+			magic: wire.MagicTOB,
+			port:  core.PortRefData,
+			// Bit 1 (lower inclusive) without bit 0 (lower present).
+			bad:  strikePairTOB(100, 1, strikeBody(100, 0x02, 0, 0, 0)),
+			good: strikePairTOB(100, 1, strikeBody(100, 0x03, 9279999, 0, 0)),
+		},
+		{
+			rule:  "STRIKE.INTERVAL_NOT_EMPTY",
+			feed:  core.FeedTOB,
+			magic: wire.MagicTOB,
+			port:  core.PortRefData,
+			// Both bounds present, lower above upper.
+			bad:  strikePairTOB(100, 1, strikeBody(100, 0x0F, 9279999, 9270000, 0)),
+			good: strikePairTOB(100, 1, strikeBody(100, 0x0F, 9270000, 9279999, 0)),
+		},
 		// ---- Midpoint rules ----
 		{
 			rule:  "MID.STRUCT_LEN_TYPE",
@@ -577,11 +605,25 @@ func TestExpectedMsgLenIsSchemaAware(t *testing.T) {
 			if typ == wire.TypeInstrumentDef {
 				continue // pinned separately above: 0x02 is expected to differ.
 			}
+			if typ == wire.TypeStrikeInterval {
+				continue // pinned separately below: 0x09 does not exist at schema 1.
+			}
 			one := expectedMsgLen(feed, 1, uint8(typ))
 			three := expectedMsgLen(feed, 3, uint8(typ))
 			if one != three {
 				t.Errorf("%s type 0x%02X: schema 1 = %d, schema 3 = %d; only InstrumentDefinition may differ", feed, typ, one, three)
 			}
+		}
+	}
+	// StrikeInterval does not move between schemas: it is absent at schema 1. No
+	// 1.x release of a feed spec lists 0x09, so there it has no canonical length
+	// and is skipped as an unknown type.
+	for _, feed := range []core.Feed{core.FeedTOB, core.FeedMBP} {
+		if got := expectedMsgLen(feed, 1, wire.TypeStrikeInterval); got != 0 {
+			t.Errorf("%s schema 1 StrikeInterval = %d, want 0", feed, got)
+		}
+		if got := expectedMsgLen(feed, 3, wire.TypeStrikeInterval); got != 40 {
+			t.Errorf("%s schema 3 StrikeInterval = %d, want 40", feed, got)
 		}
 	}
 }

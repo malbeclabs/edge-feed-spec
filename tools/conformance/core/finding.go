@@ -1,6 +1,9 @@
 package core
 
-import "time"
+import (
+	"net/netip"
+	"time"
+)
 
 type Severity int
 
@@ -37,12 +40,56 @@ type StateKind int
 
 const (
 	StateNone StateKind = iota
+	// StateCounters is a counter the engine keys on the channel, or on the
+	// channel and the instrument. Every path of the channel advances it.
 	StateCounters
 	StateOrderIDSet
 	StateFullBook
 	StateRefdata
 	StateSnapshotGroup
+	// StateInstanceCounters is a counter the engine keys on the channel instance.
+	// It lives on engine.portTracker: the sequence series, the Reset Count, the
+	// Send Timestamp baseline and the Heartbeat baseline. A tier-2 rule that reads
+	// only the message in front of it is also of this kind, because it judges
+	// one path and a tier-2 rule cannot be StateNone.
+	StateInstanceCounters
 )
+
+// InstanceScoped reports whether a rule that holds this kind of state judges one
+// CHANNEL INSTANCE — "one path's view of one channel, keyed (source IP address,
+// Channel ID, destination port)" (GLOSSARY.md). If it does not, the rule judges
+// the channel.
+//
+// This decides whether a finding names a publisher. The rule catalog decides
+// it, and the place that emits the finding does not. The two are different:
+// REFDATA.NEVER_REACHES_READY fires during the classification of one datagram,
+// but every path of the channel fills the set that it judges (see
+// refdataUnclassifiedWithin). The path that delivered the last datagram did not
+// cause the verdict.
+//
+// The split follows the key of the state that each rule reads:
+//
+//   - StateNone judges the datagram in front of it and nothing else. Its subject
+//     is the path that sent that datagram.
+//   - StateInstanceCounters is state on engine.portTracker, and engine.ports keys
+//     it on the instance. The glossary names the sequence series and the Reset
+//     Count as the two things an instance owns. Two publishers that serve one
+//     channel each advance their own. MBP.DELTA.ABSOLUTE_APPLY is also of this
+//     kind: it reads the fields of one message and no state between messages.
+//   - StateCounters is state that engine.mbo, engine.mbp and engine.refdata key
+//     on the channel, or on the channel and the instrument: the per-instrument
+//     sequence, the Batch ID, the snapshot anchors and the Manifest Seq. Two
+//     publishers that serve one channel advance the same counter. The datagram
+//     in front of the engine can thus complete a verdict that its peer started.
+//   - StateOrderIDSet, StateFullBook, StateSnapshotGroup and StateRefdata are
+//     reconstructed from every path. They have the same keys as StateCounters.
+//
+// A rule moves to StateInstanceCounters only when all the state that it reads is
+// on the portTracker. The README section "Deeper state is keyed by channel, not
+// by instance" records the boundary.
+func (k StateKind) InstanceScoped() bool {
+	return k == StateNone || k == StateInstanceCounters
+}
 
 type Feed string
 
@@ -147,11 +194,21 @@ func ValidReason(s string) bool {
 
 // Finding is the unit of output. Reporters consume it.
 type Finding struct {
-	RuleID       string
-	Severity     Severity
-	Status       Status
-	Feed         Feed
-	Port         Port
+	RuleID   string
+	Severity Severity
+	Status   Status
+	Feed     Feed
+	Port     Port
+	// SourceAddr is the publisher whose datagrams this finding judges, and it is
+	// set only where the rule's subject is one channel instance — see
+	// StateKind.InstanceScoped. The zero Addr means "this verdict is about the
+	// channel, not about one path", which is a statement and not a missing value:
+	// a reader must never fill it in by picking whichever publisher was nearby.
+	//
+	// A validator subscribes to a GROUP, so it receives every path merged. The
+	// address is the only thing that tells them apart, and the engine already
+	// keys its own instance state on it (engine.instanceKey).
+	SourceAddr   netip.Addr
 	ChannelID    uint8
 	InstrumentID uint32 // 0 when not instrument-scoped
 	// NoInstrumentID is set when the finding's subject carries no Instrument ID at

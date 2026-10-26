@@ -24,6 +24,10 @@ var (
 	// listed mboOnly while its emit path fires for another feed produces findings
 	// with no matching rule_info row, and the Grafana join drops them silently.
 	mboMBP = []Feed{FeedMBO, FeedMBP}
+	// strikeFeeds is the feeds whose spec lists StrikeInterval (0x09), at their
+	// current schema. Keep it equal to engine.carriesStrikeInterval;
+	// TestStrikeFeedsMatchTheEngine pins it.
+	strikeFeeds = []Feed{FeedTOB, FeedMBP}
 )
 
 // Rules is the source of truth for the rule registry, transcribed from the
@@ -52,21 +56,21 @@ var Rules = []RuleMeta{
 	{"FIELD.QTY_POSITIVE", Should, 1, StateNone, mboOnly, false},
 	{"SNAP.ORDER_STRUCT_VALID", Should, 1, StateNone, mboOnly, false},
 	// --- MBO delta sequencing (detector, counters) ---
-	{"FRAME.SEQ_DUP_DIVERGENT", Must, 2, StateCounters, allFeeds, false},
+	{"FRAME.SEQ_DUP_DIVERGENT", Must, 2, StateInstanceCounters, allFeeds, false},
 	{"DELTA.PERINSTR_DENSITY", Must, 2, StateCounters, mboOnly, false},
 	{"DELTA.PERINSTR_FIRST_VALUE", Should, 2, StateCounters, mboOnly, false},
 	{"DELTA.PERINSTR_NO_SNAPSHOT_RESET", Must, 2, StateCounters, mboOnly, false},
 	{"DELTA.PERINSTR_DUP_DIVERGENT", Must, 2, StateCounters, mboOnly, false},
 	{"DELTA.PERINSTR_WRAP_BEFORE_RESET", Info, 2, StateCounters, mboOnly, false},
-	{"FRAME.MKTDATA_SEQ_START", Should, 2, StateCounters, mboOnly, false},
-	{"FRAME.SEND_TS_MONOTONIC", Info, 2, StateCounters, allFeeds, false},
-	{"HEARTBEAT.CADENCE", Info, 2, StateCounters, allFeeds, true},
+	{"FRAME.MKTDATA_SEQ_START", Should, 2, StateInstanceCounters, mboOnly, false},
+	{"FRAME.SEND_TS_MONOTONIC", Info, 2, StateInstanceCounters, allFeeds, false},
+	{"HEARTBEAT.CADENCE", Info, 2, StateInstanceCounters, allFeeds, true},
 	{"BATCH.ID_MONOTONIC", Should, 2, StateCounters, mboOnly, false},
-	{"FRAME.SEQ_RESET_GAP", Must, 2, StateCounters, allFeeds, false},
+	{"FRAME.SEQ_RESET_GAP", Must, 2, StateInstanceCounters, allFeeds, false},
 	// --- Market-by-price: per-instrument sequencing and the reconstruction oracle ---
 	{"MBP.DELTA.PERINSTR_DENSITY", Must, 2, StateCounters, mbpOnly, false},
 	{"MBP.DELTA.PERINSTR_NO_SNAPSHOT_RESET", Must, 2, StateCounters, mbpOnly, false},
-	{"MBP.DELTA.ABSOLUTE_APPLY", Must, 2, StateCounters, mbpOnly, false},
+	{"MBP.DELTA.ABSOLUTE_APPLY", Must, 2, StateInstanceCounters, mbpOnly, false},
 	{"MBP.SNAP.GROUP_STRUCTURE", Must, 2, StateSnapshotGroup, mbpOnly, false},
 	{"MBP.SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT", Must, 2, StateFullBook, mbpOnly, false},
 	// --- MBO referential integrity (consumer, order_id_set) ---
@@ -116,6 +120,12 @@ var Rules = []RuleMeta{
 	{"REFDATA.SEQ_BUMP_NOT_BY_ONE", Should, 2, StateCounters, allFeeds, false},
 	{"REFDATA.MANIFEST_SEQ_NONZERO_WHEN_VALID", Should, 2, StateRefdata, allFeeds, false},
 	{"MANIFEST.STATE_MACHINE", Should, 2, StateRefdata, allFeeds, false},
+	// --- Reference-data supplement: StrikeInterval (feeds that list 0x09) ---
+	{"STRIKE.FOLLOWS_DEFINITION", Must, 1, StateNone, strikeFeeds, false},
+	{"STRIKE.FIELDS", Must, 1, StateNone, strikeFeeds, false},
+	{"STRIKE.INTERVAL_NOT_EMPTY", Must, 1, StateNone, strikeFeeds, false},
+	{"STRIKE.PRESENCE_STABLE", Must, 2, StateRefdata, strikeFeeds, false},
+	{"STRIKE.FIXED_STAYS_FIXED", Must, 2, StateRefdata, strikeFeeds, false},
 	// --- Top-of-Book ---
 	{"TOB.QUOTE.STRUCT_LEN_TYPE", Must, 1, StateNone, tobOnly, false},
 	{"TOB.QUOTE.GONE_VS_ZERO_PRICE", Must, 1, StateNone, tobOnly, false},
@@ -176,6 +186,10 @@ var conditionalExec = map[string]struct{}{
 	"REFDATA.DEFINITION_CYCLE_COVERAGE": {},
 	"REFDATA.NO_BURST_DEFINITIONS":      {},
 	"REFDATA.NEVER_REACHES_READY":       {},
+	// Strike continuity: each accepted definition is one opportunity, and there is
+	// nothing to compare it with until the instrument has an earlier definition.
+	"STRIKE.PRESENCE_STABLE":   {},
+	"STRIKE.FIXED_STAYS_FIXED": {},
 }
 
 // ConditionalExec reports whether the rule's execution is conditional, and so

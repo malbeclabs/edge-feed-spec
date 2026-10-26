@@ -4,7 +4,7 @@ Canonical vocabulary for DoubleZero Edge market data.
 
 Use these words with these meanings in specs, docs, plans, comments, identifiers, CLI flags, config keys, metric names, and log fields. If a word you want is listed under [Banned](#banned-words), use the replacement.
 
-This document specifies version **1.3.1**: the terms defined below, the banned words, and their documented exceptions. See [Versioning](#versioning) for what a level means and what has changed.
+This document specifies version **1.5.0**: the terms defined below, the banned words, and their documented exceptions. See [Versioning](#versioning) for what a level means and what has changed.
 
 ## Precedence
 
@@ -25,7 +25,7 @@ This file is the authority. A definition here overrides any local one, wherever 
 
 Use `venue` for the external exchange. `exchange` is a synonym; prefer `venue`.
 
-**A Source ID identifies a matching engine, not a venue.** Split the ID wherever the microstructure or the logic governing how orders match differs, because that is the boundary a subscriber has to reason about: a venue name tells it nothing about how a book behaves. Split it equally where two instrument sets match independently of each other under the same rules, because identical rules running over disjoint books are still two books: each opens, halts and resets on its own schedule, its interface is versioned on its own schedule, and a subscriber holding a message from one learns nothing about the state of the other. One venue therefore holds as many Source IDs as it runs engines, and a new engine at a known venue is a new ID rather than a reuse of the venue's existing one. Registry IDs are stable and never renumbered, so this only ever adds: an ID already assigned keeps meaning whichever engine has been publishing under it. Venues split their own engines on their own schedule, so treat the set as open and track it against each venue's roadmap rather than assuming today's list is final.
+**A Source ID identifies a matching engine, not a venue.** Split the ID wherever the microstructure or the logic governing how orders match differs, because that is the boundary a subscriber has to reason about: a venue name tells it nothing about how a book behaves. Split it equally where two instrument sets match independently of each other under the same rules, because identical rules running over disjoint books are still two books: each opens, halts and resets on its own schedule, its interface is versioned on its own schedule, and a subscriber holding a message from one learns nothing about the state of the other. One venue therefore holds as many Source IDs as it runs engines, and a new engine at a known venue is a new ID rather than a reuse of the venue's existing one. The Source ID Registry records one exception: an engine read through a second interface that differs in the fields a subscriber orders or deduplicates messages on holds a second ID, which still names that engine. Registry IDs are stable and never renumbered, so this only ever adds: an ID already assigned keeps meaning whichever engine has been publishing under it. Venues split their own engines on their own schedule, so treat the set as open and track it against each venue's roadmap rather than assuming today's list is final.
 
 **Independent matching is not the same as sharding.** A venue that spreads one instrument set across several processes for capacity, and can move an instrument between them, runs one engine published over several **channels**: the partition is a deployment detail and `Channel ID` already carries it. It is a second engine where the venue itself treats the boundary as durable, publishing the two as separate platforms with their own interface versions, trading calendars and session lifecycles, and no instrument crossing between them. Registry IDs are never renumbered, so read the venue's own treatment of the boundary rather than the current shape of its deployment.
 
@@ -61,6 +61,17 @@ Prefer `datagram` over `frame` or `packet` for our own traffic. A frame is a lay
 Two pairs, one per layer, and both are correct. From the network's point of view a publisher is a **transmitter** (or **sender**) and a subscriber is a **receiver**: use those for the act of moving datagrams. For the roles themselves use **publisher** and **subscriber**.
 
 Neither half of either pair is redefined here. `receiver` in particular keeps its plain meaning — anything that receives — so every subscriber is a receiver, and the specs' normative "Publishers SHOULD … receivers MUST …" is correct as written.
+
+## Reference data
+
+| Term | Definition | Not |
+|---|---|---|
+| **Strike** | The value or values that a venue compares with the settlement value to decide if a contract pays. On the wire it is an interval: a lower bound, an upper bound, or both, carried by `StrikeInterval`. | A price of the contract, a barrier |
+| **Settlement value** | The value that the venue compares with the strike. No wire field identifies it. | The price of the contract, `Leg1` |
+| **Pending** (strike) | The state of a strike that the venue has not fixed. A `StrikeInterval` with no bound present. | Unknown, unset, TBD |
+| **Fixed** (strike) | The state of a strike that the venue has fixed. A `StrikeInterval` with one or two bounds present. | Final, settled |
+
+Use `strike` for the venue fact and `StrikeInterval` for the message. `Price Bound` in `InstrumentDefinition` is a different thing: it limits the price of the contract, not the settlement value.
 
 ## Components
 
@@ -131,6 +142,10 @@ This glossary is versioned so that a spec, a repository, or a conformance pass c
 A `MAJOR` release is the expensive one, because prose, identifiers, and config keys across several repositories were written against the older ruling and each has to be revisited. Prefer recording an exception over redefining a term.
 
 ### Changes
+
+**1.5.0** — recorded the Source ID Registry's exception for a second interface: an engine read through a second interface that differs in the fields a subscriber orders or deduplicates messages on holds a second ID. The **Source ID** and **Matching engine** definitions are unchanged.
+
+**1.4.0** — defined **Strike**, **Settlement value**, **Pending** and **Fixed**, the terms that the `StrikeInterval` message of the Reference Data Distribution supplement uses. New terms only: no existing term or ban changes.
 
 **1.3.1** — editorial. The **Matching engine** example counted the HIP-3 builder DEXes as one engine and gave a fixed total; it now names them as separate engines and records that the count is open. The definition is unchanged.
 

@@ -103,6 +103,13 @@ type instanceKey struct {
 
 // portTracker holds the sequencing state of one channel instance on one port.
 type portTracker struct {
+	// src is the instance's own half of its key, kept here so that classification
+	// can name the publisher it is judging. classify() receives the tracker and
+	// not the key, and it runs from two callers — Process, which has the address,
+	// and Flush, which iterates the map and would otherwise have to thread it
+	// through every drain path.
+	src netip.Addr
+
 	// lastSeq is nil until the first frame is classified (accepted).
 	lastSeq *uint64
 	// lastSendTS is the SendTS of the last accepted, forward-seq frame.
@@ -155,6 +162,11 @@ type portTracker struct {
 	// dirtyWindow is set when a gap was declared while the reorder window was
 	// non-empty (consumed by Task 18 gate.go).
 	dirtyWindow bool
+	// taints counts the times dirtyWindow was set, and is never reset. dirtyWindow
+	// stays true for the era, so it cannot say whether a gap fell *between* two
+	// observations. A rule that compares two observations stores this count with
+	// the first one: a different count at the second one means a gap between them.
+	taints uint64
 	// captureDirty is set when the *capture* admitted losing datagrams while this
 	// instance's window was open (see Engine.ObserveCaptureLoss). It never gates
 	// anything on its own: the taint that stops a gated rule from grading a
@@ -308,6 +320,13 @@ func (t *portTracker) advanceEra(newEra uint8) {
 	// that are clearly observable in the new era.
 	t.dirtyWindow = false
 	t.captureDirty = false
+}
+
+// taint marks the window dirty. Every write of dirtyWindow = true goes through it,
+// so taints counts each one.
+func (t *portTracker) taint() {
+	t.dirtyWindow = true
+	t.taints++
 }
 
 // enqueueResult is the structured result of enqueue. The caller must process

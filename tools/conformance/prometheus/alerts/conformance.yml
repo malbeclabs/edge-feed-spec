@@ -3,8 +3,14 @@ groups:
     rules:
       # Page: any "must" rule violation in the last 5 minutes.
       # A single violation of a MUST rule means the feed is non-conformant.
+      #
+      # **Summed over `source_addr` before `increase`, and it has to be.** The label
+      # splits an instance-scoped rule into one series for each publisher. The
+      # first violation of a publisher creates its series at 1, and `increase` over
+      # one series reads that as 0. The sum over the label moves from N to N+1,
+      # which `increase` does see.
       - alert: ConformanceMustViolation
-        expr: increase(dz_conformance_violations_total{severity="must"}[5m]) > 0
+        expr: increase(sum without (source_addr) (dz_conformance_violations_total{severity="must"})[5m:]) > 0
         for: 0m
         labels:
           severity: page
@@ -35,9 +41,12 @@ groups:
       # recorder rather than the wire — and a set that silently omitted it would be
       # a second place to keep in step with core.Reason*.
       #
+      # Summed over `source_addr`, so the threshold applies to the rule and not to
+      # each publisher: 8 findings split 4 and 4 are 8.
+      #
       # See "Coverage vs. silence" in tools/conformance/README.md.
       - alert: ConformanceCoverageLoss
-        expr: increase(dz_conformance_unverifiable_total{reason=~"loss|capture_loss|overflow|untrusted"}[5m]) > 5
+        expr: increase(sum without (source_addr) (dz_conformance_unverifiable_total{reason=~"loss|capture_loss|overflow|untrusted"})[5m:]) > 5
         for: 2m
         labels:
           severity: warning

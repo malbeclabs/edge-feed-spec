@@ -1,6 +1,6 @@
 # dz-conformance
 
-A conformance subscriber for edge-feed publishers. Subscribes to one feed (TOB, Midpoint, MBO, or MBP) — live multicast or capture replay, `pcap` or `pcapng` — validates the feed against its subset of an 89-rule catalog drawn from the [edge-feed-spec](../../) (this repo), and returns a CI-friendly exit code. The subset is 32 to 69 rules depending on the feed — see [Rule catalog](#rule-catalog).
+A conformance subscriber for edge-feed publishers. Subscribes to one feed (TOB, Midpoint, MBO, or MBP) — live multicast or capture replay, `pcap` or `pcapng` — validates the feed against its subset of a 94-rule catalog drawn from the [edge-feed-spec](../../) (this repo), and returns a CI-friendly exit code. The subset is 32 to 69 rules depending on the feed — see [Rule catalog](#rule-catalog).
 
 Unlike a production consumer — which is tolerant of publisher quirks (skipping unknown types, ignoring reserved bits, recovering silently from loss) — this tool is **strict by design**: it flags every structural, sequence, and semantic violation its catalog covers, and never excuses one as a quirk. `core/registry.go` is the in-code source of truth for the full rule set.
 
@@ -136,18 +136,18 @@ For the MBO feed the engine reconstructs the order book independently from both 
 
 ## Rule catalog
 
-The full 89-rule catalog — rule ID, severity, tier, applicable feeds — is defined in `core/registry.go` (the in-code source of truth), with one-line per-rule summaries in `core/ruledoc.go`. `core/registry_test.go` and `core/ruledoc_test.go` guarantee the set stays complete and documented.
+The full 94-rule catalog — rule ID, severity, tier, applicable feeds — is defined in `core/registry.go` (the in-code source of truth), with one-line per-rule summaries in `core/ruledoc.go`. `core/registry_test.go` and `core/ruledoc_test.go` guarantee the set stays complete and documented.
 
-**No feed sees all 89.** Each rule carries the feeds it applies to, and a run reports only its own feed's subset — `rule_info` publishes exactly that subset at startup, so the denominator is visible before a frame arrives. The split today:
+**No feed sees all 94.** Each rule carries the feeds it applies to, and a run reports only its own feed's subset — `rule_info` publishes exactly that subset at startup, so the denominator is visible before a frame arrives. The split today:
 
 | Feed | Feed-specific rules | Shared rules | Total |
 |------|--------------------:|-------------:|------:|
 | `mbo` | 44 | 25 | 69 |
-| `tob` | 9 | 25 | 34 |
-| `mbp` | 8 | 25 | 33 |
+| `tob` | 14 | 25 | 39 |
+| `mbp` | 13 | 25 | 38 |
 | `midpoint` | 7 | 25 | 32 |
 
-`TestFeedRuleCounts` pins these numbers against `core.Rules`, so a new feed-scoped rule fails the build until this table is updated with it. The 25 shared rules are the frame/message structural set and the reference-data supplement, which every feed carries identically; `RESET.ANCHOR_SEQ_IS_CURRENT_FRAME` is counted feed-specific for both `mbo` and `mbp`, which is where the totals overlap. The market-by-order asymmetry is real rather than an artifact of counting: that feed's rules were written first and its per-order state model admits checks a price-aggregated book has no analogue for (dangling order IDs, overfill, duplicate live adds). What the gap does *not* mean is that the missing market-by-price checks are unwritable — see [Known limitations](#known-limitations).
+`TestFeedRuleCounts` pins these numbers against `core.Rules`, so a new feed-scoped rule fails the build until this table is updated with it. The 25 shared rules are the frame/message structural set and the reference-data supplement, which every feed carries identically; `RESET.ANCHOR_SEQ_IS_CURRENT_FRAME` is counted feed-specific for both `mbo` and `mbp`, and the five `STRIKE.*` rules for both `tob` and `mbp`, which is where the totals overlap. The `STRIKE.*` rules belong to the supplement's `StrikeInterval` message, and apply only to the feeds whose spec lists Type ID `0x09`. The market-by-order asymmetry is real rather than an artifact of counting: that feed's rules were written first and its per-order state model admits checks a price-aggregated book has no analogue for (dangling order IDs, overfill, duplicate live adds). What the gap does *not* mean is that the missing market-by-price checks are unwritable — see [Known limitations](#known-limitations).
 
 ## Quick start
 
@@ -331,9 +331,9 @@ All metrics are prefixed `dz_conformance_`.
 
 | Name | Type | Labels | Meaning |
 |------|------|--------|---------|
-| `violations_total` | counter | `feed`, `rule_id`, `severity` | Confirmed conformance violations |
-| `unverifiable_total` | counter | `feed`, `rule_id`, `reason` | Checks that could not be verified, by cause. `reason` is a closed enum (`core.Reason*`): `loss`, `capture_loss`, `cold_start`, `reorder`, `pending`, `overflow`, `truncated`, `insufficient_window`, `superseded`, `untrusted`, `bound_subset`, `transition`, `unspecified` |
-| `checks_total` | counter | `feed`, `rule_id`, `result` | All checks by result — the **denominator** for every rule, see [Coverage vs. silence](#coverage-vs-silence) |
+| `violations_total` | counter | `feed`, `rule_id`, `severity`, `source_addr` | Confirmed conformance violations. See [The `source_addr` label](#the-source_addr-label) |
+| `unverifiable_total` | counter | `feed`, `rule_id`, `reason`, `source_addr` | Checks that could not be verified, by cause. `reason` is a closed enum (`core.Reason*`): `loss`, `capture_loss`, `cold_start`, `reorder`, `pending`, `overflow`, `truncated`, `insufficient_window`, `superseded`, `untrusted`, `bound_subset`, `transition`, `unspecified` |
+| `checks_total` | counter | `feed`, `rule_id`, `result`, `source_addr` | All checks by result — the **denominator** for every rule, see [Coverage vs. silence](#coverage-vs-silence). Sum over `source_addr` to get the denominator of the channel |
 | `transport_loss_total` | counter | `port` | Transport packet-loss events by port (`mktdata`, `refdata`, `snapshot`) |
 | `transport_corruption_total` | counter | `port`, `reason` | Transport corruption events |
 | `snapshot_audits_total` | counter | `result` | Snapshot oracle outcomes (`match`, `mismatch_suspected`, `mismatch_confirmed`, `unverifiable`) |
@@ -342,7 +342,25 @@ All metrics are prefixed `dz_conformance_`.
 | `rule_info` | gauge | `rule_id`, `severity`, `summary`, `spec_url` | Always 1; static per-rule metadata for the active feed. One series per applicable rule (set once at startup). Join by `rule_id` to label the counters with a human summary and a link to the spec section. |
 | `uptime_seconds` | gauge | — | Seconds since process start |
 
-Cardinality is bounded: `rule_id` is a fixed enum (from `core/registry.go`), `port` has 3 values, `reason` is a small enum. `rule_info` adds one series per feed-applicable rule with fixed `summary`/`spec_url` label values (sourced from the registry's `RuleDoc`); these bounded strings live **only** on `rule_info`, never on the high-rate counters.
+Cardinality is bounded: `rule_id` is a fixed enum (from `core/registry.go`), `port` has 3 values, `reason` is a small enum, and `source_addr` has at most 34 values (see below). `rule_info` adds one series per feed-applicable rule with fixed `summary`/`spec_url` label values (sourced from the registry's `RuleDoc`); these bounded strings live **only** on `rule_info`, never on the high-rate counters.
+
+### The `source_addr` label
+
+A validator subscribes to a group, so it receives every path of a channel merged. `source_addr` on `violations_total`, `unverifiable_total` and `checks_total` tells the paths apart. It has three kinds of value:
+
+| Value | Meaning |
+|-------|---------|
+| an IP address | The rule judges one **channel instance**, and this is the publisher of that instance. |
+| empty | The rule judges the channel. No single publisher is its subject. |
+| `other` | The rule judges one channel instance, but the label has no value left for its publisher. |
+
+**The rule catalog decides which rules carry an address.** A rule carries one only if all the state that it reads is keyed on the channel instance. `core.StateKind.InstanceScoped` gives the answer for each row of `core/registry.go`: the tier-1 rules (`StateNone`), which judge one datagram, and the six tier-2 rules that judge one path (`StateInstanceCounters`). Five of them read the per-instance trackers: `FRAME.SEQ_DUP_DIVERGENT`, `FRAME.SEQ_RESET_GAP`, `FRAME.SEND_TS_MONOTONIC`, `FRAME.MKTDATA_SEQ_START` and `HEARTBEAT.CADENCE`. The sixth, `MBP.DELTA.ABSOLUTE_APPLY`, reads one message and no state between messages. Each other rule reads state that every path of the channel fills (see [Known limitations](#known-limitations)), so its label is always empty.
+
+**An empty value is a statement, not an unknown.** Do not resolve it to a publisher. To read the verdicts of a channel, select `source_addr=""`. To read the verdicts of one path, select its address. To get the total of a rule, sum over the label.
+
+**The label is bounded.** Nothing authorises a source address, and a `CounterVec` keeps each label value until the process stops. The first 32 addresses that a finding names each get a label value (`maxSourceAddrLabels` in `report/prom.go`). Each later address gets `other`. Those findings are still counted, so the limit costs attribution and never coverage. A redundant feed has two publishers, so a series with `source_addr="other"` means that addresses change often or that a sender floods the group. A restart of the process clears the set.
+
+**Alerts.** `ConformanceMustViolation` and `ConformanceCoverageLoss` sum over `source_addr` before they test a rule, so the label does not change when they fire. The alert does not carry the label. To find the publisher, query the counter by `rule_id` and read `source_addr`.
 
 **Note:** both `build_info` labels are wired from build vars — set them with `-ldflags "-X main.version=… -X main.commit=…"`. They default to `version="dev"`, `commit="none"`.
 
@@ -397,7 +415,7 @@ For a 24/7 deployment:
 - **Tame log volume.** Status-based levels keep the default (`WARN`) stderr stream to confirmed violations plus `Suspected` (oracle candidates) — the `Unverifiable` firehose is suppressed unless `-v` is passed; `--log-throttle` (default `1s`) bounds repeats. See [Structured log](#structured-log).
 - **Restarts reset deep verifiability, not structural checks.** Because a mid-stream join doesn't bootstrap a trusted book (see [Known limitations](#known-limitations)), every restart re-enters cold-start: the stateful referential/oracle checks stay `Unverifiable` until a fresh `Reset Count` era. **Tier-1 structural rules are restart-immune** — magic, schema, frame-length, message-count, enum/port placement fire on every frame regardless — so even a freshly (re)started or flapping instance still catches all structural non-conformance immediately; only the deep MBO/oracle coverage needs a stable, from-session-start process.
 
-Memory is bounded for indefinite operation: the per-`(era,seq)` dedup map is FIFO-evicted via a fixed `2×--reorder-window` ring (it does **not** grow with the sequence space), the per-instance tracker map is capped and evicts the least-recently-seen instance (see [Sequencing keys on the channel instance](#sequencing-keys-on-the-channel-instance)), books/trackers are keyed by the live instrument set and pruned on manifest bumps / cleared on era resets, and metric cardinality is fixed — each finding series is keyed by `feed × rule_id` plus one small bounded enum (`severity`, `result`, or `reason`), never the free-form `detail`.
+Memory is bounded for indefinite operation: the per-`(era,seq)` dedup map is FIFO-evicted via a fixed `2×--reorder-window` ring (it does **not** grow with the sequence space), the per-instance tracker map is capped and evicts the least-recently-seen instance (see [Sequencing keys on the channel instance](#sequencing-keys-on-the-channel-instance)), books/trackers are keyed by the live instrument set and pruned on manifest bumps / cleared on era resets, and metric cardinality is fixed — each finding series is keyed by `feed × rule_id × source_addr` plus one small bounded enum (`severity`, `result`, or `reason`), never the free-form `detail`. `source_addr` is bounded too (see [The `source_addr` label](#the-source_addr-label)).
 
 The market-by-price delta journal is the largest of those structures and the one to size a host against. `engine.maxMBPJournal` bounds it at 16,384 entries per instrument, 32 bytes each — 0.5 MiB per instrument, so 39 MiB for a 78-instrument venue and ~500 MiB for a 1,000-instrument one, if every instrument sat at the bound. None do in practice: the journal is pruned at every completed snapshot group, and a 78-instrument Phoenix capture peaked at 9,529 entries on its busiest instrument and 54,631 across all of them at once — 1.7 MiB. What moves that peak is the publisher's snapshot cycle, since a journal must span one rotation: stretching the cycle for bandwidth stretches this too, and an instrument whose delta rate outruns the bound goes `Unverifiable` (`unverifiable_total{reason="overflow"}`) until a snapshot baseline subsumes what was dropped, rather than the journal growing without limit.
 

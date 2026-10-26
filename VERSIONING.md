@@ -32,17 +32,17 @@ The current state of every feed:
 
 | Spec | Frame `Magic` | `Schema Version` | Version |
 |------|---------------|------------------|---------|
-| [Top-of-Book & Trades](./top-of-book/spec.md) | `0x445A` | `3` | 3.1.0 |
-| [Midpoint](./midpoint/spec.md) | `0x4D44` | `1` | 1.2.0 |
+| [Top-of-Book & Trades](./top-of-book/spec.md) | `0x445A` | `3` | 3.3.0 |
+| [Midpoint](./midpoint/spec.md) | `0x4D44` | `3` | 3.1.0 |
 | [Market-by-Order](./market-by-order/spec.md) | `0x4444` | `3` | 3.4.0 |
-| [Market-by-Price](./market-by-price/spec.md) | `0x4442` | `3` | 3.2.0 |
+| [Market-by-Price](./market-by-price/spec.md) | `0x4442` | `3` | 3.3.0 |
 | [Order-Intent](./order-intent/spec.md) | `0x494F` | `3` | 3.2.0 |
 | [Perp Stats](./perp-stats/spec.md) | `0x4450` | `3` | 3.0.1 |
-| [Reference Data Distribution](./reference-data/spec.md) | *(host feed's)* | *(host feed's)* | 1.0.2 |
-| [Source ID Registry](./sources/spec.md) | *(none)* | *(none)* | 1.5.1 |
-| [Glossary](./GLOSSARY.md) | *(none)* | *(none)* | 1.3.1 |
+| [Reference Data Distribution](./reference-data/spec.md) | *(host feed's)* | *(host feed's)* | 1.1.1 |
+| [Source ID Registry](./sources/spec.md) | *(none)* | *(none)* | 1.7.0 |
+| [Glossary](./GLOSSARY.md) | *(none)* | *(none)* | 1.5.0 |
 
-Midpoint sits at `1` while its siblings are at `3` because it was deliberately left on its 64-byte `InstrumentDefinition` variant when the shared layout changed at both `2.0.0` and `3.0.0`. This is the scheme working as intended: the specs are siblings, not a single versioned family, and a decoder reads each feed's byte to know which layout it is holding.
+Midpoint went from `1.1.0` to `3.0.0` when it adopted the shared 130-byte `InstrumentDefinition`. It has no `2.x` release. The byte equals the spec `MAJOR`, so the values need not be consecutive.
 
 `Magic` and `Schema Version` do different jobs and both are mandatory checks. `Magic` answers "is this the feed I subscribed to?" and rejects a misrouted sibling feed. `Schema Version` answers "is this a wire format I implement?" and rejects a future incompatible generation of the correct feed. Every feed spec MUST use a `Magic` value distinct from every other feed's, and feeds SHOULD use distinct multicast groups.
 
@@ -60,7 +60,11 @@ The additive row is only safe because every spec already requires decoders to sk
 
 Three changes already made under this rule, all `MINOR`, all with the `Schema Version` byte unchanged: `0x08 Liquidation` was added as a shared trade-companion message type, Asset Class value `5` (Perpetual Future) was added, and Asset Class value `6` (Dated Future) was added.
 
-Two `MAJOR` changes have been made to the shared non-midpoint `InstrumentDefinition`. Version `2.0.0` widened `Symbol` from `char[16]` to `char[64]`, moving every later field and growing the message from 80 to 128 bytes. Version `3.0.0` inserted `Source ID` (`u16`) after `Instrument ID`, shifting every later field by two bytes and growing the message to 130 bytes. Five feeds now use `Schema Version = 3`; midpoint kept its 64-byte variant and stayed at `Schema Version = 1`.
+A third `MINOR` change was made with the byte at `3`: `0x09 StrikeInterval` was added as a reference-data message type. The Reference Data Distribution supplement defines it, and the Top-of-Book and Market-by-Price feeds list it.
+
+A fourth `MINOR` change was made with the byte at `3`: the last four bytes of the Top-of-Book `0x03 Quote`, which were padding inside its declared 60 bytes, became the `Venue Update ID` field. This is a field appended within the declared `Message Length`. The message length did not change, and no field moved.
+
+Two `MAJOR` changes have been made to the shared non-midpoint `InstrumentDefinition`. Version `2.0.0` widened `Symbol` from `char[16]` to `char[64]`, moving every later field and growing the message from 80 to 128 bytes. Version `3.0.0` inserted `Source ID` (`u16`) after `Instrument ID`, shifting every later field by two bytes and growing the message to 130 bytes. Five feeds use `Schema Version = 3` from that change. Midpoint kept its 64-byte variant until its own `3.0.0`.
 
 ---
 

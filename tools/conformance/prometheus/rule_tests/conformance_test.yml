@@ -129,3 +129,46 @@ tests:
             exp_annotations:
               summary: "Conformance coverage loss on mbp feed"
               description: "Rule ORACLE became unverifiable (reason=capture_loss) on feed mbp. The recorder admits it failed to record the datagrams, so the coverage was lost between the wire and the archive: check the recorder host and its own drop counters, not the feed.\n"
+
+  # The source_addr label splits a rule by publisher. 2 loss findings per 5m on
+  # each of two publishers is 4 per series and 8 for the rule. The threshold is 5
+  # and applies to the rule, so the alert fires and carries no source_addr.
+  - interval: 1m
+    input_series:
+      - series: 'dz_conformance_unverifiable_total{feed="mbp",rule_id="HEARTBEAT.CADENCE",reason="loss",source_addr="10.0.0.1"}'
+        values: "0+0.8x30"
+      - series: 'dz_conformance_unverifiable_total{feed="mbp",rule_id="HEARTBEAT.CADENCE",reason="loss",source_addr="10.0.0.2"}'
+        values: "0+0.8x30"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: ConformanceCoverageLoss
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              feed: mbp
+              rule_id: HEARTBEAT.CADENCE
+              reason: loss
+            exp_annotations:
+              summary: "Conformance coverage loss on mbp feed"
+              description: "Rule HEARTBEAT.CADENCE became unverifiable (reason=loss) on feed mbp. Check feed health and instrument definitions.\n"
+
+  # The first Must violation of a second publisher creates its series at 1.
+  # `increase` over that one series reads 0. The alert sums over source_addr
+  # first, so the rule moves from 1 to 2 and the alert fires.
+  - interval: 1m
+    input_series:
+      - series: 'dz_conformance_violations_total{feed="mbp",rule_id="FRAME.SEQ_RESET_GAP",severity="must",source_addr="10.0.0.1"}'
+        values: "1x30"
+      - series: 'dz_conformance_violations_total{feed="mbp",rule_id="FRAME.SEQ_RESET_GAP",severity="must",source_addr="10.0.0.2"}'
+        values: "_x20 1x10"
+    alert_rule_test:
+      - eval_time: 22m
+        alertname: ConformanceMustViolation
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              feed: mbp
+              rule_id: FRAME.SEQ_RESET_GAP
+            exp_annotations:
+              summary: "Conformance MUST violation on mbp feed"
+              description: "Rule FRAME.SEQ_RESET_GAP (severity=must) fired on feed mbp. A MUST violation means the feed is non-conformant with the spec.\n"

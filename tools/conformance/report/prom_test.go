@@ -1,6 +1,7 @@
 package report
 
 import (
+	"net/netip"
 	"testing"
 
 	"github.com/malbeclabs/edge-feed-spec/tools/conformance/core"
@@ -19,8 +20,9 @@ func TestPromCounts(t *testing.T) {
 		Status:   core.Violation,
 	})
 
-	// violations_total{feed=mbo, rule_id=FRAME.MAGIC_MISMATCH, severity=must} == 1
-	if got := testutil.ToFloat64(p.violations.WithLabelValues("mbo", "FRAME.MAGIC_MISMATCH", "must")); got != 1 {
+	// violations_total{feed=mbo, rule_id=FRAME.MAGIC_MISMATCH, severity=must,
+	// source_addr=""} == 1. The finding carries no address, so the label is empty.
+	if got := testutil.ToFloat64(p.violations.WithLabelValues("mbo", "FRAME.MAGIC_MISMATCH", "must", "")); got != 1 {
 		t.Fatalf("violations_total: want 1, got %v", got)
 	}
 
@@ -62,5 +64,120 @@ func TestRuleInfo(t *testing.T) {
 		"MSG.SNAPSHOT_FLAG_MATCHES_PORT", "must", fdoc.Summary,
 		core.SpecURL("MSG.SNAPSHOT_FLAG_MATCHES_PORT", core.FeedMBP))); got != 1 {
 		t.Fatalf("rule_info{MSG.SNAPSHOT_FLAG_MATCHES_PORT} for mbp: want 1, got %v", got)
+	}
+}
+
+// TestPromSourceAddrLabel pins what the source_addr label carries: the publisher
+// for a finding that names one, and the empty string for one that does not.
+//
+// The empty case is the load-bearing half. A channel-scoped verdict shares its
+// series with every other channel-scoped verdict of that rule, which is what
+// lets a consumer separate "this path did it" from "this channel did it" by
+// reading the label alone.
+func TestPromSourceAddrLabel(t *testing.T) {
+	p := NewProm(prometheus.NewRegistry(), "", "", core.FeedMBP)
+
+	src := netip.MustParseAddr("148.51.120.6")
+	p.Record(core.Finding{
+		Feed:       core.FeedMBP,
+		RuleID:     "FRAME.MAGIC_MISMATCH",
+		Severity:   core.Must,
+		Status:     core.Violation,
+		SourceAddr: src,
+	})
+	// Channel-scoped: emit left the address unset.
+	p.Record(core.Finding{
+		Feed:     core.FeedMBP,
+		RuleID:   "MBP.SNAP.GROUP_STRUCTURE",
+		Severity: core.Must,
+		Status:   core.Violation,
+	})
+
+	if got := testutil.ToFloat64(p.violations.WithLabelValues(
+		"mbp", "FRAME.MAGIC_MISMATCH", "must", src.String())); got != 1 {
+		t.Fatalf("violations_total{source_addr=%s}: want 1, got %v", src, got)
+	}
+	if got := testutil.ToFloat64(p.violations.WithLabelValues(
+		"mbp", "MBP.SNAP.GROUP_STRUCTURE", "must", "")); got != 1 {
+		t.Fatalf("violations_total{source_addr=\"\"}: want 1, got %v", got)
+	}
+
+	// checks_total carries it too, so a rule's denominator can be read per path.
+	if got := testutil.ToFloat64(p.checks.WithLabelValues(
+		"mbp", "FRAME.MAGIC_MISMATCH", "violation", src.String())); got != 1 {
+		t.Fatalf("checks_total{source_addr=%s}: want 1, got %v", src, got)
+	}
+
+	// An unverifiable finding carries the address on its own metric as well.
+	p.Record(core.Finding{
+		Feed:       core.FeedMBP,
+		RuleID:     "FRAME.MAGIC_MISMATCH",
+		Severity:   core.Must,
+		Status:     core.Unverifiable,
+		Reason:     core.ReasonColdStart,
+		SourceAddr: src,
+	})
+	if got := testutil.ToFloat64(p.unverifiable.WithLabelValues(
+		"mbp", "FRAME.MAGIC_MISMATCH", core.ReasonColdStart, src.String())); got != 1 {
+		t.Fatalf("unverifiable_total{source_addr=%s}: want 1, got %v", src, got)
+	}
+}
+
+// TestPromSourceAddrLabelIsBounded pins the series-capacity policy. A sender
+// that is not a publisher can put any source address on a datagram, and a
+// CounterVec keeps each label value until the process stops.
+//
+// The first maxSourceAddrLabels addresses each get a label value. Each later
+// address gets sourceAddrOther, and its findings are still counted.
+func TestPromSourceAddrLabelIsBounded(t *testing.T) {
+	p := NewProm(prometheus.NewRegistry(), "", "", core.FeedMBP)
+
+	const extra = 5
+	first := netip.MustParseAddr("10.0.0.1")
+	addr := first
+	for range maxSourceAddrLabels + extra {
+		p.Record(core.Finding{
+			Feed:       core.FeedMBP,
+			RuleID:     "FRAME.MAGIC_MISMATCH",
+			Severity:   core.Must,
+			Status:     core.Violation,
+			SourceAddr: addr,
+		})
+		addr = addr.Next()
+	}
+
+	// One series for each address under the limit, and one for the other addresses.
+	if got, want := testutil.CollectAndCount(p.violations), maxSourceAddrLabels+1; got != want {
+		t.Fatalf("violations_total has %d series, want %d: the source_addr label is not bounded", got, want)
+	}
+	// No finding is dropped: each address past the limit counts in the sourceAddrOther series.
+	if got := testutil.ToFloat64(p.violations.WithLabelValues(
+		"mbp", "FRAME.MAGIC_MISMATCH", "must", sourceAddrOther)); got != extra {
+		t.Fatalf("violations_total{source_addr=%q}: want %d, got %v", sourceAddrOther, extra, got)
+	}
+
+	// An address that got a label value before the limit keeps it.
+	p.Record(core.Finding{
+		Feed:       core.FeedMBP,
+		RuleID:     "FRAME.MAGIC_MISMATCH",
+		Severity:   core.Must,
+		Status:     core.Violation,
+		SourceAddr: first,
+	})
+	if got := testutil.ToFloat64(p.violations.WithLabelValues(
+		"mbp", "FRAME.MAGIC_MISMATCH", "must", first.String())); got != 2 {
+		t.Fatalf("violations_total{source_addr=%s}: want 2, got %v", first, got)
+	}
+
+	// A finding that names no publisher stays empty after the limit is reached.
+	p.Record(core.Finding{
+		Feed:     core.FeedMBP,
+		RuleID:   "MBP.SNAP.GROUP_STRUCTURE",
+		Severity: core.Must,
+		Status:   core.Violation,
+	})
+	if got := testutil.ToFloat64(p.violations.WithLabelValues(
+		"mbp", "MBP.SNAP.GROUP_STRUCTURE", "must", "")); got != 1 {
+		t.Fatalf("violations_total{source_addr=\"\"}: want 1, got %v", got)
 	}
 }
