@@ -173,6 +173,8 @@ Publishers SHOULD use the most accurate value available; receivers MUST accept a
 
 `6` (Dated Future) identifies a futures contract with a fixed expiry. It converges to its underlying at delivery or final settlement, not by funding. A publisher that sends `6` MUST set `Expiry` to the contract's expiry, which is never `0`, and MUST set `Settle Type` to `1` (Cash) or `2` (Physical). These rules bind only a publisher that sends `6`. Dated Future instruments are not on the [Perp Stats Feed](../perp-stats/spec.md), which carries Perpetual Future instruments only.
 
+For a derivative, `Asset Class` names the instrument type, as `5` and `6` do. `Leg1` names the underlying. A new value for a derivative names a new instrument type, not a new underlying.
+
 #### Market Model Values
 
 | Value | Name |
@@ -371,7 +373,7 @@ Existing field layouts and semantics will not change within the `3.x` line. A ch
 
 ### Changes
 
-**3.3.0** — added Asset Class value `6` (Dated Future), a futures contract with a fixed expiry, and defined it beside value `5`. A publisher that sends `6` MUST set a non-zero `Expiry` and a `Settle Type` of `1` or `2`; the rules bind only that value. Additive: receivers already MUST accept any `u8` and treat unknown values as `0`. No wire-layout change; Schema Version remains `3`.
+**3.3.0** — added Asset Class value `6` (Dated Future), a futures contract with a fixed expiry, and defined it beside value `5`. A publisher that sends `6` MUST set a non-zero `Expiry` and a `Settle Type` of `1` or `2`; the rules bind only that value. For a derivative, `Asset Class` names the instrument type and `Leg1` the underlying. Additive: receivers already MUST accept any `u8` and treat unknown values as `0`. No wire-layout change; Schema Version remains `3`.
 
 **3.2.0** — additive. Defined offset 56 of `0x03 Quote` as `Venue Update ID` (`u32`): the low 32 bits of the venue's per-instrument book update counter, `0` if unavailable, compared with serial number arithmetic. The four bytes were padding inside the declared 60 bytes, so the Quote stays 60 bytes and no other field moves. The field is optional for a publisher. This release adds one publisher requirement: a publisher that does not fill the field writes `0` there. The shared encoder already writes `0`, so a publisher that uses it is conformant with no change. An old decoder ignores the bytes, so the Schema Version byte stays `3`. The Versioning section also lists a field defined in reserved bytes as a change that a `3.x` version can make. The same release defines `0` in the `Source Timestamp` of `0x03 Quote`: the venue gives no time for the update. It adds one publisher requirement: a publisher writes `0` when the venue gives no time. Publishers write `0` in this case today. `0` is the Unix epoch and is never a venue time, so a subscriber SHOULD read it as "unavailable". The `Venue Update ID` rules refer to a quote with no `Source Timestamp`.
 

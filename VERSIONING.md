@@ -60,9 +60,9 @@ The additive row is only safe because every spec already requires decoders to sk
 
 Three changes already made under this rule, all `MINOR`, all with the `Schema Version` byte unchanged: `0x08 Liquidation` was added as a shared trade-companion message type, Asset Class value `5` (Perpetual Future) was added, and Asset Class value `6` (Dated Future) was added.
 
-A third `MINOR` change was made with the byte at `3`: `0x09 StrikeInterval` was added as a reference-data message type. The Reference Data Distribution supplement defines it, and the Top-of-Book and Market-by-Price feeds list it.
+A fourth `MINOR` change was made with the byte at `3`: `0x09 StrikeInterval` was added as a reference-data message type. The Reference Data Distribution supplement defines it, and the Top-of-Book and Market-by-Price feeds list it.
 
-A fourth `MINOR` change was made with the byte at `3`: the last four bytes of the Top-of-Book `0x03 Quote`, which were padding inside its declared 60 bytes, became the `Venue Update ID` field. This is a field appended within the declared `Message Length`. The message length did not change, and no field moved.
+A fifth `MINOR` change was made with the byte at `3`: the last four bytes of the Top-of-Book `0x03 Quote`, which were padding inside its declared 60 bytes, became the `Venue Update ID` field. This is a field appended within the declared `Message Length`. The message length did not change, and no field moved.
 
 Two `MAJOR` changes have been made to the shared non-midpoint `InstrumentDefinition`. Version `2.0.0` widened `Symbol` from `char[16]` to `char[64]`, moving every later field and growing the message from 80 to 128 bytes. Version `3.0.0` inserted `Source ID` (`u16`) after `Instrument ID`, shifting every later field by two bytes and growing the message to 130 bytes. Five feeds use `Schema Version = 3` from that change. Midpoint kept its 64-byte variant until its own `3.0.0`.
 
