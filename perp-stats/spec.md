@@ -2,7 +2,7 @@
 
 The DoubleZero Perp Stats Feed is a sibling cadence feed carrying per-perpetual derived state — funding, mark price, oracle price, open interest, and premium — relayed from the venue's REST surface. It is not the order-book hot path; data originates from REST polls rather than the matching engine, so it runs on a separate cadence from the top-of-book and market-by-order feeds.
 
-This document specifies version **3.0.1**: the transport, message types, `PerpStats` wire layout, emission model, and instrument scope.
+This document specifies version **3.1.0**: the transport, message types, `PerpStats` wire layout, emission model, and instrument scope.
 
 ---
 
@@ -101,6 +101,8 @@ Sent when there is no other traffic. Receivers use this for stale-connection det
 Maps a numeric Instrument ID to human-readable metadata. Carried on the reference data port and retransmitted continuously per the [Reference Data Distribution supplement](../reference-data/spec.md). Not on the market data path.
 
 This feed uses the same 130-byte `InstrumentDefinition` layout as the top-of-book feed; see that spec for the full field table. The `InstrumentDefinition` set on this feed covers perpetual future instruments only (see Instrument Scope), so every definition on this feed carries `Asset Class = 5` (Perpetual Future).
+
+Its `char[N]` fields, `Symbol`, `Leg1` and `Leg2`, follow the [Text fields](../top-of-book/spec.md#text-fields) rules of the top-of-book feed.
 
 ### 0x06 EndOfSession (12 bytes)
 
@@ -213,7 +215,7 @@ The publisher MUST follow the cadence and atomicity rules in the [Reference Data
 
 ## Versioning and Forward Compatibility
 
-This document is version **3.0.1**, versioned independently of the sibling feed specs. The Schema Version byte in the frame header is `3` and equals this spec's MAJOR version, so it stays `3` for every `3.x.y` release and changes only on a breaking wire change. See the [Versioning Policy](../VERSIONING.md) for the full rule, the change classification, and the tag scheme.
+This document is version **3.1.0**, versioned independently of the sibling feed specs. The Schema Version byte in the frame header is `3` and equals this spec's MAJOR version, so it stays `3` for every `3.x.y` release and changes only on a breaking wire change. See the [Versioning Policy](../VERSIONING.md) for the full rule, the change classification, and the tag scheme.
 
 Because this feed defers the frame header to the top-of-book spec except for `Magic`, a MAJOR release of the top-of-book feed that changes the frame header would also require a MAJOR release here. The two Schema Version bytes are not otherwise coupled: an additive change to either feed leaves the other untouched.
 
@@ -226,6 +228,8 @@ Future `3.x` versions of this specification MAY, without a Schema Version bump:
 Existing field layouts and semantics will not change within the `3.x` line. A change that moves or resizes a field, alters a message length, or redefines existing semantics requires a MAJOR release and a Schema Version bump, which old decoders MUST reject rather than parse.
 
 ### Changes
+
+**3.1.0** — `char[N]` is UTF-8 text in place of ASCII. This feed takes `InstrumentDefinition` from the top-of-book feed, so its `Symbol`, `Leg1` and `Leg2` fields follow that spec's [Text fields](../top-of-book/spec.md#text-fields) rules. Every ASCII value stays valid. A publisher MUST truncate at a character boundary and MUST NOT write `0x00` inside the text. A decoder MUST accept bytes above `0x7F`. This is additive: it adds allowed values, and no field moves or changes size or meaning. A decoder that rejected bytes above `0x7F` must now accept them. Schema Version remains `3`.
 
 **3.0.1** — editorial. Renamed the per-poll "full sweep" to a **full pass**, added an *Identity Model* section stating that instrument identity is the `(channel_id, instrument_id)` tuple, removed the *Relationship to Sibling Feeds* enumeration (its `Magic` distinctness requirement is relocated verbatim to the [Versioning Policy](../VERSIONING.md)), and adopted the glossary's "published set". No wire change.
 
