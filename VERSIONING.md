@@ -32,11 +32,11 @@ The current state of every feed:
 
 | Spec | Frame `Magic` | `Schema Version` | Version |
 |------|---------------|------------------|---------|
-| [Top-of-Book & Trades](./top-of-book/spec.md) | `0x445A` | `3` | 3.2.0 |
-| [Midpoint](./midpoint/spec.md) | `0x4D44` | `3` | 3.0.0 |
-| [Market-by-Order](./market-by-order/spec.md) | `0x4444` | `3` | 3.3.2 |
-| [Market-by-Price](./market-by-price/spec.md) | `0x4442` | `3` | 3.2.1 |
-| [Order-Intent](./order-intent/spec.md) | `0x494F` | `3` | 3.1.0 |
+| [Top-of-Book & Trades](./top-of-book/spec.md) | `0x445A` | `3` | 3.3.0 |
+| [Midpoint](./midpoint/spec.md) | `0x4D44` | `3` | 3.1.0 |
+| [Market-by-Order](./market-by-order/spec.md) | `0x4444` | `3` | 3.4.0 |
+| [Market-by-Price](./market-by-price/spec.md) | `0x4442` | `3` | 3.3.0 |
+| [Order-Intent](./order-intent/spec.md) | `0x494F` | `3` | 3.2.0 |
 | [Perp Stats](./perp-stats/spec.md) | `0x4450` | `3` | 3.0.1 |
 | [Reference Data Distribution](./reference-data/spec.md) | *(host feed's)* | *(host feed's)* | 1.1.1 |
 | [Source ID Registry](./sources/spec.md) | *(none)* | *(none)* | 1.7.0 |
@@ -58,11 +58,11 @@ Midpoint went from `1.1.0` to `3.0.0` when it adopted the shared 130-byte `Instr
 
 The additive row is only safe because every spec already requires decoders to skip unknown Type IDs by `Message Length`, accept any `u8` in an enumerated field and treat unrecognized values as that field's unknown member, ignore unrecognized flag bits, and ignore trailing bytes within a declared `Message Length`. A decoder that does not do those things is not conformant and gets no compatibility promise.
 
-Two changes already made under this rule, both `MINOR`, both with the `Schema Version` byte unchanged: `0x08 Liquidation` was added as a shared trade-companion message type, and Asset Class value `5` (Perpetual Future) was added.
+Three changes already made under this rule, all `MINOR`, all with the `Schema Version` byte unchanged: `0x08 Liquidation` was added as a shared trade-companion message type, Asset Class value `5` (Perpetual Future) was added, and Asset Class value `6` (Dated Future) was added.
 
-A third `MINOR` change was made with the byte at `3`: `0x09 StrikeInterval` was added as a reference-data message type. The Reference Data Distribution supplement defines it, and the Top-of-Book and Market-by-Price feeds list it.
+A fourth `MINOR` change was made with the byte at `3`: `0x09 StrikeInterval` was added as a reference-data message type. The Reference Data Distribution supplement defines it, and the Top-of-Book and Market-by-Price feeds list it.
 
-A fourth `MINOR` change was made with the byte at `3`: the last four bytes of the Top-of-Book `0x03 Quote`, which were padding inside its declared 60 bytes, became the `Venue Update ID` field. This is a field appended within the declared `Message Length`. The message length did not change, and no field moved.
+A fifth `MINOR` change was made with the byte at `3`: the last four bytes of the Top-of-Book `0x03 Quote`, which were padding inside its declared 60 bytes, became the `Venue Update ID` field. This is a field appended within the declared `Message Length`. The message length did not change, and no field moved.
 
 Two `MAJOR` changes have been made to the shared non-midpoint `InstrumentDefinition`. Version `2.0.0` widened `Symbol` from `char[16]` to `char[64]`, moving every later field and growing the message from 80 to 128 bytes. Version `3.0.0` inserted `Source ID` (`u16`) after `Instrument ID`, shifting every later field by two bytes and growing the message to 130 bytes. Five feeds use `Schema Version = 3` from that change. Midpoint kept its 64-byte variant until its own `3.0.0`.
 

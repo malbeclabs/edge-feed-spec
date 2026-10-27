@@ -2,7 +2,7 @@
 
 The DoubleZero Top-of-Book & Trades Feed is a wire format for L1 price feeds delivered over the DoubleZero Edge service. It defines a compact, fixed-size, multicast-native binary protocol for publishing two-sided market data (best bid / best ask quotes and trades) from any venue with an order book.
 
-This document specifies version **3.2.0**: the frame header, application message header, and the set of message types sufficient to operate a working publisher and subscriber.
+This document specifies version **3.3.0**: the frame header, application message header, and the set of message types sufficient to operate a working publisher and subscriber.
 
 ---
 
@@ -165,10 +165,15 @@ Maps a numeric Instrument ID to human-readable metadata. Carried on the referenc
 | 3 | Prediction Scalar |
 | 4 | Prediction Categorical |
 | 5 | Perpetual Future |
+| 6 | Dated Future |
 
 Publishers SHOULD use the most accurate value available; receivers MUST accept any `u8` value and treat unknown values as `0` (Unknown).
 
 `5` (Perpetual Future) identifies a perpetual-futures instrument — no expiry, funding-based convergence to an index. Perpetual Future instruments' derived state (funding, mark/oracle price, open interest) is carried on the sibling [Perp Stats Feed](../perp-stats/spec.md); the top-of-book feed still carries their `Quote`/`Trade` and this `InstrumentDefinition`.
+
+`6` (Dated Future) identifies a futures contract with a fixed expiry. It converges to its underlying at delivery or final settlement, not by funding. A publisher that sends `6` MUST set `Expiry` to the contract's expiry, which is never `0`, and MUST set `Settle Type` to `1` (Cash) or `2` (Physical). These rules bind only a publisher that sends `6`. Dated Future instruments are not on the [Perp Stats Feed](../perp-stats/spec.md), which carries Perpetual Future instruments only.
+
+For a derivative, `Asset Class` names the instrument type, as `5` and `6` do. `Leg1` names the underlying. A new value for a derivative names a new instrument type, not a new underlying.
 
 #### Market Model Values
 
@@ -355,7 +360,7 @@ The format is fixed-size and binary, so parsing requires no allocation, no strin
 
 ## Versioning and Forward Compatibility
 
-This document is version **3.2.0**, versioned independently of the other feed specs. The Schema Version byte in the frame header is `3` and equals this spec's MAJOR version, so it stays `3` for every `3.x.y` release and changes only on a breaking wire change. See the [Versioning Policy](../VERSIONING.md) for the full rule, the change classification, and the tag scheme.
+This document is version **3.3.0**, versioned independently of the other feed specs. The Schema Version byte in the frame header is `3` and equals this spec's MAJOR version, so it stays `3` for every `3.x.y` release and changes only on a breaking wire change. See the [Versioning Policy](../VERSIONING.md) for the full rule, the change classification, and the tag scheme.
 
 Future `3.x` versions of this specification MAY, without a Schema Version bump:
 
@@ -367,6 +372,8 @@ Future `3.x` versions of this specification MAY, without a Schema Version bump:
 Existing field layouts and semantics will not change within the `3.x` line. A change that moves or resizes a field, alters a message length, or redefines existing semantics requires a MAJOR release and a Schema Version bump, which old decoders MUST reject rather than parse.
 
 ### Changes
+
+**3.3.0** — added Asset Class value `6` (Dated Future), a futures contract with a fixed expiry, and defined it beside value `5`. A publisher that sends `6` MUST set a non-zero `Expiry` and a `Settle Type` of `1` or `2`; the rules bind only that value. For a derivative, `Asset Class` names the instrument type and `Leg1` the underlying. Additive: receivers already MUST accept any `u8` and treat unknown values as `0`. No wire-layout change; Schema Version remains `3`.
 
 **3.2.0** — additive. Defined offset 56 of `0x03 Quote` as `Venue Update ID` (`u32`): the low 32 bits of the venue's per-instrument book update counter, `0` if unavailable, compared with serial number arithmetic. The four bytes were padding inside the declared 60 bytes, so the Quote stays 60 bytes and no other field moves. The field is optional for a publisher. This release adds one publisher requirement: a publisher that does not fill the field writes `0` there. The shared encoder already writes `0`, so a publisher that uses it is conformant with no change. An old decoder ignores the bytes, so the Schema Version byte stays `3`. The Versioning section also lists a field defined in reserved bytes as a change that a `3.x` version can make. The same release defines `0` in the `Source Timestamp` of `0x03 Quote`: the venue gives no time for the update. It adds one publisher requirement: a publisher writes `0` when the venue gives no time. Publishers write `0` in this case today. `0` is the Unix epoch and is never a venue time, so a subscriber SHOULD read it as "unavailable". The `Venue Update ID` rules refer to a quote with no `Source Timestamp`.
 
