@@ -64,6 +64,8 @@ A fourth `MINOR` change was made with the byte at `3`: `0x09 StrikeInterval` was
 
 A fifth `MINOR` change was made with the byte at `3`: the last four bytes of the Top-of-Book `0x03 Quote`, which were padding inside its declared 60 bytes, became the `Venue Update ID` field. This is a field appended within the declared `Message Length`. The message length did not change, and no field moved.
 
+A sixth `MINOR` change was made with the byte at `3`: `char[N]` changed from ASCII to UTF-8 text in the five feeds that define it. This redefines a field type, but it only adds allowed values. Every ASCII value stays valid, and no field moves, changes size or changes meaning. The one decoder it affects is one that rejected bytes above `0x7F`, and that decoder must now accept them.
+
 Two `MAJOR` changes have been made to the shared non-midpoint `InstrumentDefinition`. Version `2.0.0` widened `Symbol` from `char[16]` to `char[64]`, moving every later field and growing the message from 80 to 128 bytes. Version `3.0.0` inserted `Source ID` (`u16`) after `Instrument ID`, shifting every later field by two bytes and growing the message to 130 bytes. Five feeds use `Schema Version = 3` from that change. Midpoint kept its 64-byte variant until its own `3.0.0`.
 
 ---

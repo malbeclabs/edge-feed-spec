@@ -31,10 +31,18 @@ This document specifies version **3.1.0**: the frame header, application message
 | `u64` | 8 | Unsigned 64-bit integer, little-endian |
 | `i64` | 8 | Signed 64-bit integer, little-endian |
 | `i8` | 1 | Signed 8-bit integer |
-| `char[N]` | N | Fixed-length ASCII, left-justified, null-padded on right |
+| `char[N]` | N | Fixed-length UTF-8 text, left-justified, null-padded on right. See [Text fields](#text-fields). |
 | `ts_ns` | 8 | Nanoseconds since Unix epoch (`u64`) |
 | `price` | 8 | Signed 64-bit integer with per-instrument implied exponent (`i64`) |
 | `qty` | 8 | Unsigned 64-bit integer with per-instrument implied exponent (`u64`) |
+
+### Text fields
+
+A `char[N]` field holds UTF-8 text. ASCII is a subset of UTF-8, so an ASCII value is also a valid value. The publisher writes the text from the first byte of the field and sets each remaining byte to `0x00`.
+
+- The publisher MUST NOT write a `0x00` byte inside the text. The first `0x00` byte ends the text.
+- If the text is longer than `N` bytes, the publisher MUST truncate it at a character boundary. A field MUST NOT end with part of a multi-byte character.
+- A decoder MUST NOT assume that one byte is one character. A decoder MUST NOT reject a field because it contains bytes above `0x7F`.
 
 ---
 
@@ -346,7 +354,7 @@ Existing field layouts and semantics will not change within the `3.x` line. A ch
 
 ### Changes
 
-**3.1.0** — added Asset Class value `6` (Dated Future) to the value table, as top-of-book defines it. A publisher that sends `6` MUST set a non-zero `Expiry`. The top-of-book `Settle Type` rule does not apply, because this feed fixes `Settle Type` at `0`. Additive: receivers already MUST accept any `u8` and treat unknown values as `0`. No wire-layout change; Schema Version remains `3`.
+**3.1.0** — added Asset Class value `6` (Dated Future) to the value table, as top-of-book defines it. A publisher that sends `6` MUST set a non-zero `Expiry`. The top-of-book `Settle Type` rule does not apply, because this feed fixes `Settle Type` at `0`. Additive: receivers already MUST accept any `u8` and treat unknown values as `0`. No wire-layout change; Schema Version remains `3`. Also in this release: `char[N]` is UTF-8 text in place of ASCII, under the new [Text fields](#text-fields) rules. Every ASCII value stays valid. A publisher MUST truncate at a character boundary and MUST NOT write `0x00` inside the text. A decoder MUST accept bytes above `0x7F`. This is additive: it adds allowed values, and no field moves or changes size or meaning. A decoder that rejected bytes above `0x7F` must now accept them.
 
 **3.0.0** — breaking. Schema Version is now `3`. A decoder built for `1.x` MUST reject these frames. There is no `2.x` release: `3` is the Schema Version of the other feeds that use the 130-byte `InstrumentDefinition`.
 
