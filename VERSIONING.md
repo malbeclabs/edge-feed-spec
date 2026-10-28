@@ -37,7 +37,7 @@ The current state of every feed:
 | [Market-by-Order](./market-by-order/spec.md) | `0x4444` | `3` | 3.4.0 |
 | [Market-by-Price](./market-by-price/spec.md) | `0x4442` | `3` | 3.3.0 |
 | [Order-Intent](./order-intent/spec.md) | `0x494F` | `3` | 3.2.0 |
-| [Perp Stats](./perp-stats/spec.md) | `0x4450` | `3` | 3.0.1 |
+| [Perp Stats](./perp-stats/spec.md) | `0x4450` | `3` | 3.1.0 |
 | [Reference Data Distribution](./reference-data/spec.md) | *(host feed's)* | *(host feed's)* | 1.1.1 |
 | [Source ID Registry](./sources/spec.md) | *(none)* | *(none)* | 1.7.0 |
 | [Glossary](./GLOSSARY.md) | *(none)* | *(none)* | 1.5.0 |
@@ -53,16 +53,18 @@ Midpoint went from `1.1.0` to `3.0.0` when it adopted the shared 130-byte `Instr
 | Class | Example | Level | `Schema Version` | Effect on an existing decoder |
 |-------|---------|-------|------------------|-------------------------------|
 | **Editorial** | Reword a paragraph, fix a typo, add a diagram or rationale, clarify an ambiguity without changing the required behavior | `PATCH` | unchanged | None. |
-| **Additive** | Define a new message type in a reserved Type ID range; define a new value for an enumerated field; append a field within a message's declared `Message Length`; assign a new Source ID | `MINOR` | unchanged | Keeps working. It skips the unknown type by `Message Length`, maps the unknown enum value to the field's unknown member, and ignores trailing bytes. |
+| **Additive** | Define a new message type in a reserved Type ID range; define a new value for an enumerated field; append a field within a message's declared `Message Length`; assign a new Source ID; widen the allowed values of a field, where every old value keeps its meaning | `MINOR` | unchanged | Keeps working. It skips the unknown type by `Message Length`, maps the unknown enum value to the field's unknown member, ignores trailing bytes, and accepts the new values. |
 | **Breaking** | Move or resize an existing field; change a message's length; redefine the meaning of a field or flag bit; remove a message type; change a required behavior | `MAJOR` | **incremented** | MUST reject the frame. |
 
-The additive row is only safe because every spec already requires decoders to skip unknown Type IDs by `Message Length`, accept any `u8` in an enumerated field and treat unrecognized values as that field's unknown member, ignore unrecognized flag bits, and ignore trailing bytes within a declared `Message Length`. A decoder that does not do those things is not conformant and gets no compatibility promise.
+The additive row is only safe because every spec already requires decoders to skip unknown Type IDs by `Message Length`, accept any `u8` in an enumerated field and treat unrecognized values as that field's unknown member, ignore unrecognized flag bits, ignore trailing bytes within a declared `Message Length`, and accept bytes above `0x7F` in a `char[N]` field. A decoder that does not do those things is not conformant and gets no compatibility promise. The last requirement is new: the release that made `char[N]` UTF-8 text added it, because no spec had required it before. So widening a field's allowed values is `MINOR` only for that `char[N]` change. Any other widening needs its own decoder requirement first.
 
 Three changes already made under this rule, all `MINOR`, all with the `Schema Version` byte unchanged: `0x08 Liquidation` was added as a shared trade-companion message type, Asset Class value `5` (Perpetual Future) was added, and Asset Class value `6` (Dated Future) was added.
 
 A fourth `MINOR` change was made with the byte at `3`: `0x09 StrikeInterval` was added as a reference-data message type. The Reference Data Distribution supplement defines it, and the Top-of-Book and Market-by-Price feeds list it.
 
 A fifth `MINOR` change was made with the byte at `3`: the last four bytes of the Top-of-Book `0x03 Quote`, which were padding inside its declared 60 bytes, became the `Venue Update ID` field. This is a field appended within the declared `Message Length`. The message length did not change, and no field moved.
+
+A sixth `MINOR` change was made with the byte at `3`: `char[N]` changed from ASCII to UTF-8 text in the five feeds that define it, and in Perp Stats, which takes its `InstrumentDefinition` from the Top-of-Book feed. It is the Additive row's "widen the allowed values of a field": it only adds allowed values. Every ASCII value stays valid, and no field moves, changes size or changes meaning. The one decoder it affects is one that rejected bytes above `0x7F`, and that decoder must now accept them.
 
 Two `MAJOR` changes have been made to the shared non-midpoint `InstrumentDefinition`. Version `2.0.0` widened `Symbol` from `char[16]` to `char[64]`, moving every later field and growing the message from 80 to 128 bytes. Version `3.0.0` inserted `Source ID` (`u16`) after `Instrument ID`, shifting every later field by two bytes and growing the message to 130 bytes. Five feeds use `Schema Version = 3` from that change. Midpoint kept its 64-byte variant until its own `3.0.0`.
 
