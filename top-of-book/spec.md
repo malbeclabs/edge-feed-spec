@@ -37,9 +37,12 @@ This document specifies version **3.3.0**: the frame header, application message
 
 A `char[N]` field holds UTF-8 text. ASCII is a subset of UTF-8, so an ASCII value is also a valid value. The publisher writes the text from the first byte of the field and sets each remaining byte to `0x00`.
 
+- The publisher MUST write valid UTF-8.
 - The publisher MUST NOT write a `0x00` byte inside the text. The first `0x00` byte ends the text.
-- If the text is longer than `N` bytes, the publisher MUST truncate it at a character boundary. A field MUST NOT end with part of a multi-byte character.
+- If the text is longer than `N` bytes, the publisher MUST truncate it at a code point boundary: the first byte it drops MUST NOT be in the range `0x80` to `0xBF`.
+- The publisher SHOULD write the text in Unicode Normalization Form C (NFC), the composed form, so that one name has one byte sequence and a cut does not separate a letter from its accent.
 - A decoder MUST NOT assume that one byte is one character. A decoder MUST NOT reject a field because it contains bytes above `0x7F`.
+- A decoder MUST NOT discard a message because a `char[N]` field holds invalid UTF-8. A decoder MAY replace each invalid sequence with U+FFFD.
 
 ---
 
@@ -376,12 +379,13 @@ Future `3.x` versions of this specification MAY, without a Schema Version bump:
 - Define a field in bytes that the current version calls Reserved, within the declared Message Length (old decoders ignore those bytes). `Venue Update ID` in `0x03 Quote` is an example.
 - Define new message types in currently-reserved type ID ranges (old decoders skip unknown types using the Message Length field).
 - Define new values for enumerated fields such as Asset Class and Market Model (decoders MUST accept any `u8` value).
+- Widen the allowed values of a `char[N]` field, where every ASCII value keeps its meaning (decoders MUST accept bytes above `0x7F`).
 
 Existing field layouts and semantics will not change within the `3.x` line. A change that moves or resizes a field, alters a message length, or redefines existing semantics requires a MAJOR release and a Schema Version bump, which old decoders MUST reject rather than parse.
 
 ### Changes
 
-**3.3.0** — added Asset Class value `6` (Dated Future), a futures contract with a fixed expiry, and defined it beside value `5`. A publisher that sends `6` MUST set a non-zero `Expiry` and a `Settle Type` of `1` or `2`; the rules bind only that value. For a derivative, `Asset Class` names the instrument type and `Leg1` the underlying. Additive: receivers already MUST accept any `u8` and treat unknown values as `0`. No wire-layout change; Schema Version remains `3`. Also in this release: `char[N]` is UTF-8 text in place of ASCII, under the new [Text fields](#text-fields) rules. Every ASCII value stays valid. A publisher MUST truncate at a character boundary and MUST NOT write `0x00` inside the text. A decoder MUST accept bytes above `0x7F`. This is additive: it adds allowed values, and no field moves or changes size or meaning. A decoder that rejected bytes above `0x7F` must now accept them.
+**3.3.0** — added Asset Class value `6` (Dated Future), a futures contract with a fixed expiry, and defined it beside value `5`. A publisher that sends `6` MUST set a non-zero `Expiry` and a `Settle Type` of `1` or `2`; the rules bind only that value. For a derivative, `Asset Class` names the instrument type and `Leg1` the underlying. Additive: receivers already MUST accept any `u8` and treat unknown values as `0`. No wire-layout change; Schema Version remains `3`. Also in this release: `char[N]` is UTF-8 text in place of ASCII, under the new [Text fields](#text-fields) rules. Every ASCII value stays valid. A publisher MUST write valid UTF-8, MUST truncate at a code point boundary and MUST NOT write `0x00` inside the text, and SHOULD write NFC. A decoder MUST accept bytes above `0x7F` and MUST NOT discard a message over invalid UTF-8. This is additive: it adds allowed values, and no field moves or changes size or meaning. A decoder that rejected bytes above `0x7F` must now accept them.
 
 **3.2.0** — additive. Defined offset 56 of `0x03 Quote` as `Venue Update ID` (`u32`): the low 32 bits of the venue's per-instrument book update counter, `0` if unavailable, compared with serial number arithmetic. The four bytes were padding inside the declared 60 bytes, so the Quote stays 60 bytes and no other field moves. The field is optional for a publisher. This release adds one publisher requirement: a publisher that does not fill the field writes `0` there. The shared encoder already writes `0`, so a publisher that uses it is conformant with no change. An old decoder ignores the bytes, so the Schema Version byte stays `3`. The Versioning section also lists a field defined in reserved bytes as a change that a `3.x` version can make. The same release defines `0` in the `Source Timestamp` of `0x03 Quote`: the venue gives no time for the update. It adds one publisher requirement: a publisher writes `0` when the venue gives no time. Publishers write `0` in this case today. `0` is the Unix epoch and is never a venue time, so a subscriber SHOULD read it as "unavailable". The `Venue Update ID` rules refer to a quote with no `Source Timestamp`.
 

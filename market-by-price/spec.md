@@ -43,9 +43,12 @@ This document specifies version **3.3.0**: the frame header, application message
 
 A `char[N]` field holds UTF-8 text. ASCII is a subset of UTF-8, so an ASCII value is also a valid value. The publisher writes the text from the first byte of the field and sets each remaining byte to `0x00`.
 
+- The publisher MUST write valid UTF-8.
 - The publisher MUST NOT write a `0x00` byte inside the text. The first `0x00` byte ends the text.
-- If the text is longer than `N` bytes, the publisher MUST truncate it at a character boundary. A field MUST NOT end with part of a multi-byte character.
+- If the text is longer than `N` bytes, the publisher MUST truncate it at a code point boundary: the first byte it drops MUST NOT be in the range `0x80` to `0xBF`.
+- The publisher SHOULD write the text in Unicode Normalization Form C (NFC), the composed form, so that one name has one byte sequence and a cut does not separate a letter from its accent.
 - A decoder MUST NOT assume that one byte is one character. A decoder MUST NOT reject a field because it contains bytes above `0x7F`.
+- A decoder MUST NOT discard a message because a `char[N]` field holds invalid UTF-8. A decoder MAY replace each invalid sequence with U+FFFD.
 
 ---
 
@@ -928,12 +931,13 @@ Future `3.x` versions of this specification MAY, without a Schema Version bump:
 - Define new values for enumerated fields such as Update Reason, Clear Reason, Reset Reason, and Level Flags. Decoders MUST accept any `u8` value.
 - Define a positional-index addressing mode in the reserved `0x50`–`0x5F` range, for venues whose upstream identifies levels by rank rather than price. Such a mode would add message types rather than reinterpret the ones defined here, so existing subscribers skip it by `Message Length` and no addressing-mode negotiation is introduced. It is not defined in this version and MUST NOT be added speculatively.
 - Promote `Trade` to a shared cross-spec supplement. This is editorial if the layout is unchanged, but requires a coordinated release of this spec and the top-of-book feed.
+- Widen the allowed values of a `char[N]` field, where every ASCII value keeps its meaning (decoders MUST accept bytes above `0x7F`).
 
 Existing field layouts and semantics will not change within the `3.x` line. A change that moves or resizes a field, alters a message length, or redefines existing semantics requires a MAJOR release and a Schema Version bump, which old decoders MUST reject rather than parse.
 
 ### Changes
 
-**3.3.0** — added Asset Class value `6` (Dated Future) to the value table, as top-of-book defines it. The top-of-book publisher rules for `Expiry` and `Settle Type` apply. Additive: receivers already MUST accept any `u8` and treat unknown values as `0`. No wire-layout change; Schema Version remains `3`. Also in this release: `char[N]` is UTF-8 text in place of ASCII, under the new [Text fields](#text-fields) rules. Every ASCII value stays valid. A publisher MUST truncate at a character boundary and MUST NOT write `0x00` inside the text. A decoder MUST accept bytes above `0x7F`. This is additive: it adds allowed values, and no field moves or changes size or meaning. A decoder that rejected bytes above `0x7F` must now accept them.
+**3.3.0** — added Asset Class value `6` (Dated Future) to the value table, as top-of-book defines it. The top-of-book publisher rules for `Expiry` and `Settle Type` apply. Additive: receivers already MUST accept any `u8` and treat unknown values as `0`. No wire-layout change; Schema Version remains `3`. Also in this release: `char[N]` is UTF-8 text in place of ASCII, under the new [Text fields](#text-fields) rules. Every ASCII value stays valid. A publisher MUST write valid UTF-8, MUST truncate at a code point boundary and MUST NOT write `0x00` inside the text, and SHOULD write NFC. A decoder MUST accept bytes above `0x7F` and MUST NOT discard a message over invalid UTF-8. This is additive: it adds allowed values, and no field moves or changes size or meaning. A decoder that rejected bytes above `0x7F` must now accept them.
 
 **3.2.1** — editorial. The Cross-Spec Type ID Policy now lists the midpoint feed with the feeds that use the 130-byte `InstrumentDefinition`, and marks the 64-byte midpoint layout as `1.x`. The midpoint feed uses the 130-byte layout from its `3.0.0`. No wire change.
 

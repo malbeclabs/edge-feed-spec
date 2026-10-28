@@ -224,12 +224,13 @@ Future `3.x` versions of this specification MAY, without a Schema Version bump:
 - Append new fields to existing messages (old decoders ignore trailing bytes within the declared Message Length).
 - Define new message types (old decoders skip unknown types using the Message Length field).
 - Define new values for enumerated fields (decoders MUST accept any `u8` value).
+- Widen the allowed values of a `char[N]` field, where every ASCII value keeps its meaning (decoders MUST accept bytes above `0x7F`).
 
 Existing field layouts and semantics will not change within the `3.x` line. A change that moves or resizes a field, alters a message length, or redefines existing semantics requires a MAJOR release and a Schema Version bump, which old decoders MUST reject rather than parse.
 
 ### Changes
 
-**3.1.0** — `char[N]` is UTF-8 text in place of ASCII. This feed takes `InstrumentDefinition` from the top-of-book feed, so its `Symbol`, `Leg1` and `Leg2` fields follow that spec's [Text fields](../top-of-book/spec.md#text-fields) rules. Every ASCII value stays valid. A publisher MUST truncate at a character boundary and MUST NOT write `0x00` inside the text. A decoder MUST accept bytes above `0x7F`. This is additive: it adds allowed values, and no field moves or changes size or meaning. A decoder that rejected bytes above `0x7F` must now accept them. Schema Version remains `3`.
+**3.1.0** — `char[N]` is UTF-8 text in place of ASCII. This feed takes `InstrumentDefinition` from the top-of-book feed, so its `Symbol`, `Leg1` and `Leg2` fields follow that spec's [Text fields](../top-of-book/spec.md#text-fields) rules. Every ASCII value stays valid. A publisher MUST write valid UTF-8, MUST truncate at a code point boundary and MUST NOT write `0x00` inside the text, and SHOULD write NFC. A decoder MUST accept bytes above `0x7F` and MUST NOT discard a message over invalid UTF-8. This is additive: it adds allowed values, and no field moves or changes size or meaning. A decoder that rejected bytes above `0x7F` must now accept them. Schema Version remains `3`.
 
 **3.0.1** — editorial. Renamed the per-poll "full sweep" to a **full pass**, added an *Identity Model* section stating that instrument identity is the `(channel_id, instrument_id)` tuple, removed the *Relationship to Sibling Feeds* enumeration (its `Magic` distinctness requirement is relocated verbatim to the [Versioning Policy](../VERSIONING.md)), and adopted the glossary's "published set". No wire change.
 

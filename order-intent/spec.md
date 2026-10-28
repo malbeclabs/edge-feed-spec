@@ -42,9 +42,12 @@ This document specifies version **3.2.0**: the frame header, application message
 
 A `char[N]` field holds UTF-8 text. ASCII is a subset of UTF-8, so an ASCII value is also a valid value. The publisher writes the text from the first byte of the field and sets each remaining byte to `0x00`.
 
+- The publisher MUST write valid UTF-8.
 - The publisher MUST NOT write a `0x00` byte inside the text. The first `0x00` byte ends the text.
-- If the text is longer than `N` bytes, the publisher MUST truncate it at a character boundary. A field MUST NOT end with part of a multi-byte character.
+- If the text is longer than `N` bytes, the publisher MUST truncate it at a code point boundary: the first byte it drops MUST NOT be in the range `0x80` to `0xBF`.
+- The publisher SHOULD write the text in Unicode Normalization Form C (NFC), the composed form, so that one name has one byte sequence and a cut does not separate a letter from its accent.
 - A decoder MUST NOT assume that one byte is one character. A decoder MUST NOT reject a field because it contains bytes above `0x7F`.
+- A decoder MUST NOT discard a message because a `char[N]` field holds invalid UTF-8. A decoder MAY replace each invalid sequence with U+FFFD.
 
 ---
 
@@ -447,6 +450,7 @@ Future `3.x` versions of this specification MAY, without a Schema Version bump:
 - Define new message types in currently-reserved Type ID ranges (old decoders skip unknown types using the Message Length field).
 - Define new values for enumerated fields such as Side, Order Type, TIF, and Grouping (decoders MUST accept any `u8` value and treat an unrecognized one as the field's unknown/unspecified member — `2` for Side, `0` for the others).
 - Define new Event Flag bits (decoders MUST ignore flag bits they do not recognize).
+- Widen the allowed values of a `char[N]` field, where every ASCII value keeps its meaning (decoders MUST accept bytes above `0x7F`).
 
 Existing field layouts and semantics will not change within the `3.x` line. A change that moves or resizes a field, alters a message length, or redefines existing semantics requires a MAJOR release and a Schema Version bump, which old decoders MUST reject rather than parse.
 
@@ -454,7 +458,7 @@ Note that the per-venue derivations this spec deliberately leaves out of band (a
 
 ### Changes
 
-**3.2.0** — added Asset Class value `6` (Dated Future) to the inline enumeration on the `InstrumentDefinition` row, as top-of-book defines it. Additive: receivers already MUST accept any `u8` and treat unknown values as `0`. No wire-layout change; Schema Version remains `3`. Also in this release: `char[N]` is UTF-8 text in place of ASCII, under the new [Text fields](#text-fields) rules. Every ASCII value stays valid. A publisher MUST truncate at a character boundary and MUST NOT write `0x00` inside the text. A decoder MUST accept bytes above `0x7F`. This is additive: it adds allowed values, and no field moves or changes size or meaning. A decoder that rejected bytes above `0x7F` must now accept them.
+**3.2.0** — added Asset Class value `6` (Dated Future) to the inline enumeration on the `InstrumentDefinition` row, as top-of-book defines it. Additive: receivers already MUST accept any `u8` and treat unknown values as `0`. No wire-layout change; Schema Version remains `3`. Also in this release: `char[N]` is UTF-8 text in place of ASCII, under the new [Text fields](#text-fields) rules. Every ASCII value stays valid. A publisher MUST write valid UTF-8, MUST truncate at a code point boundary and MUST NOT write `0x00` inside the text, and SHOULD write NFC. A decoder MUST accept bytes above `0x7F` and MUST NOT discard a message over invalid UTF-8. This is additive: it adds allowed values, and no field moves or changes size or meaning. A decoder that rejected bytes above `0x7F` must now accept them.
 
 **3.1.0** — added Asset Class value `5` (Perpetual Future) to the inline enumeration on the `InstrumentDefinition` row, which stopped at `4` while top-of-book and market-by-price carried `5`. Additive: receivers already MUST accept any `u8` and treat unknown values as `0`. No wire-layout change; Schema Version remains `3`.
 
