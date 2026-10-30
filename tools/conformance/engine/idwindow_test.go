@@ -9,8 +9,8 @@ func TestIDWindowStaysBounded(t *testing.T) {
 	w := newIDWindow(8)
 	for id := uint64(1); id <= 10_000; id++ {
 		w.add(id)
-		if w.size() > 8 || len(w.ring) > 8 {
-			t.Fatalf("after %d adds: %d members, %d ring entries, want at most 8", id, w.size(), len(w.ring))
+		if w.size() > 8 || len(w.queue)-w.head > 16 {
+			t.Fatalf("after %d adds: %d members, %d queue entries, want at most 8 and 16", id, w.size(), len(w.queue)-w.head)
 		}
 	}
 	for id := uint64(9_993); id <= 10_000; id++ {
@@ -69,5 +69,44 @@ func TestIDWindowRemoveAndReAdd(t *testing.T) {
 	w.add(9) // the oldest current entry is 8
 	if !w.has(7) || w.has(8) || !w.has(9) {
 		t.Errorf("want {7, 9}: has(7)=%v has(8)=%v has(9)=%v", w.has(7), w.has(8), w.has(9))
+	}
+}
+
+// TestIDWindowRepeatedIDEvictsNothing: a repeated ID that is not the oldest adds
+// no member, so it must not push the oldest out. checkOrderExecute adds a Trade
+// ID once per execution, and the executions of one trade share it.
+func TestIDWindowRepeatedIDEvictsNothing(t *testing.T) {
+	w := newIDWindow(2)
+	w.add(7)
+	w.add(8)
+	w.add(8)
+	w.add(8)
+	if !w.has(7) || !w.has(8) {
+		t.Fatalf("repeats of 8 must keep 7 and 8: has(7)=%v has(8)=%v", w.has(7), w.has(8))
+	}
+	if w.mayHaveEvicted(7) {
+		t.Error("nothing was evicted")
+	}
+	w.add(9) // the oldest current entry is 7
+	if w.has(7) || !w.has(8) || !w.has(9) {
+		t.Errorf("want {8, 9}: has(7)=%v has(8)=%v has(9)=%v", w.has(7), w.has(8), w.has(9))
+	}
+}
+
+// TestIDWindowStaleEntriesStayBounded: repeats and removes leave stale entries,
+// and the queue drops them before it passes twice the limit.
+func TestIDWindowStaleEntriesStayBounded(t *testing.T) {
+	w := newIDWindow(4)
+	for i := 0; i < 10_000; i++ {
+		w.add(uint64(i % 3))
+		if i%7 == 0 {
+			w.remove(uint64(i % 3))
+		}
+		if q := len(w.queue) - w.head; q > 8 {
+			t.Fatalf("after %d operations: %d queue entries, want at most 8", i+1, q)
+		}
+	}
+	if w.evicted {
+		t.Error("three distinct IDs never exceed a limit of 4")
 	}
 }

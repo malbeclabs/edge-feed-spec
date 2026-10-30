@@ -15,14 +15,16 @@ package engine
 // decision.
 type idWindow struct {
 	limit int
-	// members maps each ID to the insertion number of its newest ring entry. An
-	// older ring entry for the same ID is stale and eviction skips it.
+	// members maps each ID to the insertion number of its newest queue entry. An
+	// older queue entry for the same ID is stale and eviction skips it.
 	members map[uint64]uint64
-	// ring holds the entries in insertion order. It grows to limit and then
-	// wraps; head is the oldest entry when the ring is full.
-	ring []idEntry
-	head int
-	next uint64
+	// queue holds the entries in insertion order, oldest at head. A re-add or a
+	// remove leaves a stale entry behind, so the queue can hold more entries than
+	// members. compact drops the stale ones before the queue passes twice the
+	// limit.
+	queue []idEntry
+	head  int
+	next  uint64
 
 	evicted    bool
 	evLo, evHi uint64
@@ -42,23 +44,39 @@ func newIDWindow(limit int) *idWindow {
 
 // add inserts id as the newest entry. If id is already a member, add makes it
 // the newest entry again.
+//
+// The window evicts only when it holds more than limit members. A re-add of a
+// member does not add a member, so it evicts nothing: with limit 2, adds 7, 8, 8
+// keep both 7 and 8. An earlier version evicted on every add once a fixed ring
+// was full, so each repeated ID pushed out another one.
 func (w *idWindow) add(id uint64) {
 	w.next++
-	n := w.next
-	// Record n first. If id is the oldest entry, eviction then sees that entry
-	// as stale and does not count id as evicted.
-	w.members[id] = n
-	if len(w.ring) < w.limit {
-		w.ring = append(w.ring, idEntry{id, n})
-	} else {
-		old := w.ring[w.head]
+	w.members[id] = w.next
+	w.queue = append(w.queue, idEntry{id, w.next})
+	for len(w.members) > w.limit {
+		old := w.queue[w.head]
+		w.head++
 		if cur, ok := w.members[old.id]; ok && cur == old.n {
 			delete(w.members, old.id)
 			w.noteEviction(old.id)
 		}
-		w.ring[w.head] = idEntry{id, n}
-		w.head = (w.head + 1) % w.limit
 	}
+	w.compact()
+}
+
+// compact drops the stale entries once the queue holds more than twice the
+// limit, so its size stays bounded and the cost of add stays constant on average.
+func (w *idWindow) compact() {
+	if len(w.queue)-w.head <= 2*w.limit {
+		return
+	}
+	kept := make([]idEntry, 0, len(w.members))
+	for _, e := range w.queue[w.head:] {
+		if cur, ok := w.members[e.id]; ok && cur == e.n {
+			kept = append(kept, e)
+		}
+	}
+	w.queue, w.head = kept, 0
 }
 
 func (w *idWindow) noteEviction(id uint64) {

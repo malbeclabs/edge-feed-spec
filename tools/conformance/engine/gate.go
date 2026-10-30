@@ -1532,6 +1532,14 @@ func (e *Engine) checkOrderCancel(ch uint8, instrID uint32, gated bool, frameSeq
 		return
 	}
 
+	// The ID can be in removed for a visible order and also belong to a later
+	// hidden order that hiddenIDs evicted. The book then cannot tell an operation
+	// on that hidden order from an operation after removal.
+	if gated && bk.hiddenIDs.mayHaveEvicted(orderID) {
+		e.unverifiedForgotten("REF.CANCEL_DANGLING_ORDER", "OrderCancel", ch, instrID, frameSeq, orderID)
+		return
+	}
+
 	if bk.removed.has(orderID) {
 		e.Emit("REF.OPERATION_AFTER_REMOVAL", statusFor(gated), core.PortMktData, frameSeq, ch, instrID,
 			fmt.Sprintf("instrument %d: OrderCancel on already-removed order id %d", instrID, orderID))
@@ -1611,6 +1619,14 @@ func (e *Engine) checkOrderExecute(ch uint8, instrID uint32, gated bool, frameSe
 	// false REF.OPERATION_AFTER_REMOVAL, REF.SIDE_PRICE_CONSISTENCY, and
 	// REF.EXEC_DANGLING_ORDER for hidden-order IDs.
 	if bk.hiddenIDs.has(orderID) {
+		return
+	}
+
+	// The ID can be in removed for a visible order and also belong to a later
+	// hidden order that hiddenIDs evicted. The book then cannot tell an operation
+	// on that hidden order from an operation after removal.
+	if gated && bk.hiddenIDs.mayHaveEvicted(orderID) {
+		e.unverifiedForgotten("REF.EXEC_DANGLING_ORDER", "OrderExecute", ch, instrID, frameSeq, orderID)
 		return
 	}
 

@@ -396,6 +396,59 @@ func TestHiddenOrderCollision(t *testing.T) {
 		}
 	})
 
+	// Cases 1b and 2b: as cases 1 and 2, but a second hidden add evicts the first
+	// from a hiddenIDs window of 1. The ID is still in removed from the visible
+	// cancel, so without the eviction check the operation reads as after removal.
+	for _, tc := range []struct {
+		name, rule string
+		op         func(seq uint32) []byte
+	}{
+		{"hidden_execute_after_hidden_eviction", "REF.EXEC_DANGLING_ORDER", func(s uint32) []byte {
+			return buildOrderExecuteFull(ch, instrID, s, orderID, 2, 0x01, 0, 50, 1)
+		}},
+		{"hidden_cancel_after_hidden_eviction", "REF.CANCEL_DANGLING_ORDER", func(s uint32) []byte {
+			return buildOrderCancelFull(ch, instrID, s, orderID, 1)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e, ac := newMBOEngineW1()
+			seq := seedGaplessHistory(e, ch, instrID, 3, 1)
+			e.mbo.book.book(ch, instrID).hiddenIDs = newIDWindow(1)
+			clearFindings(ac)
+
+			runMktdataSeq(e, buildOrderAddFull(ch, instrID, 4, orderID, 0, 1, 100, 0), seq)
+			seq++
+			runMktdataSeq(e, buildOrderCancelFull(ch, instrID, 5, orderID, 1), seq)
+			seq++
+			runMktdataSeq(e, buildOrderAddFull(ch, instrID, 6, orderID, 0, 1, 100, hiddenFlags), seq)
+			seq++
+			// A second hidden order evicts the first from the window of 1.
+			runMktdataSeq(e, buildOrderAddFull(ch, instrID, 7, orderID+100, 0, 1, 100, hiddenFlags), seq)
+			seq++
+			clearFindings(ac)
+			runMktdataSeq(e, tc.op(8), seq)
+			e.Flush()
+
+			for _, fn := range findingsFor(ac, "REF.OPERATION_AFTER_REMOVAL") {
+				if fn.Status == core.Violation {
+					t.Errorf("an evicted hidden ID must not read as after removal: %s", fn.Detail)
+				}
+			}
+			found := false
+			for _, fn := range findingsFor(ac, tc.rule) {
+				if fn.Status == core.Violation {
+					t.Errorf("%s must not be a violation: %s", tc.rule, fn.Detail)
+				}
+				if fn.Status == core.Unverifiable && fn.Reason == core.ReasonOverflow {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("%s must be Unverifiable for overflow", tc.rule)
+			}
+		})
+	}
+
 	// Case 2: visible add → visible cancel → hidden add → cancel for hidden order.
 	// Should NOT emit REF.OPERATION_AFTER_REMOVAL or REF.CANCEL_DANGLING_ORDER.
 	t.Run("hidden_cancel_after_visible_removed", func(t *testing.T) {
