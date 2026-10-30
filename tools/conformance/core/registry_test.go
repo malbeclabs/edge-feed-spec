@@ -3,8 +3,8 @@ package core
 import "testing"
 
 func TestRegistryComplete(t *testing.T) {
-	if len(Rules) != 94 {
-		t.Fatalf("registry has %d rules, want 94", len(Rules))
+	if len(Rules) != 100 {
+		t.Fatalf("registry has %d rules, want 100", len(Rules))
 	}
 	seen := map[string]bool{}
 	for _, r := range Rules {
@@ -100,7 +100,7 @@ func TestFeedRuleCounts(t *testing.T) {
 		FeedMBO:      69,
 		FeedTOB:      39,
 		FeedMBP:      38,
-		FeedMidpoint: 32,
+		FeedMidpoint: 38,
 	}
 	got := map[Feed]int{}
 	for _, r := range Rules {

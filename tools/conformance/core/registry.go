@@ -142,6 +142,13 @@ var Rules = []RuleMeta{
 	{"MID.TIMESTAMP_ORDERING", Should, 1, StateNone, midOnly, false},
 	{"MID.METHOD0_REQUIRES_DEFAULT", Must, 2, StateRefdata, midOnly, false},
 	{"MID.PRICE_BOUND", Must, 2, StateRefdata, midOnly, false},
+	// Schema 3 only.
+	{"MID.METHOD_NOT_UNKNOWN", Must, 1, StateNone, midOnly, false},
+	{"MID.VWAP_WINDOW_NONZERO", Must, 1, StateNone, midOnly, false},
+	{"MID.VWAP_EMPTY_WINDOW_SYNTHETIC", Must, 1, StateNone, midOnly, false},
+	{"MID.WINDOW_VOLUME_ONLY_VWAP", Must, 1, StateNone, midOnly, false},
+	{"MID.BOOK_FLAGS_TRADE_METHOD", Must, 1, StateNone, midOnly, false},
+	{"MID.SOURCE_ID_MATCHES_DEFINITION", Must, 2, StateRefdata, midOnly, false},
 }
 
 // conditionalExec lists the rules whose *execution* is conditional: they run only
@@ -165,12 +172,13 @@ var conditionalExec = map[string]struct{}{
 	// Snapshot-group structure: decided only when a group completes.
 	"MBP.SNAP.GROUP_STRUCTURE": {},
 	// Refdata-gated: need the instrument's definition before they can judge.
-	"FIELD.ORDERADD_PRICE_BOUND":   {},
-	"REF.EXEC_PRICE_BOUND":         {},
-	"SNAP.ORDER_PRICE_BOUND":       {},
-	"TOB.QUOTE.REFDATA_KNOWN":      {},
-	"MID.METHOD0_REQUIRES_DEFAULT": {},
-	"MID.PRICE_BOUND":              {},
+	"FIELD.ORDERADD_PRICE_BOUND":       {},
+	"REF.EXEC_PRICE_BOUND":             {},
+	"SNAP.ORDER_PRICE_BOUND":           {},
+	"TOB.QUOTE.REFDATA_KNOWN":          {},
+	"MID.METHOD0_REQUIRES_DEFAULT":     {},
+	"MID.SOURCE_ID_MATCHES_DEFINITION": {},
+	"MID.PRICE_BOUND":                  {},
 	// Reset recovery: nothing to judge until an InstrumentReset has happened, so on a
 	// stream with no reset these are silent — and used to be silent in the same way
 	// when every recovery was correct.

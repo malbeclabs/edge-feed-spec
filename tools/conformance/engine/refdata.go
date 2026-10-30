@@ -49,12 +49,16 @@ func isLaterSeq(b, a uint16) bool {
 }
 
 // defInfo holds per-instrument metadata extracted from InstrumentDefinition.
-// defaultMethod and priceBound are extracted from the feed-specific definition
-// layout and consumed by the Midpoint validator (Task 17).
+// defaultMethod, priceBound and sourceID are extracted from the feed-specific
+// definition layout and consumed by the Midpoint validator (Task 17).
 // Stale-seq detection uses the manifestSeq argument directly (not stored here).
 type defInfo struct {
 	defaultMethod uint8
 	priceBound    uint8
+	// sourceID is valid only when hasSourceID. A schema-1 layout has no
+	// Source ID.
+	sourceID    uint16
+	hasSourceID bool
 }
 
 // validZeroEvent is a ManifestSummary(Valid=0) seen with an established set, held
@@ -761,12 +765,12 @@ func (rs *refdataState) resolveValidZero(ch uint8, ev *validZeroEvent, resumed b
 //
 // sendTS is the frame-level SendTS used for cycle tracking.
 // dirty is true when the refdata port had a gap.
-// defaultMethod and priceBound are feed-specific fields extracted by the caller;
-// they are stored in defInfo for consumption by feed validators (e.g. Task 17).
+// info holds the feed-specific fields extracted by the caller; it is stored for
+// consumption by feed validators (e.g. Task 17).
 //
 // It reports whether the definition was accepted into the set. A definition that
 // was discarded gives no opportunity to the rules that judge accepted definitions.
-func (rs *refdataState) onInstrumentDef(ch uint8, instrID uint32, manifestSeq uint16, defaultMethod, priceBound uint8, sendTS uint64, dirty bool, frameSeq uint64) bool {
+func (rs *refdataState) onInstrumentDef(ch uint8, instrID uint32, manifestSeq uint16, info defInfo, sendTS uint64, dirty bool, frameSeq uint64) bool {
 	s := rs.channel(ch)
 
 	if !s.valid {
@@ -804,10 +808,7 @@ func (rs *refdataState) onInstrumentDef(ch uint8, instrID uint32, manifestSeq ui
 	}
 
 	// State transition: accept the def (with per-instrument metadata).
-	s.defs[instrID] = defInfo{
-		defaultMethod: defaultMethod,
-		priceBound:    priceBound,
-	}
+	s.defs[instrID] = info
 
 	// REFDATA.COUNT_VS_DISTINCT_DEFS: the number of distinct instrument IDs must
 	// not exceed expected_count.  (Too many defs at this seq.)
@@ -1040,7 +1041,9 @@ func (e *Engine) processRefdataFrame(f *wire.Frame, pt *portTracker) {
 				// on would grade zero values as published data.
 				continue
 			}
-			accepted := e.refdata.onInstrumentDef(ch, instrID, manifestSeq, defaultMethod, priceBound, sendTS, dirty, frameSeq)
+			info := defInfo{defaultMethod: defaultMethod, priceBound: priceBound}
+			info.sourceID, info.hasSourceID = instrDefSourceID(e.cfg.Feed, f.Header.SchemaVersion, m)
+			accepted := e.refdata.onInstrumentDef(ch, instrID, manifestSeq, info, sendTS, dirty, frameSeq)
 			// StrikeInterval has no case of its own: the supplement reads it only as
 			// the message after an accepted definition.
 			if accepted && carriesStrikeInterval(e.cfg.Feed, f.Header.SchemaVersion) {
