@@ -1528,13 +1528,26 @@ func (e *Engine) checkOrderCancel(ch uint8, instrID uint32, gated bool, frameSeq
 	// the ID appear in both hiddenIDs and removed. Checking hiddenIDs here (after
 	// live) ensures visible live-order lifecycle is unaffected while preventing
 	// false REF.OPERATION_AFTER_REMOVAL and REF.CANCEL_DANGLING_ORDER.
-	if _, hidden := bk.hiddenIDs[orderID]; hidden {
+	if bk.hiddenIDs.has(orderID) {
 		return
 	}
 
-	if _, removed := bk.removed[orderID]; removed {
+	// The ID can be in removed for a visible order and also belong to a later
+	// hidden order that hiddenIDs evicted. The book then cannot tell an operation
+	// on that hidden order from an operation after removal.
+	if gated && bk.hiddenIDs.mayHaveEvicted(orderID) {
+		e.unverifiedForgotten("REF.CANCEL_DANGLING_ORDER", "OrderCancel", ch, instrID, frameSeq, orderID)
+		return
+	}
+
+	if bk.removed.has(orderID) {
 		e.Emit("REF.OPERATION_AFTER_REMOVAL", statusFor(gated), core.PortMktData, frameSeq, ch, instrID,
 			fmt.Sprintf("instrument %d: OrderCancel on already-removed order id %d", instrID, orderID))
+		return
+	}
+
+	if gated && bk.mayHaveForgotten(orderID) {
+		e.unverifiedForgotten("REF.CANCEL_DANGLING_ORDER", "OrderCancel", ch, instrID, frameSeq, orderID)
 		return
 	}
 
@@ -1554,7 +1567,7 @@ func (e *Engine) checkOrderExecute(ch uint8, instrID uint32, gated bool, frameSe
 
 	// Record Trade ID in the exec set (for TRADE.EXEC_GROUPING cross-reference).
 	if tradeID != 0 {
-		bk.execTradeIDs[tradeID] = struct{}{}
+		bk.execTradeIDs.add(tradeID)
 	}
 
 	if lo, live := bk.live[orderID]; live {
@@ -1605,13 +1618,26 @@ func (e *Engine) checkOrderExecute(ch uint8, instrID uint32, gated bool, frameSe
 	// live) ensures visible live-order lifecycle is unaffected while preventing
 	// false REF.OPERATION_AFTER_REMOVAL, REF.SIDE_PRICE_CONSISTENCY, and
 	// REF.EXEC_DANGLING_ORDER for hidden-order IDs.
-	if _, hidden := bk.hiddenIDs[orderID]; hidden {
+	if bk.hiddenIDs.has(orderID) {
 		return
 	}
 
-	if _, removed := bk.removed[orderID]; removed {
+	// The ID can be in removed for a visible order and also belong to a later
+	// hidden order that hiddenIDs evicted. The book then cannot tell an operation
+	// on that hidden order from an operation after removal.
+	if gated && bk.hiddenIDs.mayHaveEvicted(orderID) {
+		e.unverifiedForgotten("REF.EXEC_DANGLING_ORDER", "OrderExecute", ch, instrID, frameSeq, orderID)
+		return
+	}
+
+	if bk.removed.has(orderID) {
 		e.Emit("REF.OPERATION_AFTER_REMOVAL", statusFor(gated), core.PortMktData, frameSeq, ch, instrID,
 			fmt.Sprintf("instrument %d: OrderExecute on already-removed order id %d", instrID, orderID))
+		return
+	}
+
+	if gated && bk.mayHaveForgotten(orderID) {
+		e.unverifiedForgotten("REF.EXEC_DANGLING_ORDER", "OrderExecute", ch, instrID, frameSeq, orderID)
 		return
 	}
 
@@ -1620,8 +1646,20 @@ func (e *Engine) checkOrderExecute(ch uint8, instrID uint32, gated bool, frameSe
 		fmt.Sprintf("instrument %d: OrderExecute for unknown order id %d", instrID, orderID))
 }
 
+// unverifiedForgotten reports an execute or cancel on an order ID that is not
+// live, not hidden and not removed, where the removed or hidden window possibly
+// evicted the ID. The ID can be removed, hidden or never added, so neither
+// REF.OPERATION_AFTER_REMOVAL nor the dangling rule can decide. Both rules
+// report Unverifiable with ReasonOverflow.
+func (e *Engine) unverifiedForgotten(danglingRule, msg string, ch uint8, instrID uint32, frameSeq uint64, orderID uint64) {
+	detail := fmt.Sprintf("instrument %d: %s for order id %d, which is in the range of IDs "+
+		"the book evicted from its removed or hidden window", instrID, msg, orderID)
+	e.unverified("REF.OPERATION_AFTER_REMOVAL", core.ReasonOverflow, core.PortMktData, frameSeq, ch, instrID, detail)
+	e.unverified(danglingRule, core.ReasonOverflow, core.PortMktData, frameSeq, ch, instrID, detail)
+}
+
 // checkTradeExecGrouping processes TRADE.EXEC_GROUPING: a Trade with non-zero TradeID
-// must have at least one matching OrderExecute with that TradeID in the gapless window.
+// must have at least one matching OrderExecute with that TradeID in execTradeIDs.
 // TradeID==0 is exempt.
 // gated is the pre-computed gateConsumer result (per-instrument gapless context).
 func (e *Engine) checkTradeExecGrouping(ch uint8, instrID uint32, gated bool, frameSeq uint64, m wire.Message) {
@@ -1631,7 +1669,13 @@ func (e *Engine) checkTradeExecGrouping(ch uint8, instrID uint32, gated bool, fr
 	}
 
 	bk := e.mbo.book.book(ch, instrID)
-	if _, seen := bk.execTradeIDs[tradeID]; !seen {
+	if !bk.execTradeIDs.has(tradeID) {
+		if gated && bk.execTradeIDs.mayHaveEvicted(tradeID) {
+			e.unverified("TRADE.EXEC_GROUPING", core.ReasonOverflow, core.PortMktData, frameSeq, ch, instrID,
+				fmt.Sprintf("instrument %d: Trade id %d has no OrderExecute in the Trade ID window, "+
+					"which evicted IDs in this range", instrID, tradeID))
+			return
+		}
 		// No matching OrderExecute seen with this TradeID.
 		st := core.Unverifiable
 		if gated {

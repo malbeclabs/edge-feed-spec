@@ -396,6 +396,59 @@ func TestHiddenOrderCollision(t *testing.T) {
 		}
 	})
 
+	// Cases 1b and 2b: as cases 1 and 2, but a second hidden add evicts the first
+	// from a hiddenIDs window of 1. The ID is still in removed from the visible
+	// cancel, so without the eviction check the operation reads as after removal.
+	for _, tc := range []struct {
+		name, rule string
+		op         func(seq uint32) []byte
+	}{
+		{"hidden_execute_after_hidden_eviction", "REF.EXEC_DANGLING_ORDER", func(s uint32) []byte {
+			return buildOrderExecuteFull(ch, instrID, s, orderID, 2, 0x01, 0, 50, 1)
+		}},
+		{"hidden_cancel_after_hidden_eviction", "REF.CANCEL_DANGLING_ORDER", func(s uint32) []byte {
+			return buildOrderCancelFull(ch, instrID, s, orderID, 1)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e, ac := newMBOEngineW1()
+			seq := seedGaplessHistory(e, ch, instrID, 3, 1)
+			e.mbo.book.book(ch, instrID).hiddenIDs = newIDWindow(1)
+			clearFindings(ac)
+
+			runMktdataSeq(e, buildOrderAddFull(ch, instrID, 4, orderID, 0, 1, 100, 0), seq)
+			seq++
+			runMktdataSeq(e, buildOrderCancelFull(ch, instrID, 5, orderID, 1), seq)
+			seq++
+			runMktdataSeq(e, buildOrderAddFull(ch, instrID, 6, orderID, 0, 1, 100, hiddenFlags), seq)
+			seq++
+			// A second hidden order evicts the first from the window of 1.
+			runMktdataSeq(e, buildOrderAddFull(ch, instrID, 7, orderID+100, 0, 1, 100, hiddenFlags), seq)
+			seq++
+			clearFindings(ac)
+			runMktdataSeq(e, tc.op(8), seq)
+			e.Flush()
+
+			for _, fn := range findingsFor(ac, "REF.OPERATION_AFTER_REMOVAL") {
+				if fn.Status == core.Violation {
+					t.Errorf("an evicted hidden ID must not read as after removal: %s", fn.Detail)
+				}
+			}
+			found := false
+			for _, fn := range findingsFor(ac, tc.rule) {
+				if fn.Status == core.Violation {
+					t.Errorf("%s must not be a violation: %s", tc.rule, fn.Detail)
+				}
+				if fn.Status == core.Unverifiable && fn.Reason == core.ReasonOverflow {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("%s must be Unverifiable for overflow", tc.rule)
+			}
+		})
+	}
+
 	// Case 2: visible add → visible cancel → hidden add → cancel for hidden order.
 	// Should NOT emit REF.OPERATION_AFTER_REMOVAL or REF.CANCEL_DANGLING_ORDER.
 	t.Run("hidden_cancel_after_visible_removed", func(t *testing.T) {
@@ -871,4 +924,153 @@ func TestExecPriceBound(t *testing.T) {
 			t.Error("positive exec price must report a pass; without one this case is indistinguishable from the gate never opening")
 		}
 	})
+}
+
+// withIDWindowLimits sets the per-instrument idWindow limits for one test. A
+// book reads them when the engine creates it, so call this before the first
+// message for the instrument.
+func withIDWindowLimits(t *testing.T, removed, hidden, trade int) {
+	t.Helper()
+	r, h, tr := maxRemovedIDs, maxHiddenIDs, maxExecTradeIDs
+	maxRemovedIDs, maxHiddenIDs, maxExecTradeIDs = removed, hidden, trade
+	t.Cleanup(func() { maxRemovedIDs, maxHiddenIDs, maxExecTradeIDs = r, h, tr })
+}
+
+// overflowFindings returns the findings for ruleID, and fails the test if one
+// of them is not Unverifiable with ReasonOverflow.
+func overflowFindings(t *testing.T, ac *allCapture, ruleID string) int {
+	t.Helper()
+	fs := findingsFor(ac, ruleID)
+	for _, f := range fs {
+		if f.Status != core.Unverifiable || f.Reason != core.ReasonOverflow {
+			t.Errorf("%s: got status %v reason %q, want Unverifiable overflow (%s)", ruleID, f.Status, f.Reason, f.Detail)
+		}
+	}
+	return len(fs)
+}
+
+// TestRemovedWindowEviction: the removed set keeps the most recent
+// maxRemovedIDs IDs. An operation on an evicted ID is Unverifiable (overflow),
+// not a violation. An operation on a removed ID in the window, or on an ID out
+// of the evicted range, still gets a decision.
+func TestRemovedWindowEviction(t *testing.T) {
+	const ch, instrID = uint8(1), uint32(120)
+	withIDWindowLimits(t, 2, 2, 2)
+
+	e, ac := newMBOEngineW1()
+	seq := seedGaplessHistory(e, ch, instrID, 3, 1)
+	per := uint32(4)
+	step := func(raw []byte) { runMktdataSeq(e, raw, seq); seq++; per++ }
+
+	// Add and cancel orders 1, 2 and 3. Order 1 leaves the removed window.
+	for id := uint64(1); id <= 3; id++ {
+		step(buildOrderAddFull(ch, instrID, per, id, 0, 1, 100, 0))
+		step(buildOrderCancelFull(ch, instrID, per, id, 1))
+	}
+	bk := e.mbo.book.book(ch, instrID)
+	if bk.removed.size() != 2 {
+		t.Fatalf("removed holds %d IDs, want the limit 2", bk.removed.size())
+	}
+	e.Flush()
+	clearFindings(ac)
+
+	t.Run("evicted_id_is_unverifiable", func(t *testing.T) {
+		step(buildOrderCancelFull(ch, instrID, per, 1, 1))
+		step(buildOrderExecuteFull(ch, instrID, per, 1, 1, 0, 0, 100, 1))
+		e.Flush()
+		if n := overflowFindings(t, ac, "REF.OPERATION_AFTER_REMOVAL"); n != 2 {
+			t.Errorf("REF.OPERATION_AFTER_REMOVAL: %d findings, want 2", n)
+		}
+		if n := overflowFindings(t, ac, "REF.CANCEL_DANGLING_ORDER"); n != 1 {
+			t.Errorf("REF.CANCEL_DANGLING_ORDER: %d findings, want 1", n)
+		}
+		if n := overflowFindings(t, ac, "REF.EXEC_DANGLING_ORDER"); n != 1 {
+			t.Errorf("REF.EXEC_DANGLING_ORDER: %d findings, want 1", n)
+		}
+		clearFindings(ac)
+	})
+
+	t.Run("id_in_window_is_violation", func(t *testing.T) {
+		step(buildOrderCancelFull(ch, instrID, per, 3, 1))
+		e.Flush()
+		if !hasViolation(ac, "REF.OPERATION_AFTER_REMOVAL") {
+			t.Error("cancel of removed order 3, still in the window, must be a violation")
+		}
+		clearFindings(ac)
+	})
+
+	t.Run("id_above_evicted_range_is_violation", func(t *testing.T) {
+		step(buildOrderCancelFull(ch, instrID, per, 1_000, 1))
+		e.Flush()
+		if !hasViolation(ac, "REF.CANCEL_DANGLING_ORDER") {
+			t.Error("cancel of never-added order 1000, above every evicted ID, must be a violation")
+		}
+		if n := len(findingsFor(ac, "REF.OPERATION_AFTER_REMOVAL")); n != 0 {
+			t.Errorf("REF.OPERATION_AFTER_REMOVAL: %d findings, want 0", n)
+		}
+		clearFindings(ac)
+	})
+}
+
+// TestHiddenWindowEviction: an execute or cancel on a hidden ID that the hidden
+// window evicted is Unverifiable (overflow), not a dangling violation.
+func TestHiddenWindowEviction(t *testing.T) {
+	const ch, instrID = uint8(1), uint32(121)
+	withIDWindowLimits(t, 2, 1, 2)
+
+	e, ac := newMBOEngineW1()
+	seq := seedGaplessHistory(e, ch, instrID, 3, 1)
+	const hidden = uint8(0x04)
+	runMktdataSeq(e, buildOrderAddFull(ch, instrID, 4, 10, 0, 1, 100, hidden), seq)
+	runMktdataSeq(e, buildOrderAddFull(ch, instrID, 5, 20, 0, 1, 100, hidden), seq+1) // evicts 10
+	e.Flush()
+	clearFindings(ac)
+
+	runMktdataSeq(e, buildOrderCancelFull(ch, instrID, 6, 10, 1), seq+2)
+	e.Flush()
+	if hasViolation(ac, "REF.CANCEL_DANGLING_ORDER") {
+		t.Error("cancel of evicted hidden order 10 must not be a dangling violation")
+	}
+	if n := overflowFindings(t, ac, "REF.CANCEL_DANGLING_ORDER"); n != 1 {
+		t.Errorf("REF.CANCEL_DANGLING_ORDER: %d findings, want 1 Unverifiable overflow", n)
+	}
+}
+
+// TestTradeIDWindowEviction: a Trade whose Trade ID the window evicted is
+// Unverifiable (overflow). A Trade ID above the evicted range is a violation.
+func TestTradeIDWindowEviction(t *testing.T) {
+	const ch, instrID = uint8(1), uint32(122)
+	withIDWindowLimits(t, 2, 2, 2)
+
+	e, ac := newMBOEngineW1()
+	seq := seedGaplessHistory(e, ch, instrID, 3, 1)
+	const orderID = uint64(42)
+	runMktdataSeq(e, buildOrderAddFull(ch, instrID, 4, orderID, 1, 1, 100, 0), seq)
+	seq++
+	per := uint32(5)
+	for tradeID := uint64(1); tradeID <= 3; tradeID++ { // trade 1 leaves the window
+		runMktdataSeq(e, buildOrderExecuteFull(ch, instrID, per, orderID, 1, 0, tradeID, 100, 1), seq)
+		seq++
+		per++
+	}
+	if n := e.mbo.book.book(ch, instrID).execTradeIDs.size(); n != 2 {
+		t.Fatalf("execTradeIDs holds %d IDs, want the limit 2", n)
+	}
+	e.Flush()
+	clearFindings(ac)
+
+	runMktdataSeq(e, buildTradeFull(ch, instrID, 0, 1), seq)
+	e.Flush()
+	if n := overflowFindings(t, ac, "TRADE.EXEC_GROUPING"); n != 1 {
+		t.Errorf("TRADE.EXEC_GROUPING: %d findings for evicted trade 1, want 1 Unverifiable overflow", n)
+	}
+	clearFindings(ac)
+
+	runMktdataSeq(e, buildTradeFull(ch, instrID, 0, 3), seq+1)
+	runMktdataSeq(e, buildTradeFull(ch, instrID, 0, 999), seq+2)
+	e.Flush()
+	fs := findingsFor(ac, "TRADE.EXEC_GROUPING")
+	if len(fs) != 1 || fs[0].Status != core.Violation {
+		t.Errorf("want one violation for trade 999 and nothing for trade 3 (in the window), got %v", fs)
+	}
 }
