@@ -32,7 +32,8 @@ groups:
       #
       #   loss         a datagram went missing
       #   capture_loss the recorder admits it failed to record datagrams
-      #   overflow     a bounded buffer was outrun (snapshot cycle too long for it)
+      #   overflow     a bounded buffer was outrun (snapshot cycle too long for it,
+      #                or an MBO message for an ID older than the book's ID window)
       #   untrusted    an instrument's history never became established
       #
       # `capture_loss` reaches a scrape only from a replay run with --metrics-addr,

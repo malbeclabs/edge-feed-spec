@@ -10,7 +10,14 @@ package engine
 //
 //	liveOrder    { side, sourceID, price, remaining, orderFlags, enterTS }
 //	liveOrders   map[uint64]liveOrder    — orders currently open
-//	removedOrders map[uint64]struct{}    — orders that have been fully cancelled or filled
+//	removed      *idWindow               — orders that have been fully cancelled or filled
+//	hiddenIDs    *idWindow               — IDs seen in hidden OrderAdd messages
+//	execTradeIDs *idWindow               — Trade IDs seen in OrderExecute messages
+//
+// The three idWindow sets have a fixed size (maxRemovedIDs, maxHiddenIDs,
+// maxExecTradeIDs per instrument). Without the limit they grow for the full
+// length of a Reset Count era. A miss on an ID that the window possibly evicted
+// is Unverifiable with ReasonOverflow, not a violation (see idwindow.go).
 //
 // Lifecycle transitions:
 //
@@ -30,7 +37,7 @@ package engine
 //
 // Trade (0x04) rules:
 //
-//	TRADE.EXEC_GROUPING — non-zero TradeID must have a matching OrderExecute in window
+//	TRADE.EXEC_GROUPING — non-zero TradeID must have a matching OrderExecute in execTradeIDs
 //
 // Exemptions:
 //   - Hidden orders (OrderFlags bit 2 == 1): not tracked in live/removed; their
@@ -39,6 +46,28 @@ package engine
 //   - Trade with TradeID == 0: exempt from EXEC_GROUPING.
 
 import "errors"
+
+// The per-instrument limits of the idWindow sets. Each entry costs about 55
+// bytes (map entry and ring entry), so one instrument at all three limits uses
+// about 17 MiB. These are variables, not constants, so that tests can make a
+// window evict after a few IDs.
+//
+// maxRemovedIDs decides how long REF.OPERATION_AFTER_REMOVAL can see an order
+// after it leaves the book: 131,072 removals on that instrument. A publisher
+// defect of this type (a second cancel, an execute after a cancel) usually
+// occurs within a few messages of the removal.
+//
+// maxHiddenIDs is the same size. A hidden order rests in the book, so a hidden
+// order that is older than 131,072 newer hidden orders on the same instrument
+// makes its execute or cancel Unverifiable.
+//
+// maxExecTradeIDs can be smaller: a Trade arrives next to its OrderExecute
+// messages.
+var (
+	maxRemovedIDs   = 1 << 17
+	maxHiddenIDs    = 1 << 17
+	maxExecTradeIDs = 1 << 16
+)
 
 // Typed errors returned by the book mutation methods.
 // Task 25 will switch on these to emit the corresponding findings.
@@ -81,23 +110,24 @@ type instrBook struct {
 	live map[uint64]liveOrder
 	// removed holds IDs of orders that have been cancelled or fully filled.
 	// Kept as a set to distinguish "dangling" (never seen) from "after removal".
-	removed map[uint64]struct{}
+	// It keeps the most recent maxRemovedIDs IDs.
+	removed *idWindow
 	// hiddenIDs holds the set of order IDs seen in hidden OrderAdd messages
 	// (OrderFlags bit 2 = 1). Hidden orders share ID slots by spec and are not
 	// tracked in live/removed, but execute/cancel for a hidden-add ID must not
-	// be flagged as dangling.
-	hiddenIDs map[uint64]struct{}
-	// execTradeIDs holds the set of Trade IDs seen in OrderExecute messages
-	// within the current gapless window. Used by TRADE.EXEC_GROUPING.
-	execTradeIDs map[uint64]struct{}
+	// be flagged as dangling. It keeps the most recent maxHiddenIDs IDs.
+	hiddenIDs *idWindow
+	// execTradeIDs holds the most recent maxExecTradeIDs Trade IDs seen in
+	// OrderExecute messages. Used by TRADE.EXEC_GROUPING.
+	execTradeIDs *idWindow
 }
 
 func newInstrBook() *instrBook {
 	return &instrBook{
 		live:         make(map[uint64]liveOrder),
-		removed:      make(map[uint64]struct{}),
-		hiddenIDs:    make(map[uint64]struct{}),
-		execTradeIDs: make(map[uint64]struct{}),
+		removed:      newIDWindow(maxRemovedIDs),
+		hiddenIDs:    newIDWindow(maxHiddenIDs),
+		execTradeIDs: newIDWindow(maxExecTradeIDs),
 	}
 }
 
@@ -114,7 +144,7 @@ func (bk *instrBook) applyOrderAdd(orderID uint64, side uint8, price int64, qty 
 // Called by the engine layer which has the full message context.
 func (bk *instrBook) applyOrderAddFull(orderID uint64, sourceID uint16, side uint8, price int64, qty uint64, orderFlags uint8, enterTS uint64) error {
 	if isHidden(orderFlags) {
-		bk.hiddenIDs[orderID] = struct{}{}
+		bk.hiddenIDs.add(orderID)
 		return nil
 	}
 	bk.live[orderID] = liveOrder{
@@ -125,7 +155,7 @@ func (bk *instrBook) applyOrderAddFull(orderID uint64, sourceID uint16, side uin
 		orderFlags: orderFlags,
 		enterTS:    enterTS,
 	}
-	delete(bk.removed, orderID)
+	bk.removed.remove(orderID)
 	return nil
 }
 
@@ -144,10 +174,10 @@ func (bk *instrBook) applyOrderExecute(orderID uint64, execQty uint64, fullFill 
 	lo, live := bk.live[orderID]
 	if !live {
 		// Not in live — check hidden.
-		if _, hidden := bk.hiddenIDs[orderID]; hidden {
+		if bk.hiddenIDs.has(orderID) {
 			// Hidden: qty conservation is exempt; remove if full fill.
 			if fullFill {
-				bk.removed[orderID] = struct{}{}
+				bk.removed.add(orderID)
 			}
 			return nil
 		}
@@ -160,7 +190,7 @@ func (bk *instrBook) applyOrderExecute(orderID uint64, execQty uint64, fullFill 
 		// Hidden order in live map (shouldn't normally happen, but be safe).
 		if fullFill {
 			delete(bk.live, orderID)
-			bk.removed[orderID] = struct{}{}
+			bk.removed.add(orderID)
 		}
 		return nil
 	}
@@ -172,7 +202,7 @@ func (bk *instrBook) applyOrderExecute(orderID uint64, execQty uint64, fullFill 
 	if execQty > lo.remaining {
 		if fullFill {
 			delete(bk.live, orderID)
-			bk.removed[orderID] = struct{}{}
+			bk.removed.add(orderID)
 		}
 		return errOverfill
 	}
@@ -180,7 +210,7 @@ func (bk *instrBook) applyOrderExecute(orderID uint64, execQty uint64, fullFill 
 		// Remove even though the quantities disagree: the full-fill flag signals
 		// the order is done, so keeping it live would corrupt downstream state.
 		delete(bk.live, orderID)
-		bk.removed[orderID] = struct{}{}
+		bk.removed.add(orderID)
 		return errFullFillDisagree
 	}
 
@@ -188,7 +218,7 @@ func (bk *instrBook) applyOrderExecute(orderID uint64, execQty uint64, fullFill 
 
 	if fullFill || lo.remaining == 0 {
 		delete(bk.live, orderID)
-		bk.removed[orderID] = struct{}{}
+		bk.removed.add(orderID)
 		return nil
 	}
 
@@ -203,7 +233,7 @@ func (bk *instrBook) applyOrderExecute(orderID uint64, execQty uint64, fullFill 
 func (bk *instrBook) applyOrderCancel(orderID uint64) error {
 	if _, live := bk.live[orderID]; live {
 		delete(bk.live, orderID)
-		bk.removed[orderID] = struct{}{}
+		bk.removed.add(orderID)
 	}
 	return nil
 }
@@ -262,6 +292,13 @@ func (bs *bookState) onManifestBump(ch uint8, survivingInstrIDs map[uint32]struc
 			delete(bs.books, key)
 		}
 	}
+}
+
+// mayHaveForgotten reports whether orderID can be an ID that removed or
+// hiddenIDs evicted. The book then cannot tell an operation after removal, an
+// operation on a hidden order and a dangling operation apart.
+func (bk *instrBook) mayHaveForgotten(orderID uint64) bool {
+	return bk.removed.mayHaveEvicted(orderID) || bk.hiddenIDs.mayHaveEvicted(orderID)
 }
 
 // onInstrumentReset clears the book for a single instrument.
