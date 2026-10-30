@@ -620,10 +620,25 @@ func (e *Engine) finishMBPSnapshot(m wire.Message, ch uint8, seq uint64) {
 	//
 	// The three field mismatches and an under-count are all shapes a dropped
 	// datagram produces from a conformant publisher — a lost SnapshotEnd leaves the
-	// *next* group's End to be matched against this Begin — so each is gated. An
-	// over-count and a repeated key are not: loss removes messages, it never adds
-	// one.
+	// *next* group's End to be matched against this Begin — so each is gated.
+	//
+	// An over-count and a repeated key are Violations unless this group may have
+	// **absorbed the next one**. Loss removes messages, but losing this group's End
+	// *and* the next group's Begin merges two groups: the next instrument's levels
+	// then count against this Begin whenever they carry the same Snapshot ID, which
+	// is the ordinary case for a publisher minting the ID per instrument and
+	// snapshotting round-robin (every instrument advances once per pass). The
+	// signature is exact: an intra-group snapshot-port gap AND an End that is not
+	// this group's own. An End that matches all three fields is this group's, and
+	// nothing from another group can precede it, so over-count stays ungated there.
 	gated := e.mbpGroupStatus(ch, open)
+	endIsForeign := instrID != open.key.instrID ||
+		snapshotEndAnchorSeq(m) != open.anchor ||
+		snapshotEndSnapshotID(m) != open.snapID
+	merged := core.Violation
+	if open.dirty && endIsForeign {
+		merged = gated
+	}
 	ok := true
 	if instrID != open.key.instrID {
 		e.Emit("MBP.SNAP.GROUP_STRUCTURE", gated, core.PortSnapshot, seq, ch, instrID,
@@ -644,7 +659,7 @@ func (e *Engine) finishMBPSnapshot(m wire.Message, ch uint8, seq uint64) {
 		ok = false
 	}
 	if open.count != open.total {
-		st := core.Violation
+		st := merged
 		if open.count < open.total {
 			st = gated
 		}
@@ -654,8 +669,9 @@ func (e *Engine) finishMBPSnapshot(m wire.Message, ch uint8, seq uint64) {
 		ok = false
 	}
 	if open.dupKeys > 0 {
-		e.Emit("MBP.SNAP.GROUP_STRUCTURE", core.Violation, core.PortSnapshot, seq, ch, open.key.instrID,
-			fmt.Sprintf("group repeated %d (Side, Price) key(s); a level is identified by that tuple", open.dupKeys))
+		e.Emit("MBP.SNAP.GROUP_STRUCTURE", merged, core.PortSnapshot, seq, ch, open.key.instrID,
+			fmt.Sprintf("group repeated %d (Side, Price) key(s); a level is identified by that tuple", open.dupKeys),
+			mbpReason(merged))
 		ok = false
 	}
 	if !ok {
