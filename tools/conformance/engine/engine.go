@@ -521,6 +521,36 @@ func (e *Engine) snapPortDirty(ch uint8) bool {
 	return e.dirtyOn(core.PortSnapshot, ch)
 }
 
+// markCorrupt records one transport corruption finding on a port. ch is the
+// frame's Channel ID, or nil when the header did not decode.
+func (e *Engine) markCorrupt(port core.Port, ruleID string, ch *uint8) {
+	e.rep.TransportCorruption(port, ruleID)
+	// F2: transport corruption taints the port's verifiability window.
+	// A corrupted frame on the snapshot port means the snapshot data
+	// (e.g. order counts) may be untrustworthy, so the snapshot port is
+	// treated the same as a gap — dirtyWindow = true prevents false-positive
+	// Violations from snapshot under-count and related rules.
+	//
+	// Port-wide and not this instance: a truncated datagram has no
+	// trustworthy Channel ID, so the instance it was keyed under may not
+	// exist on the wire at all. See taintPortWide (F1).
+	e.taintPortWide(port)
+	// The SNAP.TOTAL_ORDERS_COUNT_MATCH under-count check gates on the
+	// in-flight group's own dirty flag, not the port flag, so also taint the
+	// currently-open snapshot group for this channel (if any). A truncated
+	// snapshot frame can drop trailing SnapshotOrders without leaving a
+	// snapshot-seq gap, so without this the under-count would falsely
+	// classify as a publisher Violation rather than Unverifiable (F2). Without
+	// a Channel ID, every open group.
+	if port == core.PortSnapshot && e.mbo != nil {
+		for c, open := range e.mbo.openSnaps {
+			if open != nil && (ch == nil || c == *ch) {
+				open.dirty = true
+			}
+		}
+	}
+}
+
 // Process is called once per decoded frame. It enqueues the intake tuple into
 // the reorder buffer of its (port, channel) series. Classification (structural
 // findings + tier1 + seq detector rules) runs when items are popped from the
@@ -534,6 +564,19 @@ func (e *Engine) Process(src netip.Addr, f *wire.Frame, port core.Port, sf []wir
 	// classification last saw, and on a group two publishers share that is the other one.
 	e.curSrc = src
 
+	// A datagram shorter than the frame header decodes to the all-zero header. Its
+	// Channel ID, Sequence Number and Reset Count are not the publisher's, so it
+	// stays out of the sequence and era tracking of every channel instance: a
+	// Reset Count 0 read from it reset channel 0. Only its corruption counts.
+	if len(f.Raw) < wire.FrameHeaderLen {
+		for _, s := range sf {
+			if s.Transport {
+				e.markCorrupt(port, s.RuleID, nil)
+			}
+		}
+		return
+	}
+
 	pt := e.instanceTrack(src, port, f.Header.ChannelID)
 	if !pt.lastArrivalSendTSSet || f.Header.SendTS > pt.lastArrivalSendTS {
 		pt.lastArrivalSendTS = f.Header.SendTS
@@ -543,7 +586,7 @@ func (e *Engine) Process(src netip.Addr, f *wire.Frame, port core.Port, sf []wir
 
 	res := pt.enqueue(tuple, e.cfg.ReorderWindow)
 	if res.quarantine {
-		// A straggler of the era this port left last: account as transport loss, never classify.
+		// A late datagram of an era this port left: account as transport loss, never classify.
 		e.rep.TransportLoss(port)
 		return
 	}
@@ -556,6 +599,13 @@ func (e *Engine) Process(src netip.Addr, f *wire.Frame, port core.Port, sf []wir
 	// Step 2: advance era and enqueue the new-era item (on a Reset Count change).
 	if res.advanceEra {
 		pt.advanceEra(res.newEra)
+		// The advance ends a run of stragglers: the port dropped the first datagrams
+		// of the era it enters, so the era starts tainted, not clean. The rules
+		// that read the window then cannot charge the publisher for what this port
+		// dropped, such as a snapshot group whose SnapshotBegin it dropped.
+		if res.afterStragglers {
+			pt.taint()
+		}
 		// Reset Count is channel-wide. The FIRST port (mktdata, refdata, OR snapshot)
 		// to observe the era advance wipes all per-instrument MBO state, idempotently
 		// (onResetCountForEra is a no-op for ports that advance into the same era
@@ -582,7 +632,9 @@ func (e *Engine) Process(src netip.Addr, f *wire.Frame, port core.Port, sf []wir
 			}
 			// FRAME.MKTDATA_SEQ_START: on a Reset Count change, the mktdata-port
 			// Sequence Number must restart at 0 (this is a mktdata-port rule only).
-			if port == core.PortMktData && f.Header.Sequence != 0 {
+			// Not after a run of stragglers: this port dropped the first datagrams
+			// of the era, so this one is not the first the publisher sent.
+			if port == core.PortMktData && f.Header.Sequence != 0 && !res.afterStragglers {
 				e.beginFrame(f.Header.SchemaVersion)
 				e.Emit("FRAME.MKTDATA_SEQ_START", core.Violation, port, f.Header.Sequence, f.Header.ChannelID, 0,
 					fmt.Sprintf("Reset Count changed but first mktdata seq is %d (expected 0)",
@@ -694,28 +746,8 @@ func (e *Engine) classify(item *bufferItem, pt *portTracker) {
 	// Emit buffered structural findings (non-transport first).
 	for _, s := range sf {
 		if s.Transport {
-			e.rep.TransportCorruption(port, s.RuleID)
-			// F2: transport corruption taints the port's verifiability window.
-			// A corrupted frame on the snapshot port means the snapshot data
-			// (e.g. order counts) may be untrustworthy, so the snapshot port is
-			// treated the same as a gap — dirtyWindow = true prevents false-positive
-			// Violations from snapshot under-count and related rules.
-			//
-			// Port-wide and not this instance: a truncated datagram has no
-			// trustworthy Channel ID, so the instance it was keyed under may not
-			// exist on the wire at all. See taintPortWide (F1).
-			e.taintPortWide(port)
-			// The SNAP.TOTAL_ORDERS_COUNT_MATCH under-count check gates on the
-			// in-flight group's own dirty flag, not the port flag, so also taint the
-			// currently-open snapshot group for this channel (if any). A truncated
-			// snapshot frame can drop trailing SnapshotOrders without leaving a
-			// snapshot-seq gap, so without this the under-count would falsely
-			// classify as a publisher Violation rather than Unverifiable (F2).
-			if port == core.PortSnapshot && e.mbo != nil {
-				if open := e.mbo.openSnaps[f.Header.ChannelID]; open != nil {
-					open.dirty = true
-				}
-			}
+			ch := f.Header.ChannelID
+			e.markCorrupt(port, s.RuleID, &ch)
 			continue
 		}
 		e.Emit(s.RuleID, core.Violation, port, f.Header.Sequence, f.Header.ChannelID, 0, s.Detail)

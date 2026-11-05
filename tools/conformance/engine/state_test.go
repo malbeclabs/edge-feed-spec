@@ -605,3 +605,167 @@ func TestFlushDrainsInOrder(t *testing.T) {
 		t.Errorf("fully-reversed-within-window: expected 0 SEQ_RESET_GAP, got %d", n)
 	}
 }
+
+// TestStragglerRunEntersEraTainted: when a run of datagrams of the era the port
+// left is longer than the reorder window, the port enters that era. The checker
+// dropped the first datagrams of the run itself, so the era starts tainted, and
+// its first accepted datagram is not judged by FRAME.MKTDATA_SEQ_START.
+func TestStragglerRunEntersEraTainted(t *testing.T) {
+	const window = 8
+	cap := &captureAll{}
+	eng := New(Config{Feed: core.FeedMBO, ReorderWindow: window}, cap)
+	port := core.PortMktData
+	process := func(rc uint8, seq uint64) {
+		f, sf := wire.Decode(buildResetCountFrame(1, rc, seq), wire.MagicMBO)
+		eng.Process(srcA, f, port, sf)
+	}
+	process(1, 0)
+	process(2, 0)
+	process(2, 1)
+	// The channel returns to Reset Count 1 and stays there.
+	for seq := uint64(1); seq <= 20; seq++ {
+		process(1, seq)
+	}
+	eng.Flush()
+
+	if got := cap.violationsFor("FRAME.MKTDATA_SEQ_START"); got != 0 {
+		t.Errorf("got %d FRAME.MKTDATA_SEQ_START violation(s) for an era whose first datagrams the checker dropped, want 0", got)
+	}
+	if !eng.dirtyOn(port, 1) {
+		t.Error("the era the port entered after a straggler run is clean, but the checker dropped its first datagrams")
+	}
+}
+
+// TestLateDatagramOfAnEraThePortDidNotSee: a datagram delayed past a reset is a
+// straggler also when its own port has no datagram of that era. Here the
+// mktdata port starts in era 2, after refdata saw era 1. A late era 1 datagram
+// is one loss, not a reset that then drops the current era as stragglers.
+func TestLateDatagramOfAnEraThePortDidNotSee(t *testing.T) {
+	cap := &captureAll{}
+	eng := New(Config{Feed: core.FeedTOB, ReorderWindow: 8}, cap)
+	eng.Process(srcA, makeHB(wire.MagicTOB, 1, 0, 1, 1000), core.PortRefData, nil)
+	eng.Process(srcA, makeHB(wire.MagicTOB, 1, 0, 2, 2000), core.PortMktData, nil)
+	eng.Process(srcA, makeHB(wire.MagicTOB, 1, 5, 1, 1005), core.PortMktData, nil) // late
+	for seq := uint64(1); seq < 20; seq++ {
+		eng.Process(srcA, makeHB(wire.MagicTOB, 1, seq, 2, 2000+seq), core.PortMktData, nil)
+	}
+	eng.Flush()
+
+	if got := lossOn(cap, core.PortMktData); got != 1 {
+		t.Errorf("got %d transport losses, want 1 for the late datagram", got)
+	}
+	if eng.dirtyOn(core.PortMktData, 1) {
+		t.Error("the mktdata series is tainted by one late datagram")
+	}
+}
+
+// TestLateDatagramOfAnEraThePortSkipped: the same, for a port that skipped an
+// era. The channel goes 1 -> 2 -> 3, and mktdata has no datagram in era 2.
+func TestLateDatagramOfAnEraThePortSkipped(t *testing.T) {
+	cap := &captureAll{}
+	eng := New(Config{Feed: core.FeedTOB, ReorderWindow: 8}, cap)
+	eng.Process(srcA, makeHB(wire.MagicTOB, 1, 0, 1, 1000), core.PortMktData, nil)
+	for rc := uint8(1); rc <= 3; rc++ {
+		eng.Process(srcA, makeHB(wire.MagicTOB, 1, 0, rc, 1000*uint64(rc)), core.PortRefData, nil)
+	}
+	eng.Process(srcA, makeHB(wire.MagicTOB, 1, 0, 3, 3000), core.PortMktData, nil)
+	eng.Process(srcA, makeHB(wire.MagicTOB, 1, 3, 2, 2003), core.PortMktData, nil) // late
+	for seq := uint64(1); seq < 20; seq++ {
+		eng.Process(srcA, makeHB(wire.MagicTOB, 1, seq, 3, 3000+seq), core.PortMktData, nil)
+	}
+	eng.Flush()
+
+	if got := lossOn(cap, core.PortMktData); got != 1 {
+		t.Errorf("got %d transport losses, want 1 for the late datagram", got)
+	}
+}
+
+// TestResetCountBackAfter256Resets: a port silent through 256 resets sees its
+// old Reset Count again. Another port of the channel entered that value after
+// this port's era started, so the value is a new era for this port too.
+func TestResetCountBackAfter256Resets(t *testing.T) {
+	cap := &captureAll{}
+	eng := New(Config{Feed: core.FeedMBP, ReorderWindow: 8}, cap)
+	for seq := uint64(0); seq < 40; seq++ {
+		eng.Process(srcA, makeHB(wire.MagicMBP, 1, seq, 5, 1000+seq), core.PortSnapshot, nil)
+	}
+	// mktdata steps through 256 resets, from 6 round to 5, one datagram each.
+	for i := 1; i <= 256; i++ {
+		eng.Process(srcA, makeHB(wire.MagicMBP, 1, 0, uint8(5+i), uint64(2000+i)), core.PortMktData, nil)
+	}
+	for seq := uint64(0); seq < 20; seq++ {
+		eng.Process(srcA, makeHB(wire.MagicMBP, 1, seq, 5, 3000+seq), core.PortSnapshot, nil)
+	}
+	eng.Flush()
+
+	if got := cap.violationsFor("FRAME.SEQ_RESET_GAP"); got != 0 {
+		t.Errorf("got %d FRAME.SEQ_RESET_GAP violation(s) on a snapshot series that restarted after 256 resets, want 0", got)
+	}
+	if got := cap.violationsFor("FRAME.SEQ_DUP_DIVERGENT"); got != 0 {
+		t.Errorf("got %d FRAME.SEQ_DUP_DIVERGENT violation(s) on a snapshot series that restarted after 256 resets, want 0", got)
+	}
+	if got := lossOn(cap, core.PortSnapshot); got != 0 {
+		t.Errorf("got %d transport losses on the snapshot port, want 0", got)
+	}
+}
+
+// TestRuntIsNotAReset: a datagram shorter than the frame header decodes to the
+// all-zero header, Reset Count 0 on Channel ID 0. Its Reset Count is not the
+// publisher's, so it must not reset channel 0.
+func TestRuntIsNotAReset(t *testing.T) {
+	cap := &captureAll{}
+	eng := New(Config{Feed: core.FeedMBO, ReorderWindow: 8}, cap)
+	port := core.PortMktData
+	process := func(rc uint8, seq uint64) {
+		f, sf := wire.Decode(buildResetCountFrame(0, rc, seq), wire.MagicMBO)
+		eng.Process(srcA, f, port, sf)
+	}
+	for seq := uint64(0); seq < 10; seq++ {
+		process(1, seq)
+	}
+	runt, sf := wire.Decode([]byte{1, 2, 3}, wire.MagicMBO)
+	if runt.Header.ChannelID != 0 || runt.Header.ResetCount != 0 {
+		t.Fatalf("premise broken: a runt decoded Channel ID %d, Reset Count %d", runt.Header.ChannelID, runt.Header.ResetCount)
+	}
+	eng.Process(srcA, runt, port, sf)
+	for seq := uint64(10); seq < 30; seq++ {
+		process(1, seq)
+	}
+	eng.Flush()
+
+	if got := lossOn(cap, port); got != 0 {
+		t.Errorf("got %d transport losses after one runt, want 0: the runt is corruption, and the series has no gap", got)
+	}
+	if got := cap.violationsFor("FRAME.MKTDATA_SEQ_START"); got != 0 {
+		t.Errorf("got %d FRAME.MKTDATA_SEQ_START violation(s) after one runt, want 0", got)
+	}
+	if !eng.dirtyOn(port, 0) {
+		t.Error("the mktdata series is clean after a runt on it")
+	}
+}
+
+// TestAcceptedDatagramEndsAStragglerRun: the straggler run counts consecutive
+// datagrams of the era the port left. A datagram of the current era ends it,
+// so old and new era datagrams that interleave across a reset stay stragglers,
+// however many there are.
+func TestAcceptedDatagramEndsAStragglerRun(t *testing.T) {
+	const window = 8
+	cap := &captureAll{}
+	eng := New(Config{Feed: core.FeedTOB, ReorderWindow: window}, cap)
+	port := core.PortMktData
+	eng.Process(srcA, makeHB(wire.MagicTOB, 1, 0, 1, 1000), port, nil)
+	eng.Process(srcA, makeHB(wire.MagicTOB, 1, 0, 2, 3000), port, nil)
+	const late = 3 * window
+	for seq := uint64(1); seq <= late; seq++ {
+		eng.Process(srcA, makeHB(wire.MagicTOB, 1, seq, 1, 1000+seq), port, nil)
+		eng.Process(srcA, makeHB(wire.MagicTOB, 1, seq, 2, 3000+seq), port, nil)
+	}
+	eng.Flush()
+
+	if got := lossOn(cap, port); got != late {
+		t.Errorf("got %d transport losses, want %d, one for each late datagram", got, late)
+	}
+	if got := cap.violationsFor("FRAME.SEQ_RESET_GAP"); got != 0 {
+		t.Errorf("got %d FRAME.SEQ_RESET_GAP violation(s), want 0", got)
+	}
+}

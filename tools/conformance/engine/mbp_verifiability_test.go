@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"net/netip"
 	"testing"
 
 	"github.com/malbeclabs/edge-feed-spec/tools/conformance/core"
@@ -350,6 +351,103 @@ func TestMBPLaggingPortDoesNotWipe(t *testing.T) {
 	_, fs := runMBPSteps(t, steps)
 	if viol, _ := countByStatus(t, fs, "MBP.DELTA.PERINSTR_DENSITY"); viol != 1 {
 		t.Errorf("a real gap after a lagging port caught up: got %d violation(s), want 1", viol)
+	}
+}
+
+// mbpAddrStep is one mbpStep sent from a given source address.
+type mbpAddrStep struct {
+	src netip.Addr
+	mbpStep
+}
+
+// runMBPAddrSteps is runMBPSteps with a source address per step. It flushes at
+// each change of port or address.
+func runMBPAddrSteps(t *testing.T, steps []mbpAddrStep) []core.Finding {
+	t.Helper()
+	ac := &allCapture{}
+	e := New(Config{Feed: core.FeedMBP, SourceRegistry: stubRegistry{}}, ac)
+	for i, s := range steps {
+		if i > 0 && (s.port != steps[i-1].port || s.src != steps[i-1].src) {
+			e.Flush()
+		}
+		f, sf := wire.Decode(s.raw, wire.MagicMBP)
+		e.Process(s.src, f, s.port, sf)
+	}
+	e.Flush()
+	e.EndRun()
+	return ac.findings
+}
+
+// A publisher that restarts on a new source address starts a new era for the
+// channel. The market-by-price state is keyed by channel, so the first era of
+// the new address has to discard the state of the old one. Without the wipe,
+// the new session's 1, 2 and 9 are at or below the stale tracker and are
+// discarded as late duplicates, and the real 2 -> 9 gap is not seen.
+func TestMBPRestartOnNewAddressWipes(t *testing.T) {
+	steps := mbpRestartSteps(1, 5, 6)
+	addr := []mbpAddrStep{{srcA, steps[0]}}
+	for _, s := range steps[1:] {
+		addr = append(addr, mbpAddrStep{srcB, s})
+	}
+	fs := runMBPAddrSteps(t, addr)
+	if viol, _ := countByStatus(t, fs, "MBP.DELTA.PERINSTR_DENSITY"); viol != 1 {
+		t.Errorf("a real gap after a restart on a new address: got %d violation(s), want 1", viol)
+	}
+}
+
+// One reset wipes the channel once, also when the channel's ports are on two
+// addresses. Here the mktdata series moved to a new address before the reset,
+// and the refdata series is still on the old one. The refdata port enters the
+// new era after the gap's first half: a second wipe there discards the tracker
+// at 2, and the real 2 -> 9 gap is not seen.
+func TestMBPLeaseMoveWipesOncePerReset(t *testing.T) {
+	lu := func(perSeq uint32) func(*wb.Body) {
+		return mbpLevelUpdate(1, mbpClearSideBid, mbpActionNew, perSeq, 1000, uint64(perSeq))
+	}
+	hb := func(b *wb.Body) { b.U32(0).U64(0).Pad(4) }
+	fs := runMBPAddrSteps(t, []mbpAddrStep{
+		{srcA, mbpFrame(core.PortRefData, 0, 1, 5, wire.TypeHeartbeat, 16, 0, hb)},
+		{srcA, mbpFrame(core.PortMktData, 0, 1, 5, wire.TypeLevelUpdate, 48, 0, lu(50))},
+		// The lease moves: mktdata continues on srcB, in the same era.
+		{srcB, mbpFrame(core.PortMktData, 1, 1, 5, wire.TypeLevelUpdate, 48, 0, lu(51))},
+		// The reset.
+		{srcB, mbpFrame(core.PortMktData, 0, 1, 6, wire.TypeLevelUpdate, 48, 0, lu(1))},
+		{srcB, mbpFrame(core.PortMktData, 1, 1, 6, wire.TypeLevelUpdate, 48, 0, lu(2))},
+		{srcA, mbpFrame(core.PortRefData, 0, 1, 6, wire.TypeHeartbeat, 16, 0, hb)},
+		{srcB, mbpFrame(core.PortMktData, 2, 1, 6, wire.TypeLevelUpdate, 48, 0, lu(9))},
+	})
+	if viol, _ := countByStatus(t, fs, "MBP.DELTA.PERINSTR_DENSITY"); viol != 1 {
+		t.Errorf("a real gap after a reset across a lease move: got %d violation(s), want 1", viol)
+	}
+}
+
+// A run of datagrams of an era the port left, longer than the reorder window,
+// is the channel's series, and the port enters that era. The checker dropped
+// the first datagrams of that run itself, so the era starts tainted: the levels
+// of a group whose SnapshotBegin it dropped are Unverifiable, not orphans.
+func TestMBPStragglerRunEntersEraTainted(t *testing.T) {
+	hb := func(b *wb.Body) { b.U32(0).U64(0).Pad(4) }
+	const ch = 1
+	steps := []mbpStep{
+		mbpFrame(core.PortSnapshot, 0, ch, 1, wire.TypeHeartbeat, 16, 0, hb),
+		// A complete group in era 2, so that a later orphan is not a cold start.
+		mbpFrame(core.PortSnapshot, 0, ch, 2, wire.TypeSnapshotBegin, 40, 1, mbpSnapBegin(1, 10, 1, 6, 0, 0)),
+		mbpFrame(core.PortSnapshot, 1, ch, 2, wire.TypeSnapshotLevel, 32, 1, mbpSnapLevel(6, 1000, 5, mbpClearSideBid)),
+		mbpFrame(core.PortSnapshot, 2, ch, 2, wire.TypeSnapshotEnd, 20, 1, mbpSnapEnd(1, 10, 6)),
+	}
+	// The channel returns to Reset Count 1 with a 20-level group, one message
+	// per datagram.
+	const levels = 20
+	steps = append(steps, mbpFrame(core.PortSnapshot, 1, ch, 1, wire.TypeSnapshotBegin, 40, 1, mbpSnapBegin(1, 10, levels, 7, 0, 0)))
+	for i := 0; i < levels; i++ {
+		steps = append(steps, mbpFrame(core.PortSnapshot, uint64(2+i), ch, 1, wire.TypeSnapshotLevel, 32, 1,
+			mbpSnapLevel(7, int64(1000+i), 5, mbpClearSideBid)))
+	}
+	steps = append(steps, mbpFrame(core.PortSnapshot, uint64(2+levels), ch, 1, wire.TypeSnapshotEnd, 20, 1, mbpSnapEnd(1, 10, 7)))
+	_, fs := runMBPSteps(t, steps)
+	if viol, unver := countByStatus(t, fs, "MBP.SNAP.GROUP_STRUCTURE"); viol != 0 || unver == 0 {
+		t.Errorf("a group whose SnapshotBegin the checker dropped: got %d Violation / %d Unverifiable, want 0 / more than 0",
+			viol, unver)
 	}
 }
 

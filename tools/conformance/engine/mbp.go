@@ -167,13 +167,17 @@ type mbpState struct {
 	// sawBegin records the channels whose first SnapshotBegin this run has seen;
 	// until then an orphan predates the observation window (see mbpOrphanStatus).
 	sawBegin map[uint8]bool
+	// resetCount holds, per channel, the Reset Count of the era the state of
+	// that channel is built for; see Engine.mbpObserveEra.
+	resetCount map[uint8]uint8
 }
 
 func newMBPState() *mbpState {
 	return &mbpState{
-		instr:    make(map[mbpInstrKey]*mbpInstr),
-		open:     make(map[uint8]*mbpOpenSnap),
-		sawBegin: make(map[uint8]bool),
+		instr:      make(map[mbpInstrKey]*mbpInstr),
+		open:       make(map[uint8]*mbpOpenSnap),
+		sawBegin:   make(map[uint8]bool),
+		resetCount: make(map[uint8]uint8),
 	}
 }
 
@@ -235,10 +239,18 @@ func (e *Engine) ensureMBP() {
 // where this diverges from `mboState.onResetCountForEra`. A port seeds its era from
 // whatever `ResetCount` arrives first without that counting as an advance, so a
 // capture whose mktdata frames all begin in era 1 while refdata still carries an
-// era-0 frame gets no advance on mktdata at all. The first era classified for a
-// channel instance is recorded rather than applied, and only a later one wipes. A
-// frame from a port that is still behind the reset belongs to an earlier era and
-// wipes nothing.
+// era-0 frame gets no advance on mktdata at all. A frame from a port that is
+// still behind the reset belongs to an earlier era and wipes nothing.
+//
+// **The state is keyed by channel, and the era order by source address.** So
+// every new era of an address is compared with the era the channel's state is
+// built for, the first era of the address included: a publisher that restarts
+// on a new address starts a new era, and the state of the old session would
+// read the new session's deltas as late duplicates. It wipes only when its Reset
+// Count differs from that era's. The same Reset Count on another address is a
+// lease move, in the era the channel already wiped for, and a second wipe would
+// discard state the first port rebuilt. Only the first era of the channel in the
+// run is recorded and not applied.
 //
 // That taint is what keeps the wipe's own consequences off the publisher's record:
 // the group the wipe just dropped may still have frames in flight on the snapshot
@@ -252,15 +264,17 @@ func (e *Engine) mbpObserveEra(pt *portTracker, port core.Port, ch uint8) {
 	}
 	e.ensureMBP()
 	o := pt.order
-	if !o.mbpWipedSet {
-		// First era of this channel instance: nothing has been built against another one.
-		o.mbpWiped, o.mbpWipedSet = pt.eraPos, true
+	if o.mbpSeenSet && pt.eraPos <= o.mbpSeen {
 		return
 	}
-	if pt.eraPos <= o.mbpWiped {
+	o.mbpSeen, o.mbpSeenSet = pt.eraPos, true
+	last, ok := e.mbp.resetCount[ch]
+	e.mbp.resetCount[ch] = pt.era
+	if !ok || last == pt.era {
+		// The first era of this channel, or the era its state is built for, seen
+		// on another address.
 		return
 	}
-	o.mbpWiped = pt.eraPos
 	e.mbp.wipeChannel(ch)
 	if port == core.PortSnapshot {
 		return

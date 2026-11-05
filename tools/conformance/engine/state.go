@@ -23,20 +23,20 @@ import (
 // transport loss at its full datagram rate.
 //
 // The order is still necessary. A datagram sent before a reset can arrive after
-// the first datagram of the new era. On its own port that is a straggler of the
-// era the port left (see enqueue). On another port it is a frame of an era the
-// channel left, which must not discard the state of the current one (see
-// Engine.mbpObserveEra). The arrival order says which era is which, and a Reset
-// Count value that the channel used before and uses again is a new era.
+// the first datagram of the new era. On its own port that is a straggler (see
+// enqueue). On another port it is a frame of an era the channel left, which
+// must not discard the state of the current one (see Engine.mbpObserveEra).
+// The arrival order says which era is which, and a Reset Count value that the
+// channel used before and uses again is a new era.
 type eraOrder struct {
 	// pos holds, for each Reset Count value, the ordinal of the most recent era
 	// that started with that value. Ordinals start at 1 and only increase.
 	pos  map[uint8]uint64
 	next uint64
-	// mbpWiped is the ordinal of the era the market-by-price state of this
-	// channel was last discarded for; see Engine.mbpObserveEra.
-	mbpWiped    uint64
-	mbpWipedSet bool
+	// mbpSeen is the ordinal of the latest era of this channel instance that
+	// the market-by-price reset bookkeeping has seen; see Engine.mbpObserveEra.
+	mbpSeen    uint64
+	mbpSeenSet bool
 }
 
 func newEraOrder() *eraOrder { return &eraOrder{pos: make(map[uint8]uint64)} }
@@ -152,15 +152,17 @@ type portTracker struct {
 	eraInitialized bool
 	// order is the arrival order of the channel's eras, shared with the other
 	// ports of this source address and Channel ID (Engine.instanceTrack). eraPos
-	// is the ordinal of era in it, and prevPos the ordinal of the era this port
-	// left last (0 for none).
-	order   *eraOrder
-	eraPos  uint64
-	prevPos uint64
-	// stragglers counts the datagrams of the era this port left that it dropped
-	// since it last accepted one. A datagram delayed past a reset is a straggler.
-	// A run of them longer than the reorder window is not: it is the channel's
-	// current series, and the port enters its era (see enqueue).
+	// is the ordinal of era in it.
+	order  *eraOrder
+	eraPos uint64
+	// floorPos is the ordinal of the earliest era whose datagrams this port
+	// reads as late (see enqueue). After a reset it is the era the port left.
+	// For the first era of the port it is the era before it in the channel.
+	floorPos uint64
+	// stragglers counts the late datagrams this port dropped since it last
+	// accepted one. A datagram delayed past a reset is a straggler. A run of them
+	// longer than the reorder window is not: it is the channel's current series,
+	// and the port enters its era (see enqueue).
 	stragglers int
 	// payloadHashes maps (era,seq) → maphash value for dedup detection within the
 	// bounded eviction window. A 64-bit collision would cause a divergent dup to be
@@ -339,7 +341,7 @@ func (t *portTracker) observe(seq uint64, sendTS uint64, raw []byte, era uint8) 
 // drain the buffer — draining is done by the caller (Engine.enqueue) before this
 // is called.
 func (t *portTracker) advanceEra(newEra uint8) {
-	t.prevPos = t.eraPos
+	t.floorPos = t.eraPos
 	t.eraPos = t.order.enter(newEra, t.eraPos)
 	t.stragglers = 0
 	t.era = newEra
@@ -378,6 +380,10 @@ type enqueueResult struct {
 	newEra         uint8
 	postDrainItems []*bufferItem // new-era items popped by window overflow AFTER advancing
 	quarantine     bool          // true → drop as straggler, do not classify anything
+	// afterStragglers is true when the advance ends a run of stragglers. The
+	// port dropped the first datagrams of the era it enters, so the caller
+	// taints the era.
+	afterStragglers bool
 }
 
 // enqueue pushes an intake tuple into this series' reorder buffer, honouring
@@ -396,21 +402,28 @@ func (pt *portTracker) enqueue(
 		pt.era = inEra
 		pt.eraInitialized = true
 		pt.eraPos = pt.order.enter(inEra, 0)
+		pt.floorPos = pt.eraPos - 1
 	}
 
-	if inEra != pt.era {
-		// Any change of the Reset Count is a reset, except a datagram of the era
-		// this port left last. That one was delayed past the reset: drop it without
-		// buffering. A run of them longer than the reorder window is not a delay,
-		// so the run ends and the port enters that era as a reset.
+	p, known := pt.order.pos[inEra]
+	// The same value is a new era when another port of the channel entered it
+	// after this port's era started. A port that sent nothing through a multiple
+	// of 256 resets sees its old value again, and only the other ports can tell.
+	if inEra != pt.era || p > pt.eraPos {
+		// Any change of the Reset Count is a reset, except a late datagram: one
+		// of an era the channel entered from floorPos on and left before this
+		// port's era. That one was delayed past the reset: drop it without
+		// buffering. The port need not have a datagram of that era itself. A run
+		// of them longer than the reorder window is not a delay, so the run ends
+		// and the port enters that era as a reset.
 		//
-		// Only the era left last. A value the channel used earlier and uses again
-		// is a new era (eraOrder), and a datagram delayed past two resets is
-		// rare enough that reading it as a reset costs less than the alternative:
-		// a match against any earlier use of the value dropped the new era of a
-		// channel that had cycled through its 256 values.
-		if p, ok := pt.order.pos[inEra]; ok && pt.prevPos != 0 && p == pt.prevPos &&
-			pt.stragglers < max(reorderWindow, 1) {
+		// Not before floorPos. A value the channel used earlier and uses again
+		// is a new era (eraOrder), and a datagram delayed past two resets of its
+		// port is rare enough that reading it as a reset costs less than the
+		// alternative: a match against any earlier use of the value dropped the
+		// new era of a channel that had cycled through its 256 values.
+		late := inEra != pt.era && known && p >= pt.floorPos && p < pt.eraPos
+		if late && pt.stragglers < max(reorderWindow, 1) {
 			pt.stragglers++
 			return enqueueResult{quarantine: true}
 		}
@@ -420,9 +433,10 @@ func (pt *portTracker) enqueue(
 		// correctly under the old era's tracker state. The new-era item is pushed
 		// by the caller after the advance (pushAndPop).
 		return enqueueResult{
-			preDrainItems: pt.drainAll(),
-			advanceEra:    true,
-			newEra:        inEra,
+			preDrainItems:   pt.drainAll(),
+			advanceEra:      true,
+			newEra:          inEra,
+			afterStragglers: late,
 		}
 	}
 	pt.stragglers = 0
