@@ -226,6 +226,15 @@ func (e *Engine) instanceTrack(src netip.Addr, port core.Port, ch uint8) *portTr
 		}
 		pt = newPortTracker(e.cfg.ReorderWindow)
 		pt.src = src
+		// The Reset Count is shared across the three ports of the channel, so the
+		// arrival order of its eras is too. A port that opens after its siblings
+		// takes theirs.
+		for _, p := range []core.Port{core.PortMktData, core.PortRefData, core.PortSnapshot} {
+			if sib, ok := e.ports[instanceKey{src: src, port: p, ch: ch}]; ok {
+				pt.order = sib.order
+				break
+			}
+		}
 		e.ports[key] = pt
 	}
 	e.seenCounter++
@@ -534,7 +543,7 @@ func (e *Engine) Process(src netip.Addr, f *wire.Frame, port core.Port, sf []wir
 
 	res := pt.enqueue(tuple, e.cfg.ReorderWindow)
 	if res.quarantine {
-		// Older-era straggler or ambiguous: account as transport loss, never classify.
+		// A straggler of the era this port left last: account as transport loss, never classify.
 		e.rep.TransportLoss(port)
 		return
 	}
@@ -544,7 +553,7 @@ func (e *Engine) Process(src netip.Addr, f *wire.Frame, port core.Port, sf []wir
 	// for backward motion) fires with the old tracker state still intact.
 	e.classifyDrained(res.preDrainItems, pt)
 
-	// Step 2: advance era and enqueue the new-era item (for eraNewer transition).
+	// Step 2: advance era and enqueue the new-era item (on a Reset Count change).
 	if res.advanceEra {
 		pt.advanceEra(res.newEra)
 		// Reset Count is channel-wide. The FIRST port (mktdata, refdata, OR snapshot)
@@ -652,7 +661,7 @@ func (e *Engine) classify(item *bufferItem, pt *portTracker) {
 
 	// Channel-wide reset bookkeeping for MBP, driven by every accepted frame on any
 	// port rather than by the per-series era advance in Process.
-	e.mbpObserveEra(port, f.Header.ChannelID, item.era)
+	e.mbpObserveEra(pt, port, f.Header.ChannelID)
 
 	// FRAME.SEQ_RESET_GAP: backward seq motion without a reset-count change is
 	// a publisher violation. A plain forward gap is transport loss (not a violation).
