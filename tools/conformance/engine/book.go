@@ -47,24 +47,33 @@ package engine
 
 import "errors"
 
-// The per-instrument limits of the idWindow sets. Each entry costs about 55
-// bytes (map entry and ring entry), so one instrument at all three limits uses
-// about 17 MiB. These are variables, not constants, so that tests can make a
-// window evict after a few IDs.
+// The per-instrument limits of the idWindow sets. A full window costs about 68
+// bytes for each ID of its limit (measured: the map, and a queue array of up to
+// twice the limit), so one instrument at all three limits uses about 14 MiB.
+// These are variables, not constants, so that tests can make a window evict
+// after a few IDs.
 //
 // maxRemovedIDs decides how long REF.OPERATION_AFTER_REMOVAL can see an order
-// after it leaves the book: 131,072 removals on that instrument. A publisher
+// after it leaves the book: 16,384 removals on that instrument. A publisher
 // defect of this type (a second cancel, an execute after a cancel) usually
-// occurs within a few messages of the removal.
+// occurs within a few messages of the removal. It is the window that fills on
+// every feed, because every order leaves the book, so it sets the memory of a
+// validator on a feed with many instruments. Measured on a 10-minute capture of
+// a busy feed: 346 instruments, 5.4 million removals, and the busiest instrument
+// at 131,072 removals after 6 minutes. At a limit of 131,072 (8.5 MiB each) the
+// removed windows of those instruments reach 2.9 GiB; at 16,384 (1.1 MiB each)
+// they reach 370 MiB, and the busiest instrument keeps about 45 seconds of
+// removals.
 //
-// maxHiddenIDs is the same size. A hidden order rests in the book, so a hidden
-// order that is older than 131,072 newer hidden orders on the same instrument
-// makes its execute or cancel Unverifiable.
+// maxHiddenIDs is larger. A hidden order rests in the book, so a hidden order
+// that is older than 131,072 newer hidden orders on the same instrument makes
+// its execute or cancel Unverifiable. The window fills only on a feed that
+// sends hidden orders.
 //
 // maxExecTradeIDs can be smaller: a Trade arrives next to its OrderExecute
 // messages.
 var (
-	maxRemovedIDs   = 1 << 17
+	maxRemovedIDs   = 1 << 14
 	maxHiddenIDs    = 1 << 17
 	maxExecTradeIDs = 1 << 16
 )

@@ -1012,6 +1012,58 @@ func TestRemovedWindowEviction(t *testing.T) {
 	})
 }
 
+// TestBookStaysBoundedUnderOrderChurn: the regression for a market-by-order
+// validator whose memory grew with the number of orders it saw. Each order in
+// the stream leaves the book once, so the removed window gets only new IDs. The windows must keep a fixed size however long the stream is: the live
+// set, the members of each window and the array that holds each window's queue.
+func TestBookStaysBoundedUnderOrderChurn(t *testing.T) {
+	const ch, instrID = uint8(1), uint32(130)
+	const limit = 64
+	withIDWindowLimits(t, limit, limit, limit)
+
+	e, ac := newMBOEngineW1()
+	seq := seedGaplessHistory(e, ch, instrID, 1, 1)
+	per := uint32(2)
+	step := func(raw []byte) { runMktdataSeq(e, raw, seq); seq++; per++ }
+
+	// Each round adds three orders. The first is cancelled, the second is fully
+	// filled with a new Trade ID, and the third is hidden and cancelled.
+	const rounds = 20_000
+	bk := e.mbo.book.book(ch, instrID)
+	for i := uint64(1); i <= rounds; i++ {
+		id := 3 * i
+		step(buildOrderAddFull(ch, instrID, per, id, 0, 1, 100, 0))
+		step(buildOrderCancelFull(ch, instrID, per, id, 1))
+		step(buildOrderAddFull(ch, instrID, per, id+1, 0, 1, 100, 0))
+		step(buildOrderExecuteFull(ch, instrID, per, id+1, 2, 1, i, 100, 1)) // a sell hits the bid
+		step(buildOrderAddFull(ch, instrID, per, id+2, 0, 1, 100, 0x04))
+		step(buildOrderCancelFull(ch, instrID, per, id+2, 1))
+
+		for _, w := range []struct {
+			name string
+			w    *idWindow
+		}{{"removed", bk.removed}, {"hiddenIDs", bk.hiddenIDs}, {"execTradeIDs", bk.execTradeIDs}} {
+			if w.w.size() > limit || len(w.w.queue) > 2*limit+1 || cap(w.w.queue) > 4*limit {
+				t.Fatalf("round %d: %s holds %d members, queue len %d cap %d; want at most %d, %d and %d",
+					i, w.name, w.w.size(), len(w.w.queue), cap(w.w.queue), limit, 2*limit+1, 4*limit)
+			}
+		}
+	}
+	// The seed order is the only order that stays in the book.
+	if n := len(bk.live); n != 1 {
+		t.Errorf("live set holds %d orders, want 1", n)
+	}
+	if !bk.removed.evicted || !bk.hiddenIDs.evicted || !bk.execTradeIDs.evicted {
+		t.Error("each window must have evicted IDs, or the test does not reach the limit")
+	}
+	e.Flush()
+	for _, f := range ac.findings {
+		if f.Status == core.Violation {
+			t.Fatalf("a conformant stream must report no violation, got %s: %s", f.RuleID, f.Detail)
+		}
+	}
+}
+
 // TestHiddenWindowEviction: an execute or cancel on a hidden ID that the hidden
 // window evicted is Unverifiable (overflow), not a dangling violation.
 func TestHiddenWindowEviction(t *testing.T) {
