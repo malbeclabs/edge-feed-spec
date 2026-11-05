@@ -421,6 +421,46 @@ func TestMBPLeaseMoveWipesOncePerReset(t *testing.T) {
 	}
 }
 
+// An address whose first classified datagram is from the era the channel last
+// left is behind the reset, not a new session. Here the snapshot series is on
+// another address, and its era 5 SnapshotBegin is still in its reorder buffer
+// when mktdata wipes for era 6. That datagram must not wipe the channel, and
+// the snapshot address must not wipe again when it enters era 6, or the real
+// 2 -> 9 gap is not seen.
+func TestMBPLaggingAddressDoesNotWipe(t *testing.T) {
+	lu := func(perSeq uint32) func(*wb.Body) {
+		return mbpLevelUpdate(1, mbpClearSideBid, mbpActionNew, perSeq, 1000, uint64(perSeq))
+	}
+	hb := func(b *wb.Body) { b.U32(0).U64(0).Pad(4) }
+	const ch = 1
+	ac := &allCapture{}
+	// A window of 1 holds one datagram per series, so the order of classification
+	// is exact.
+	e := New(Config{Feed: core.FeedMBP, SourceRegistry: stubRegistry{}, ReorderWindow: 1}, ac)
+	send := func(src netip.Addr, s mbpStep) {
+		f, sf := wire.Decode(s.raw, wire.MagicMBP)
+		e.Process(src, f, s.port, sf)
+	}
+	send(srcA, mbpFrame(core.PortMktData, 0, ch, 5, wire.TypeLevelUpdate, 48, 0, lu(50)))
+	e.Flush()
+	send(srcB, mbpFrame(core.PortSnapshot, 0, ch, 5, wire.TypeSnapshotBegin, 40, 1, mbpSnapBegin(1, 10, 1, 7, 0, 0)))
+	// The reset, on mktdata: era 6 wipes the channel and Per-Instrument Seq
+	// restarts at 1.
+	send(srcA, mbpFrame(core.PortMktData, 0, ch, 6, wire.TypeLevelUpdate, 48, 0, lu(1)))
+	send(srcA, mbpFrame(core.PortMktData, 1, ch, 6, wire.TypeLevelUpdate, 48, 0, lu(2)))
+	send(srcA, mbpFrame(core.PortMktData, 2, ch, 6, wire.TypeHeartbeat, 16, 0, hb))
+	// The snapshot address classifies its era 5 SnapshotBegin, then enters era 6.
+	send(srcB, mbpFrame(core.PortSnapshot, 0, ch, 6, wire.TypeHeartbeat, 16, 0, hb))
+	send(srcB, mbpFrame(core.PortSnapshot, 1, ch, 6, wire.TypeHeartbeat, 16, 0, hb))
+	// A real 2 -> 9 publisher gap in era 6.
+	send(srcA, mbpFrame(core.PortMktData, 3, ch, 6, wire.TypeLevelUpdate, 48, 0, lu(9)))
+	e.Flush()
+	e.EndRun()
+	if viol, _ := countByStatus(t, ac.findings, "MBP.DELTA.PERINSTR_DENSITY"); viol != 1 {
+		t.Errorf("a real gap after a reset that an address behind it crossed later: got %d violation(s), want 1", viol)
+	}
+}
+
 // A run of datagrams of an era the port left, longer than the reorder window,
 // is the channel's series, and the port enters that era. The checker dropped
 // the first datagrams of that run itself, so the era starts tainted: the levels

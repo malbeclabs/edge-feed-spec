@@ -170,6 +170,9 @@ type mbpState struct {
 	// resetCount holds, per channel, the Reset Count of the era the state of
 	// that channel is built for; see Engine.mbpObserveEra.
 	resetCount map[uint8]uint8
+	// leftCount holds, per channel, the Reset Count of the era the channel left
+	// at its last wipe.
+	leftCount map[uint8]uint8
 }
 
 func newMBPState() *mbpState {
@@ -178,6 +181,7 @@ func newMBPState() *mbpState {
 		open:       make(map[uint8]*mbpOpenSnap),
 		sawBegin:   make(map[uint8]bool),
 		resetCount: make(map[uint8]uint8),
+		leftCount:  make(map[uint8]uint8),
 	}
 }
 
@@ -252,6 +256,11 @@ func (e *Engine) ensureMBP() {
 // discard state the first port rebuilt. Only the first era of the channel in the
 // run is recorded and not applied.
 //
+// **An address whose first era is the one the channel last left is behind the
+// reset**, not a new session. Its datagram was in a reorder buffer while another
+// address wiped for the new era. It wipes nothing and leaves the record as it
+// is, so its later entry into the new era does not wipe again.
+//
 // That taint is what keeps the wipe's own consequences off the publisher's record:
 // the group the wipe just dropped may still have frames in flight on the snapshot
 // port, and without it each one is a false MBP.SNAP.GROUP_STRUCTURE orphan. The
@@ -267,7 +276,11 @@ func (e *Engine) mbpObserveEra(pt *portTracker, port core.Port, ch uint8) {
 	if o.mbpSeenSet && pt.eraPos <= o.mbpSeen {
 		return
 	}
+	first := !o.mbpSeenSet
 	o.mbpSeen, o.mbpSeenSet = pt.eraPos, true
+	if left, ok := e.mbp.leftCount[ch]; first && ok && left == pt.era {
+		return
+	}
 	last, ok := e.mbp.resetCount[ch]
 	e.mbp.resetCount[ch] = pt.era
 	if !ok || last == pt.era {
@@ -275,6 +288,7 @@ func (e *Engine) mbpObserveEra(pt *portTracker, port core.Port, ch uint8) {
 		// on another address.
 		return
 	}
+	e.mbp.leftCount[ch] = last
 	e.mbp.wipeChannel(ch)
 	if port == core.PortSnapshot {
 		return
