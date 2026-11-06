@@ -76,6 +76,10 @@ type intakeTuple struct {
 	// of it in the window, which arrived before the drop and cannot be the one
 	// the drop explains.
 	captureEpoch uint64
+	// refdataSession is the reference-data session of a refdata datagram,
+	// stamped at intake for the same reason: see Engine.stampRefdataSession. Nil
+	// on the other ports.
+	refdataSession *uint64
 }
 
 // bufferItem wraps an intakeTuple for the per-series min-heap.
@@ -138,11 +142,13 @@ type portTracker struct {
 	// Updated only when seq advances, so it reflects the last monotonically
 	// increasing point (not a backward-motion straggler).
 	lastSendTS *uint64
-	// refdataEra is the Reset Count the refdata set-state machine last acted on
-	// for THIS channel instance. Distinct from era below, which gates datagram
-	// sequencing: the two are read at different points and a shared field would
-	// couple a quarantined straggler to a set reset.
-	refdataEra uint8
+	// refdataEra is the Reset Count of the last refdata datagram of THIS channel
+	// instance that intake accepted, and refdataSession is the reference-data
+	// session intake gave it; see Engine.stampRefdataSession. Distinct from era
+	// below, which gates datagram sequencing: a quarantined straggler changes
+	// neither.
+	refdataEra     uint8
+	refdataSession uint64
 	// refdataEraSeeded is false until the first refdata datagram of this instance.
 	refdataEraSeeded bool
 	// era is the current Reset Count we accept.

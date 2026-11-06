@@ -1,18 +1,22 @@
 package engine
 
 // refdata_replace_test.go — the refdata set-state machine when a publisher on a new
-// source address replaces the publisher of a channel.
+// source IP address replaces the publisher of a channel.
 //
 // The state machine is keyed by Channel ID, so every instance of a channel feeds
 // one set. The Reset Count of each instance tells a new session from the same
 // session seen on another address, the same rule the market-by-price state uses
-// (see refdataState.observeEra):
+// (see Engine.stampRefdataSession):
 //
 //   - A new address that starts in a Reset Count other than the one the set is
 //     built for is a new session. It discards the set. Its `Manifest Seq` MAY
 //     restart from any value (reference-data supplement, step 7).
 //   - A new address in the same Reset Count is the same session on another path
-//     (a lease move, or a second arm). It keeps the set.
+//     (a lease move, or a redundant path). It keeps the set.
+//
+// The session of a datagram is decided in arrival order, at intake. Each
+// instance has its own reorder buffer, so classification order is not arrival
+// order.
 
 import (
 	"net/netip"
@@ -24,7 +28,7 @@ import (
 )
 
 // refdataPublisher is one publisher's refdata datagrams on one channel: its own
-// source address, its own Reset Count and its own sequence space.
+// source IP address, its own Reset Count and its own sequence space.
 type refdataPublisher struct {
 	src netip.Addr
 	ch  uint8
@@ -76,7 +80,7 @@ func channelSet(e *Engine, ch uint8) (ready bool, mseq uint16, defs int) {
 
 // TestRefdataPublisherReplacedOnNewAddress: the old publisher serves the channel
 // at Manifest Seq 5 in Reset Count 35, and stops. A new publisher starts on the
-// same Channel ID from another source address, in Reset Count 1, at Manifest
+// same Channel ID from another source IP address, in Reset Count 1, at Manifest
 // Seq 1. That is a new session, and the new publisher did nothing wrong.
 //
 // Before the fix the new instance only seeded its own Reset Count and kept the
@@ -244,4 +248,75 @@ func TestRefdataStoppedPublisherBufferAfterTheNewOneResets(t *testing.T) {
 		t.Errorf("the stopped publisher's buffer changed the new set: ready=%v, Manifest Seq=%d, %d definitions; want ready at 1",
 			ready, mseq, defs)
 	}
+}
+
+// assertNewSet checks that a replacement left no sequence findings, and that the
+// channel holds the new publisher's set: ready, at Manifest Seq 1, with all of
+// instrs.
+func assertNewSet(t *testing.T, e *Engine, ac *allCapture, instrs []uint32) {
+	t.Helper()
+	for _, rule := range []string{"REFDATA.SEQ_BUMP_NOT_BY_ONE", "REFDATA.SEQ_MONOTONIC_NO_REGRESS", "REFDATA.STALE_SEQ_TAG_AFTER_BUMP"} {
+		if v := violations(ac, rule); len(v) != 0 {
+			t.Errorf("%s: %d Violation(s), first: %s", rule, len(v), v[0].Detail)
+		}
+	}
+	if ready, mseq, defs := channelSet(e, 1); !ready || mseq != 1 || defs != len(instrs) {
+		t.Errorf("the channel does not hold the new publisher's set: ready=%v, Manifest Seq=%d, %d definitions; want ready at 1 with %d",
+			ready, mseq, defs, len(instrs))
+	}
+}
+
+// TestRefdataReplacementResetsIntoTheOldResetCount: the old publisher stops in
+// Reset Count 31 at Manifest Seq 6. Its replacement starts in Reset Count 30, then
+// resets to 31 at Manifest Seq 1. The value 31 then names two sessions. The old
+// publisher's datagrams that Flush drains from its buffer are of the first one,
+// and must feed nothing to the set of the second one.
+func TestRefdataReplacementResetsIntoTheOldResetCount(t *testing.T) {
+	ac := &allCapture{}
+	e := New(Config{Feed: core.FeedTOB, ReorderWindow: 8}, ac)
+
+	instrs := []uint32{1, 2, 3}
+	old := &refdataPublisher{src: srcA, ch: 1, era: 31}
+	for i := uint64(0); i < 5; i++ {
+		old.cycle(e, i*nsPerSec, 6, instrs)
+	}
+	repl := &refdataPublisher{src: srcB, ch: 1, era: 30}
+	for i := uint64(0); i < 5; i++ {
+		repl.cycle(e, (100+i)*nsPerSec, 1, instrs)
+	}
+	repl.era, repl.seq = 31, 0
+	for i := uint64(0); i < 5; i++ {
+		repl.cycle(e, (200+i)*nsPerSec, 1, instrs)
+	}
+	e.Flush()
+
+	assertNewSet(t, e, ac, instrs)
+}
+
+// TestRefdataShortPublisherClassifiedAfterItsReplacement: the old publisher sends
+// one cycle of four datagrams and stops. With a reorder window of 8, all four stay
+// in its buffer, and Flush classifies them after the five cycles of its
+// replacement. Arrival order decides which session is the newer one, not the
+// order of classification. Decided at classification, the old publisher's era
+// discarded the new set at Flush, and then the era check rejected every datagram
+// of the new publisher until it reset.
+func TestRefdataShortPublisherClassifiedAfterItsReplacement(t *testing.T) {
+	ac := &allCapture{}
+	e := New(Config{Feed: core.FeedTOB, ReorderWindow: 8}, ac)
+
+	instrs := []uint32{1, 2, 3}
+	old := &refdataPublisher{src: srcA, ch: 1, era: 35}
+	old.cycle(e, 0, 5, instrs)
+	repl := &refdataPublisher{src: srcB, ch: 1, era: 1}
+	for i := uint64(0); i < 5; i++ {
+		repl.cycle(e, (100+i)*nsPerSec, 1, instrs)
+	}
+	e.Flush()
+	// The new publisher keeps sending, in the same Reset Count.
+	for i := uint64(0); i < 2; i++ {
+		repl.cycle(e, (105+i)*nsPerSec, 1, instrs)
+	}
+	e.Flush()
+
+	assertNewSet(t, e, ac, instrs)
 }

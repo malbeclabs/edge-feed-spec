@@ -63,6 +63,9 @@ type Engine struct {
 	// The refdata state machine reads it to tell the shutdown ManifestSummary the
 	// spec mandates from a mid-service Valid drop; see resolveValidZero.
 	sessionEnd map[uint8]struct{}
+	// refdataSessions holds, per channel, the reference-data sessions in the order
+	// their datagrams arrived; see stampRefdataSession. Lazily initialised at intake.
+	refdataSessions map[uint8]*refdataSessions
 	// captureLossEpoch counts the admissions ObserveCaptureLoss has taken. A
 	// series that carries a stale value has had a drop admitted since its last
 	// message and so has one gap the drop can account for; one that carries the
@@ -583,12 +586,20 @@ func (e *Engine) Process(src netip.Addr, f *wire.Frame, port core.Port, sf []wir
 		pt.lastArrivalSendTSSet = true
 	}
 	tuple := intakeTuple{frame: f, port: port, structFindings: sf, captureEpoch: e.captureLossEpoch}
+	if port == core.PortRefData {
+		tuple.refdataSession = new(uint64)
+	}
 
 	res := pt.enqueue(tuple, e.cfg.ReorderWindow)
 	if res.quarantine {
 		// A late datagram of an era this port left: account as transport loss, never classify.
 		e.rep.TransportLoss(port)
 		return
+	}
+	// After the quarantine test, so a straggler does not change the record, and
+	// before anything below classifies this datagram.
+	if tuple.refdataSession != nil {
+		*tuple.refdataSession = e.stampRefdataSession(pt, f.Header.ChannelID, f.Header.ResetCount)
 	}
 
 	// Step 1: classify old-era drained items BEFORE advancing era. This ensures
@@ -764,7 +775,7 @@ func (e *Engine) classify(item *bufferItem, pt *portTracker) {
 
 	// Route refdata-port frames to the reference-data state machine (Task 14+15).
 	if port == core.PortRefData {
-		e.processRefdataFrame(f, pt)
+		e.processRefdataFrame(f, pt, item.tuple.refdataSession)
 	}
 
 	// Per-feed validator routing (mktdata port only).

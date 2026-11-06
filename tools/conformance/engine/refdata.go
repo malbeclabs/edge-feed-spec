@@ -233,33 +233,49 @@ func newChannelRefdataState() *channelRefdataState {
 type refdataState struct {
 	e        *Engine
 	channels map[uint8]*channelRefdataState
-	// resetCount holds, per channel, the Reset Count of the era the state of that
-	// channel is built for; see observeEra.
-	resetCount map[uint8]uint8
-	// leftCount holds, per channel, the Reset Count of the era the channel left
-	// at its last discard.
-	leftCount map[uint8]uint8
+	// built holds, per channel, the reference-data session the state of that
+	// channel is built for; see Engine.stampRefdataSession.
+	built map[uint8]uint64
 }
 
 // newRefdataState creates a refdataState bound to the given engine.
 func newRefdataState(e *Engine) *refdataState {
 	return &refdataState{
-		e:          e,
-		channels:   make(map[uint8]*channelRefdataState),
-		resetCount: make(map[uint8]uint8),
-		leftCount:  make(map[uint8]uint8),
+		e:        e,
+		channels: make(map[uint8]*channelRefdataState),
+		built:    make(map[uint8]uint64),
 	}
 }
 
-// observeEra discards the channel's state when one instance of the channel
-// starts a new era: its first refdata datagram (first is true), or a change of
-// its Reset Count. It is the rule Engine.mbpObserveEra applies to the
-// market-by-price state.
+// refdataSessions is the arrival-order record of the reference-data sessions of
+// one channel; see Engine.stampRefdataSession. A session number is never reused:
+// the same Reset Count can name two sessions, in turn.
+type refdataSessions struct {
+	set     bool
+	last    uint64 // the last number given
+	cur     uint64 // the session the channel is in
+	curEra  uint8  // its Reset Count
+	left    uint64 // the session the channel left last
+	leftEra uint8  // its Reset Count
+	leftSet bool
+}
+
+// stampRefdataSession gives a refdata datagram of the instance pt, on channel
+// ch in Reset Count era, its reference-data session. Intake calls it, in arrival
+// order; processRefdataFrame reads the result, in classification order.
+//
+// **A session is decided at intake, not at classification.** Each instance has
+// its own reorder buffer, so the instances of one channel are classified in an
+// order that is not the order of arrival. A publisher that stops leaves its last
+// datagrams in its buffer, and Flush classifies them after the publisher that
+// replaced it. Decided at classification, those datagrams read as the newer
+// session: they discarded the new set, and the new publisher's later datagrams
+// were then of a session the channel had left.
 //
 // **The state is keyed by channel, and the era by instance.** So each new era
-// of an instance is compared with the era the channel's state is built for, the
-// first era of a new source address included. It discards the state only when
-// the two Reset Counts differ:
+// of an instance, the first era of a new source IP address included, is compared
+// with the era of the channel's session. It starts a new session only when the
+// two Reset Counts differ:
 //
 //   - A publisher that replaces another on a new address, in another Reset
 //     Count, starts a new session. Its `Manifest Seq` MAY restart from any value
@@ -268,41 +284,68 @@ func newRefdataState(e *Engine) *refdataState {
 //     publisher's `Manifest Seq` until the process restarted, and each
 //     definition of the new publisher read as tagged with a stale seq.
 //   - The same Reset Count on another address is the same session on another
-//     path: a lease move, or a second arm. Its set is the channel's set, and a
+//     path: a lease move, or a redundant path. Its set is the channel's set, and a
 //     discard would make the consumer rules wait a definition cycle for nothing.
-//
-// Only the first era of the channel in the run is recorded and not applied.
+//     An instance that changes to the channel's Reset Count joins its session
+//     the same way.
 //
 // **An address whose first era is the one the channel last left is behind the
 // reset**, not a new session. Its datagram was in transit while another address
-// entered the new era. It discards nothing and leaves the record as it is, so
-// its later entry into the new era does not discard again.
-func (rs *refdataState) observeEra(ch uint8, era uint8, first bool) {
-	if left, ok := rs.leftCount[ch]; first && ok && left == era {
-		return
+// entered the new era. It is of the session the channel left, and it leaves the
+// record as it is, so its later entry into the new era does not start another.
+//
+// It is the rule that Engine.mbpObserveEra applies to the market-by-price state.
+func (e *Engine) stampRefdataSession(pt *portTracker, ch uint8, era uint8) uint64 {
+	first := !pt.refdataEraSeeded
+	if !first && era == pt.refdataEra {
+		return pt.refdataSession
 	}
-	last, ok := rs.resetCount[ch]
-	rs.resetCount[ch] = era
-	if !ok || last == era {
-		// The first era of this channel, or the era its state is built for, seen
-		// on another address.
-		return
+	pt.refdataEra, pt.refdataEraSeeded = era, true
+	if e.refdataSessions == nil {
+		e.refdataSessions = make(map[uint8]*refdataSessions)
 	}
-	rs.leftCount[ch] = last
-	rs.onResetChannel(ch)
+	c := e.refdataSessions[ch]
+	if c == nil {
+		c = &refdataSessions{}
+		e.refdataSessions[ch] = c
+	}
+	switch {
+	case !c.set:
+		// The first era of this channel in the run.
+		c.last++
+		c.cur, c.curEra, c.set = c.last, era, true
+		pt.refdataSession = c.cur
+	case first && c.leftSet && era == c.leftEra:
+		pt.refdataSession = c.left
+	case era == c.curEra:
+		pt.refdataSession = c.cur
+	default:
+		c.left, c.leftEra, c.leftSet = c.cur, c.curEra, true
+		c.last++
+		c.cur, c.curEra = c.last, era
+		pt.refdataSession = c.cur
+	}
+	return pt.refdataSession
 }
 
-// inCurrentEra reports whether era is the era the state of channel ch is built
-// for. A datagram of another era belongs to a session the channel discarded, or
-// arrives from an address that is still behind the reset, so it feeds nothing.
+// enterSession reports whether a refdata datagram of session sess feeds the
+// state of channel ch, and discards that state when sess is newer than the
+// session the state is built for.
 //
-// Such a datagram reaches classify late when it was in a reorder buffer. A
-// publisher that stops leaves its last datagrams in its instance's buffer, and
-// Flush classifies them after the publisher that replaced it. Fed to the state,
-// the old publisher's Manifest Seq came back over the new publisher's set.
-func (rs *refdataState) inCurrentEra(ch uint8, era uint8) bool {
-	cur, ok := rs.resetCount[ch]
-	return !ok || cur == era
+// A datagram of an older session feeds nothing. It belongs to a session the
+// channel left, or it arrives from an address that is still behind the reset.
+// Fed to the state, a stopped publisher's buffered Manifest Seq came back over
+// the set of the publisher that replaced it.
+func (rs *refdataState) enterSession(ch uint8, sess uint64) bool {
+	built, ok := rs.built[ch]
+	switch {
+	case ok && sess < built:
+		return false
+	case ok && sess > built:
+		rs.onResetChannel(ch)
+	}
+	rs.built[ch] = sess
+	return true
 }
 
 func (rs *refdataState) channel(ch uint8) *channelRefdataState {
@@ -366,7 +409,8 @@ func channelReady(s *channelRefdataState) bool {
 	return s.valid && uint32(len(s.defs)) == s.expectedCount
 }
 
-// onResetChannel handles a new era of ONE channel; see observeEra. That
+// onResetChannel handles a new session of ONE channel; see
+// Engine.stampRefdataSession. That
 // channel's state is discarded per the supplement: "subscribers detect the reset
 // by comparing Reset Count against their last-seen value and discard all cached
 // state."
@@ -377,9 +421,9 @@ func channelReady(s *channelRefdataState) bool {
 // on every alternation.
 //
 // The discard is still by Channel ID, because `channels` is Channel-ID-keyed:
-// two instances sharing one Channel ID share one set. observeEra decides which
-// of their eras is a new session, so the paths of one session do not discard
-// each other's set.
+// two instances sharing one Channel ID share one set. stampRefdataSession
+// decides which of their eras is a new session, so the paths of one session do
+// not discard each other's set.
 func (rs *refdataState) onResetChannel(only uint8) {
 	for ch, s := range rs.channels {
 		if ch != only {
@@ -1058,28 +1102,26 @@ func (rs *refdataState) onDefinitionStrike(ch uint8, instrID uint32, symbol stri
 // --- Engine integration ---
 
 // processRefdataFrame is called from Engine.classify for frames arriving on
-// PortRefData.  It handles the reset-era detection, then routes ManifestSummary
+// PortRefData.  It applies the datagram's session, then routes ManifestSummary
 // (0x07) and InstrumentDefinition (0x02) messages to the state machine.
-func (e *Engine) processRefdataFrame(f *wire.Frame, pt *portTracker) {
+//
+// sess is the datagram's reference-data session, stamped at intake. Nil feeds the
+// state as it is.
+func (e *Engine) processRefdataFrame(f *wire.Frame, pt *portTracker, sess *uint64) {
 	if e.refdata == nil {
 		e.refdata = newRefdataState(e)
 	}
 
-	// Detect a new era (a new instance, or a Reset Count change → discard that
-	// channel's state when the era is a new session; see observeEra). Reset Count
-	// belongs to the channel instance — (source address, Channel ID, destination
-	// port) — so it is tracked on that instance's tracker and acts only on its own
-	// channel. Tracked per port instead, two publishers on one port read as an era
+	// Intake gave this datagram its session (see stampRefdataSession). A datagram
+	// of a newer session discards the channel's state, and one of an older session
+	// feeds nothing. Reset Count belongs to the channel instance — (source IP
+	// address, Channel ID, destination port) — so it is tracked on that instance's
+	// tracker. Tracked per port instead, two publishers on one port read as an era
 	// flip on every alternation, and each flip erases both paths' definition sets:
 	// the sets never survive to ready(), and the discard is silent because
 	// onInstrumentDef drops definitions on an invalid channel without a finding.
 	ch := f.Header.ChannelID
-	if first := !pt.refdataEraSeeded; first || f.Header.ResetCount != pt.refdataEra {
-		pt.refdataEra = f.Header.ResetCount
-		pt.refdataEraSeeded = true
-		e.refdata.observeEra(ch, f.Header.ResetCount, first)
-	}
-	if !e.refdata.inCurrentEra(ch, pt.refdataEra) {
+	if sess != nil && !e.refdata.enterSession(ch, *sess) {
 		return
 	}
 
