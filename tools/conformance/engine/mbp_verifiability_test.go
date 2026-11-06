@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"net/netip"
 	"testing"
 
 	"github.com/malbeclabs/edge-feed-spec/tools/conformance/core"
@@ -260,6 +261,233 @@ func TestMBPGroupSurvivesAnotherPortsReset(t *testing.T) {
 	_, fs := runMBPSteps(t, steps)
 	if viol, _ := countByStatus(t, fs, "MBP.SNAP.GROUP_STRUCTURE"); viol != 0 {
 		t.Errorf("a conformant group spanning another port's reset produced %d Violation(s)", viol)
+	}
+}
+
+// Each channel has its own Reset Count. A reset of one channel must not drop
+// another channel's group in flight: its later frames would read as orphans, on a
+// channel that did nothing.
+func TestMBPGroupSurvivesAnotherChannelsReset(t *testing.T) {
+	lu := mbpLevelUpdate(5, mbpClearSideBid, mbpActionNew, 1, 1000, 5)
+	steps := []mbpStep{
+		mbpFrame(core.PortSnapshot, 0, 101, 0, wire.TypeSnapshotBegin, 40, 1, mbpSnapBegin(1, 10, 1, 7, 0, 0)),
+		mbpFrame(core.PortMktData, 0, 1, 0, wire.TypeLevelUpdate, 48, 0, lu),
+		// Channel 1 resets.
+		mbpFrame(core.PortMktData, 0, 1, 1, wire.TypeLevelUpdate, 48, 0, lu),
+		mbpFrame(core.PortSnapshot, 1, 101, 0, wire.TypeSnapshotLevel, 32, 1, mbpSnapLevel(7, 1000, 5, mbpClearSideBid)),
+		mbpFrame(core.PortSnapshot, 2, 101, 0, wire.TypeSnapshotEnd, 20, 1, mbpSnapEnd(1, 10, 7)),
+	}
+	e, fs := runMBPSteps(t, steps)
+	if viol, unver := countByStatus(t, fs, "MBP.SNAP.GROUP_STRUCTURE"); viol != 0 || unver != 0 {
+		t.Errorf("channel 101's conformant group across channel 1's reset: got %d Violation / %d Unverifiable, want 0 / 0",
+			viol, unver)
+	}
+	if in, ok := e.mbp.instr[mbpInstrKey{ch: 101, instrID: 1}]; !ok || !in.baseSet {
+		t.Error("channel 101 instrument 1: the group was dropped rather than adopted")
+	}
+}
+
+// mbpRestartSteps gives one instrument a Per-Instrument Seq tracker at 50 in one
+// era, then restarts it at 1 in the next era with a real 2 -> 9 gap. Only a wipe
+// on the reset exposes the gap: without one, 1, 2 and 9 are all at or below the
+// stale tracker and are discarded as late duplicates.
+func mbpRestartSteps(ch, from, to uint8) []mbpStep {
+	lu := func(perSeq uint32) func(*wb.Body) {
+		return mbpLevelUpdate(1, mbpClearSideBid, mbpActionNew, perSeq, 1000, uint64(perSeq))
+	}
+	return []mbpStep{
+		mbpFrame(core.PortMktData, 0, ch, from, wire.TypeLevelUpdate, 48, 0, lu(50)),
+		mbpFrame(core.PortMktData, 0, ch, to, wire.TypeLevelUpdate, 48, 0, lu(1)),
+		mbpFrame(core.PortMktData, 1, ch, to, wire.TypeLevelUpdate, 48, 0, lu(2)),
+		mbpFrame(core.PortMktData, 2, ch, to, wire.TypeLevelUpdate, 48, 0, lu(9)),
+	}
+}
+
+// Any change of the Reset Count is a reset, a jump of more than 127 steps too.
+// A comparison by value read 186 -> 159 as a step back and kept the old era's
+// trackers.
+func TestMBPResetOfAnySizeWipes(t *testing.T) {
+	_, fs := runMBPSteps(t, mbpRestartSteps(1, 186, 159))
+	if viol, _ := countByStatus(t, fs, "MBP.DELTA.PERINSTR_DENSITY"); viol != 1 {
+		t.Errorf("a real gap after a 186 -> 159 reset: got %d violation(s), want 1", viol)
+	}
+}
+
+// A channel's reset is judged against its own Reset Count, not against another
+// channel's. With channel 1 at 184 first, a comparison of values read channel
+// 101's 84 -> 85 as a step back and kept the old era's trackers. The channel 1
+// frame is on refdata so that runMBPSteps classifies it before the others.
+func TestMBPResetIsJudgedPerChannel(t *testing.T) {
+	hb := func(b *wb.Body) { b.U32(0).U64(0).Pad(4) }
+	steps := append([]mbpStep{
+		mbpFrame(core.PortRefData, 0, 1, 184, wire.TypeHeartbeat, 16, 0, hb),
+	}, mbpRestartSteps(101, 84, 85)...)
+	_, fs := runMBPSteps(t, steps)
+	if viol, _ := countByStatus(t, fs, "MBP.DELTA.PERINSTR_DENSITY"); viol != 1 {
+		t.Errorf("a real gap after channel 101's reset: got %d violation(s), want 1", viol)
+	}
+}
+
+// A port that is behind the reset belongs to an era the channel left. Its frames
+// must wipe nothing, or the state the leading port built in the current era is
+// lost and a real gap in it is swallowed.
+func TestMBPLaggingPortDoesNotWipe(t *testing.T) {
+	lu := func(perSeq uint32) func(*wb.Body) {
+		return mbpLevelUpdate(1, mbpClearSideBid, mbpActionNew, perSeq, 1000, uint64(perSeq))
+	}
+	hb := func(b *wb.Body) { b.U32(0).U64(0).Pad(4) }
+	steps := []mbpStep{
+		mbpFrame(core.PortRefData, 0, 0, 1, wire.TypeHeartbeat, 16, 0, hb),
+		mbpFrame(core.PortMktData, 0, 0, 1, wire.TypeLevelUpdate, 48, 0, lu(1)),
+		mbpFrame(core.PortMktData, 0, 0, 2, wire.TypeLevelUpdate, 48, 0, lu(1)),
+		mbpFrame(core.PortMktData, 0, 0, 3, wire.TypeLevelUpdate, 48, 0, lu(1)),
+		mbpFrame(core.PortMktData, 1, 0, 3, wire.TypeLevelUpdate, 48, 0, lu(2)),
+		// refdata catches up one era at a time, behind mktdata.
+		mbpFrame(core.PortRefData, 0, 0, 2, wire.TypeHeartbeat, 16, 0, hb),
+		mbpFrame(core.PortRefData, 0, 0, 3, wire.TypeHeartbeat, 16, 0, hb),
+		// A real 2 -> 9 publisher gap in era 3.
+		mbpFrame(core.PortMktData, 2, 0, 3, wire.TypeLevelUpdate, 48, 0, lu(9)),
+	}
+	_, fs := runMBPSteps(t, steps)
+	if viol, _ := countByStatus(t, fs, "MBP.DELTA.PERINSTR_DENSITY"); viol != 1 {
+		t.Errorf("a real gap after a lagging port caught up: got %d violation(s), want 1", viol)
+	}
+}
+
+// mbpAddrStep is one mbpStep sent from a given source address.
+type mbpAddrStep struct {
+	src netip.Addr
+	mbpStep
+}
+
+// runMBPAddrSteps is runMBPSteps with a source address per step. It flushes at
+// each change of port or address.
+func runMBPAddrSteps(t *testing.T, steps []mbpAddrStep) []core.Finding {
+	t.Helper()
+	ac := &allCapture{}
+	e := New(Config{Feed: core.FeedMBP, SourceRegistry: stubRegistry{}}, ac)
+	for i, s := range steps {
+		if i > 0 && (s.port != steps[i-1].port || s.src != steps[i-1].src) {
+			e.Flush()
+		}
+		f, sf := wire.Decode(s.raw, wire.MagicMBP)
+		e.Process(s.src, f, s.port, sf)
+	}
+	e.Flush()
+	e.EndRun()
+	return ac.findings
+}
+
+// A publisher that restarts on a new source address starts a new era for the
+// channel. The market-by-price state is keyed by channel, so the first era of
+// the new address has to discard the state of the old one. Without the wipe,
+// the new session's 1, 2 and 9 are at or below the stale tracker and are
+// discarded as late duplicates, and the real 2 -> 9 gap is not seen.
+func TestMBPRestartOnNewAddressWipes(t *testing.T) {
+	steps := mbpRestartSteps(1, 5, 6)
+	addr := []mbpAddrStep{{srcA, steps[0]}}
+	for _, s := range steps[1:] {
+		addr = append(addr, mbpAddrStep{srcB, s})
+	}
+	fs := runMBPAddrSteps(t, addr)
+	if viol, _ := countByStatus(t, fs, "MBP.DELTA.PERINSTR_DENSITY"); viol != 1 {
+		t.Errorf("a real gap after a restart on a new address: got %d violation(s), want 1", viol)
+	}
+}
+
+// One reset wipes the channel once, also when the channel's ports are on two
+// addresses. Here the mktdata series moved to a new address before the reset,
+// and the refdata series is still on the old one. The refdata port enters the
+// new era after the gap's first half: a second wipe there discards the tracker
+// at 2, and the real 2 -> 9 gap is not seen.
+func TestMBPLeaseMoveWipesOncePerReset(t *testing.T) {
+	lu := func(perSeq uint32) func(*wb.Body) {
+		return mbpLevelUpdate(1, mbpClearSideBid, mbpActionNew, perSeq, 1000, uint64(perSeq))
+	}
+	hb := func(b *wb.Body) { b.U32(0).U64(0).Pad(4) }
+	fs := runMBPAddrSteps(t, []mbpAddrStep{
+		{srcA, mbpFrame(core.PortRefData, 0, 1, 5, wire.TypeHeartbeat, 16, 0, hb)},
+		{srcA, mbpFrame(core.PortMktData, 0, 1, 5, wire.TypeLevelUpdate, 48, 0, lu(50))},
+		// The lease moves: mktdata continues on srcB, in the same era.
+		{srcB, mbpFrame(core.PortMktData, 1, 1, 5, wire.TypeLevelUpdate, 48, 0, lu(51))},
+		// The reset.
+		{srcB, mbpFrame(core.PortMktData, 0, 1, 6, wire.TypeLevelUpdate, 48, 0, lu(1))},
+		{srcB, mbpFrame(core.PortMktData, 1, 1, 6, wire.TypeLevelUpdate, 48, 0, lu(2))},
+		{srcA, mbpFrame(core.PortRefData, 0, 1, 6, wire.TypeHeartbeat, 16, 0, hb)},
+		{srcB, mbpFrame(core.PortMktData, 2, 1, 6, wire.TypeLevelUpdate, 48, 0, lu(9))},
+	})
+	if viol, _ := countByStatus(t, fs, "MBP.DELTA.PERINSTR_DENSITY"); viol != 1 {
+		t.Errorf("a real gap after a reset across a lease move: got %d violation(s), want 1", viol)
+	}
+}
+
+// An address whose first classified datagram is from the era the channel last
+// left is behind the reset, not a new session. Here the snapshot series is on
+// another address, and its era 5 SnapshotBegin is still in its reorder buffer
+// when mktdata wipes for era 6. That datagram must not wipe the channel, and
+// the snapshot address must not wipe again when it enters era 6, or the real
+// 2 -> 9 gap is not seen.
+func TestMBPLaggingAddressDoesNotWipe(t *testing.T) {
+	lu := func(perSeq uint32) func(*wb.Body) {
+		return mbpLevelUpdate(1, mbpClearSideBid, mbpActionNew, perSeq, 1000, uint64(perSeq))
+	}
+	hb := func(b *wb.Body) { b.U32(0).U64(0).Pad(4) }
+	const ch = 1
+	ac := &allCapture{}
+	// A window of 1 holds one datagram per series, so the order of classification
+	// is exact.
+	e := New(Config{Feed: core.FeedMBP, SourceRegistry: stubRegistry{}, ReorderWindow: 1}, ac)
+	send := func(src netip.Addr, s mbpStep) {
+		f, sf := wire.Decode(s.raw, wire.MagicMBP)
+		e.Process(src, f, s.port, sf)
+	}
+	send(srcA, mbpFrame(core.PortMktData, 0, ch, 5, wire.TypeLevelUpdate, 48, 0, lu(50)))
+	e.Flush()
+	send(srcB, mbpFrame(core.PortSnapshot, 0, ch, 5, wire.TypeSnapshotBegin, 40, 1, mbpSnapBegin(1, 10, 1, 7, 0, 0)))
+	// The reset, on mktdata: era 6 wipes the channel and Per-Instrument Seq
+	// restarts at 1.
+	send(srcA, mbpFrame(core.PortMktData, 0, ch, 6, wire.TypeLevelUpdate, 48, 0, lu(1)))
+	send(srcA, mbpFrame(core.PortMktData, 1, ch, 6, wire.TypeLevelUpdate, 48, 0, lu(2)))
+	send(srcA, mbpFrame(core.PortMktData, 2, ch, 6, wire.TypeHeartbeat, 16, 0, hb))
+	// The snapshot address classifies its era 5 SnapshotBegin, then enters era 6.
+	send(srcB, mbpFrame(core.PortSnapshot, 0, ch, 6, wire.TypeHeartbeat, 16, 0, hb))
+	send(srcB, mbpFrame(core.PortSnapshot, 1, ch, 6, wire.TypeHeartbeat, 16, 0, hb))
+	// A real 2 -> 9 publisher gap in era 6.
+	send(srcA, mbpFrame(core.PortMktData, 3, ch, 6, wire.TypeLevelUpdate, 48, 0, lu(9)))
+	e.Flush()
+	e.EndRun()
+	if viol, _ := countByStatus(t, ac.findings, "MBP.DELTA.PERINSTR_DENSITY"); viol != 1 {
+		t.Errorf("a real gap after a reset that an address behind it crossed later: got %d violation(s), want 1", viol)
+	}
+}
+
+// A run of datagrams of an era the port left, longer than the reorder window,
+// is the channel's series, and the port enters that era. The checker dropped
+// the first datagrams of that run itself, so the era starts tainted: the levels
+// of a group whose SnapshotBegin it dropped are Unverifiable, not orphans.
+func TestMBPStragglerRunEntersEraTainted(t *testing.T) {
+	hb := func(b *wb.Body) { b.U32(0).U64(0).Pad(4) }
+	const ch = 1
+	steps := []mbpStep{
+		mbpFrame(core.PortSnapshot, 0, ch, 1, wire.TypeHeartbeat, 16, 0, hb),
+		// A complete group in era 2, so that a later orphan is not a cold start.
+		mbpFrame(core.PortSnapshot, 0, ch, 2, wire.TypeSnapshotBegin, 40, 1, mbpSnapBegin(1, 10, 1, 6, 0, 0)),
+		mbpFrame(core.PortSnapshot, 1, ch, 2, wire.TypeSnapshotLevel, 32, 1, mbpSnapLevel(6, 1000, 5, mbpClearSideBid)),
+		mbpFrame(core.PortSnapshot, 2, ch, 2, wire.TypeSnapshotEnd, 20, 1, mbpSnapEnd(1, 10, 6)),
+	}
+	// The channel returns to Reset Count 1 with a 20-level group, one message
+	// per datagram.
+	const levels = 20
+	steps = append(steps, mbpFrame(core.PortSnapshot, 1, ch, 1, wire.TypeSnapshotBegin, 40, 1, mbpSnapBegin(1, 10, levels, 7, 0, 0)))
+	for i := 0; i < levels; i++ {
+		steps = append(steps, mbpFrame(core.PortSnapshot, uint64(2+i), ch, 1, wire.TypeSnapshotLevel, 32, 1,
+			mbpSnapLevel(7, int64(1000+i), 5, mbpClearSideBid)))
+	}
+	steps = append(steps, mbpFrame(core.PortSnapshot, uint64(2+levels), ch, 1, wire.TypeSnapshotEnd, 20, 1, mbpSnapEnd(1, 10, 7)))
+	_, fs := runMBPSteps(t, steps)
+	if viol, unver := countByStatus(t, fs, "MBP.SNAP.GROUP_STRUCTURE"); viol != 0 || unver == 0 {
+		t.Errorf("a group whose SnapshotBegin the checker dropped: got %d Violation / %d Unverifiable, want 0 / more than 0",
+			viol, unver)
 	}
 }
 
