@@ -5,16 +5,26 @@ package engine
 // checkMidpoint is the per-feed hook for frames arriving on the mktdata port of
 // the Midpoint feed.  It runs only the Tier-2 refdata-consumer checks; Tier-1
 // structural checks (MID.STRUCT_LEN_TYPE, MID.METHOD_RANGE, MID.QUALITY_FLAGS,
-// MID.TIMESTAMP_ORDERING) already ran in checkTier1/checkTier1Mid and MUST NOT
-// be repeated here (no duplicate findings).
+// MID.TIMESTAMP_ORDERING and the schema-3 Method, Window and Volume rules)
+// already ran in checkTier1/checkTier1Mid and MUST NOT be repeated here (no
+// duplicate findings).
 //
 // Rules implemented here:
 //
 //	MID.METHOD0_REQUIRES_DEFAULT (must, T2, StateRefdata)
-//	    A Midpoint message with Method==0 ("use instrument default") is a Violation
-//	    when the instrument's InstrumentDefinition has Default Method==0 (no real
-//	    default defined). Gate: if the channel's refdata is not yet ready() → NA.
-//	    Non-zero Method → not applicable (rule fires only on Method==0).
+//	    Schema 1 only. A Midpoint message with Method==0 ("use instrument
+//	    default") is a Violation when the instrument's InstrumentDefinition has
+//	    Default Method==0 (no real default defined). Gate: if the channel's
+//	    refdata is not yet ready() → NA. Non-zero Method, or schema 3, which has
+//	    no Default Method → not applicable. A definition with no Default Method
+//	    (a schema-3 definition for a schema-1 message) → unverifiable,
+//	    transition.
+//
+//	MID.SOURCE_ID_MATCHES_DEFINITION (must, T2, StateRefdata)
+//	    Schema 3 only. Source ID MUST equal the Source ID in the instrument's
+//	    InstrumentDefinition. Gate as above. Schema 1 has no Source ID → not
+//	    applicable. A definition with no Source ID (a schema-1 definition for a
+//	    schema-3 message) → unverifiable, transition.
 //
 //	MID.PRICE_BOUND (must, T2, StateRefdata)
 //	    Gate: if the channel's refdata is not yet ready() → NA.
@@ -51,22 +61,25 @@ func (e *Engine) checkMidpoint(f *wire.Frame, port core.Port, ch uint8) {
 		// Only process canonical-length messages; non-canonical lengths already
 		// triggered MID.STRUCT_LEN_TYPE in checkTier1Mid. Reading body bytes from
 		// a truncated/oversized message would produce garbage field values.
-		if m.Length != 40 {
+		schema := f.Header.SchemaVersion
+		if want := midpointLen(schema); want == 0 || m.Length != want {
 			continue
 		}
-		instrID := midpointInstrumentID(m)
-		method := midpointMethod(m)
-		midPrice := midpointMidPrice(m)
-		e.checkMidpointRefdata(port, f.Header.Sequence, ch, instrID, method, midPrice)
+		e.checkMidpointRefdata(port, f.Header.Sequence, ch, schema, m)
 	}
 }
 
-// checkMidpointRefdata implements MID.METHOD0_REQUIRES_DEFAULT and MID.PRICE_BOUND
-// for a single Midpoint message.
+// checkMidpointRefdata implements MID.METHOD0_REQUIRES_DEFAULT,
+// MID.SOURCE_ID_MATCHES_DEFINITION and MID.PRICE_BOUND for a single Midpoint
+// message of canonical length.
 //
 // Gate: if refdata is nil or the channel has not reached ready(), both rules are
 // NA — the instrument may simply not have been delivered yet (cold start).
-func (e *Engine) checkMidpointRefdata(port core.Port, seq uint64, ch uint8, instrID uint32, method uint8, midPrice int64) {
+func (e *Engine) checkMidpointRefdata(port core.Port, seq uint64, ch uint8, schema uint8, m wire.Message) {
+	instrID := midpointInstrumentID(m)
+	method := midpointMethod(m)
+	midPrice := midpointPrice(m)
+
 	if e.refdata == nil {
 		// No refdata frames received at all: cold start, rules are NA.
 		e.emitMidNA(port, seq, ch, instrID, "refdata not yet received (cold start)")
@@ -81,22 +94,49 @@ func (e *Engine) checkMidpointRefdata(port core.Port, seq uint64, ch uint8, inst
 		return
 	}
 
-	// Both rules below account for the message either way — pass, violation, or NA
+	// The rules below account for the message either way — pass, violation, or NA
 	// when this message is not in the rule's scope at all (engine/denominator.go).
 
 	// MID.METHOD0_REQUIRES_DEFAULT: method==0 means "use the instrument's default".
 	// If the instrument's Default Method is also 0 (no real default), that is a Violation.
 	switch {
+	case schema != 1:
+		// Schema 3 has no Default Method. MID.METHOD_NOT_UNKNOWN judges Method 0.
+		e.inapplicable("MID.METHOD0_REQUIRES_DEFAULT", port, seq, ch, instrID,
+			fmt.Sprintf("instrument %d: schema %d has no Default Method", instrID, schema))
 	case method != 0:
 		// The message names its own method, so there is no default to require.
 		e.inapplicable("MID.METHOD0_REQUIRES_DEFAULT", port, seq, ch, instrID,
 			fmt.Sprintf("instrument %d: Midpoint Method=%d does not defer to the instrument default", instrID, method))
+	case di.hasSourceID:
+		// A schema-3 definition has no Default Method, so defaultMethod is 0
+		// by absence, not by declaration.
+		e.unverified("MID.METHOD0_REQUIRES_DEFAULT", core.ReasonTransition, port, seq, ch, instrID,
+			fmt.Sprintf("instrument %d: the accepted definition has no Default Method; it is schema 3", instrID))
 	case di.defaultMethod == 0:
 		e.Emit("MID.METHOD0_REQUIRES_DEFAULT", core.Violation, port, seq, ch, instrID,
 			fmt.Sprintf("instrument %d: Midpoint Method=0 but InstrumentDefinition Default Method=0 (no default defined)", instrID))
 	default:
 		e.passed("MID.METHOD0_REQUIRES_DEFAULT", port, seq, ch, instrID,
 			fmt.Sprintf("instrument %d: Midpoint Method=0 deferring to Default Method=%d", instrID, di.defaultMethod))
+	}
+
+	// MID.SOURCE_ID_MATCHES_DEFINITION: "MUST equal the Source ID in the
+	// instrument's InstrumentDefinition".
+	src := midpointSourceID(m)
+	switch {
+	case schema != 3:
+		e.inapplicable("MID.SOURCE_ID_MATCHES_DEFINITION", port, seq, ch, instrID,
+			fmt.Sprintf("instrument %d: a schema-%d Midpoint has no Source ID", instrID, schema))
+	case !di.hasSourceID:
+		e.unverified("MID.SOURCE_ID_MATCHES_DEFINITION", core.ReasonTransition, port, seq, ch, instrID,
+			fmt.Sprintf("instrument %d: the accepted definition has no Source ID; it is not schema 3", instrID))
+	case src != di.sourceID:
+		e.Emit("MID.SOURCE_ID_MATCHES_DEFINITION", core.Violation, port, seq, ch, instrID,
+			fmt.Sprintf("instrument %d: Midpoint Source ID %d != InstrumentDefinition Source ID %d", instrID, src, di.sourceID))
+	default:
+		e.passed("MID.SOURCE_ID_MATCHES_DEFINITION", port, seq, ch, instrID,
+			fmt.Sprintf("instrument %d: Midpoint Source ID %d matches its definition", instrID, src))
 	}
 
 	// MID.PRICE_BOUND: check price against the instrument's Price Bound.
@@ -119,9 +159,10 @@ func (e *Engine) checkMidpointRefdata(port core.Port, seq uint64, ch uint8, inst
 	}
 }
 
-// emitMidNA emits NA for both MID.METHOD0_REQUIRES_DEFAULT and MID.PRICE_BOUND
-// with the same detail string (cold-start / not-ready gate).
+// emitMidNA emits NA for every refdata-gated midpoint rule with the same detail
+// string (cold-start / not-ready gate).
 func (e *Engine) emitMidNA(port core.Port, seq uint64, ch uint8, instrID uint32, detail string) {
 	e.Emit("MID.METHOD0_REQUIRES_DEFAULT", core.NA, port, seq, ch, instrID, detail)
+	e.Emit("MID.SOURCE_ID_MATCHES_DEFINITION", core.NA, port, seq, ch, instrID, detail)
 	e.Emit("MID.PRICE_BOUND", core.NA, port, seq, ch, instrID, detail)
 }

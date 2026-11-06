@@ -398,10 +398,10 @@ func buildTOBGoldenEntries() []goldenPcapEntry {
 
 // ---- Midpoint golden capture ----
 
-// buildMidpointGoldenEntries builds a conformant Midpoint session:
-//   - refdata: ManifestSummary + InstrumentDef (defaultMethod=1, priceBound=0) +
+// buildMidpointGoldenEntries builds a conformant schema-3 Midpoint session:
+//   - refdata: ManifestSummary + InstrumentDef (sourceID=7, priceBound=0) +
 //     ManifestSummary
-//   - one Midpoint message with Method=1 and midPrice=500 (non-negative → pass)
+//   - one VWAP Midpoint with sourceID=7, Window=60000 ms and Volume=7
 func buildMidpointGoldenEntries() []goldenPcapEntry {
 	const ch = uint8(1)
 	const instrID = uint32(800)
@@ -427,35 +427,34 @@ func buildMidpointGoldenEntries() []goldenPcapEntry {
 		}).Bytes()
 	addRef(mf, 1)
 
-	// InstrumentDefinition (64 bytes, Midpoint layout)
-	// defaultMethod=1 (non-zero → MID.METHOD0_REQUIRES_DEFAULT won't fire for Method=1)
+	// InstrumentDefinition (130 bytes, the shared layout)
+	// sourceID=7 (the Midpoint below carries the same)
 	// priceBound=0 (no price constraint)
 	idef := wb.Frame(wire.MagicMid).Channel(ch).
-		Msg(wire.TypeInstrumentDef, 64, func(b *wb.Body) {
+		Msg(wire.TypeInstrumentDef, 130, func(b *wb.Body) {
 			b.U32(instrID) // Instrument ID  body[0:4]
-			b.Pad(34)      // opaque fields  body[4:38]
-			b.U8(1)        // Default Method body[38] = 1 (non-zero)
-			b.U8(0)        // Price Bound    body[39] = 0 (no constraint)
-			b.Pad(16)      // opaque fields  body[40:56]
-			b.U16(1)       // Manifest Seq   body[56:58]
-			b.Pad(2)       // Reserved       body[58:60]
+			b.U16(7)       // Source ID      body[4:6]
+			b.Pad(117)     // opaque fields  body[6:123]
+			b.U8(0)        // Price Bound    body[123] = 0 (no constraint)
+			b.U16(1)       // Manifest Seq   body[124:126]
 		}).Bytes()
 	addRef(idef, 2)
 
 	// ManifestSummary again
 	addRef(mf, 3)
 
-	// Midpoint message: Method=1 (explicit, non-zero), midPrice=500 (positive)
+	// Midpoint message: a VWAP over 60 s with trades in the window.
 	mid := wb.Frame(wire.MagicMid).Channel(ch).
-		Msg(wire.TypeMidpoint, 40, func(b *wb.Body) {
-			b.U32(instrID)       // InstrumentID   body[0:4]
-			b.Pad(2)             // Reserved        body[4:6]
-			b.U8(1)              // Method=1        body[6]
+		Msg(wire.TypeMidpoint, 48, func(b *wb.Body) {
+			b.U32(instrID)       // InstrumentID    body[0:4]
+			b.U16(7)             // SourceID=7      body[4:6]
+			b.U8(5)              // Method=VWAP     body[6]
 			b.U8(0)              // QualityFlags    body[7]
-			b.U64(1_000_000_000) // BookTS          body[8:16]
+			b.U64(1_000_000_000) // InputTS         body[8:16]
 			b.U64(1_000_000_001) // ComputeTS       body[16:24]
-			b.I64(500)           // MidPrice=500    body[24:32]
-			b.Pad(4)             // Reserved        body[32:36]
+			b.I64(500)           // Price=500       body[24:32]
+			b.U32(60_000)        // Window=60000 ms body[32:36]
+			b.U64(7)             // Volume=7        body[36:44]
 		}).Bytes()
 	addMkt(mid, 1)
 

@@ -18,18 +18,19 @@ func TestInstrDefLayoutFor(t *testing.T) {
 		priceBound    int
 		defaultMethod int
 	}{
-		// Schema 3: the current five-feed layout.
+		// Schema 3: the current layout, which midpoint shares from 3.0.0.
 		{"tob schema 3", core.FeedTOB, 3, true, 130, 124, 123, -1},
+		{"midpoint schema 3", core.FeedMidpoint, 3, true, 130, 124, 123, -1},
 		{"mbo schema 3", core.FeedMBO, 3, true, 130, 124, 123, -1},
 		{"mbp schema 3", core.FeedMBP, 3, true, 130, 124, 123, -1},
 		// Schema 1: the 80-byte layout, recovered from tag top-of-book/v1.0.0.
 		{"tob schema 1", core.FeedTOB, 1, true, 80, 74, 73, -1},
 		{"mbo schema 1", core.FeedMBO, 1, true, 80, 74, 73, -1},
-		// Midpoint never left its own 64-byte variant.
+		// Midpoint schema 1: its own 64-byte variant, from tag midpoint/v1.0.1.
 		{"midpoint schema 1", core.FeedMidpoint, 1, true, 64, 56, 39, 38},
 		// Not supported.
 		{"tob schema 2 was never deployed", core.FeedTOB, 2, false, 0, 0, 0, 0},
-		{"midpoint schema 3 does not exist", core.FeedMidpoint, 3, false, 0, 0, 0, 0},
+		{"midpoint schema 2 was never released", core.FeedMidpoint, 2, false, 0, 0, 0, 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -7,9 +7,10 @@ import "github.com/malbeclabs/edge-feed-spec/tools/conformance/core"
 // to the message body, so they are the spec offset minus the 4-byte message
 // header. An absent field is -1.
 //
-// The InstrumentDefinition layout is the only part of the wire format that moves
-// between the schema versions this tool accepts, which is why one table covers
-// multi-schema support for the whole engine.
+// The InstrumentDefinition layout is one of two parts of the wire format that
+// move between the schema versions this tool accepts. The other is the midpoint
+// feed's own Midpoint message, 40 bytes at schema 1 and 48 at schema 3. Its
+// fields keep their offsets, so midpointLen in fields.go is all it needs.
 //
 // **The table says where a field is, not whether a feed reads it.** A row gives
 // the offsets for its (feed, schema) pair; which of those fields a given feed
@@ -27,7 +28,7 @@ type instrDefLayout struct {
 	DefaultMethod int
 }
 
-// Body offsets for the three layouts. Read spec offsets from the tables named in
+// Body offsets for the three layouts. Midpoint schema 3 uses instrDefSchema3. Read spec offsets from the tables named in
 // each comment and subtract 4.
 //
 // **Schema 1's layout is not in the current spec files.** The 80-byte
@@ -50,7 +51,8 @@ var (
 	// Instrument ID spec 4, Source ID spec 8, Symbol spec 10 (char[64]), Price Bound spec 127, Manifest Seq spec 128.
 	instrDefSchema3 = instrDefLayout{MsgLen: 130, InstrumentID: 0, SourceID: 4, Symbol: 6, SymbolLen: 64, ManifestSeq: 124, PriceBound: 123, DefaultMethod: -1}
 
-	// midpoint/spec.md, still at 1.0.x with the slimmed 64-byte variant:
+	// Midpoint schema 1, the 64-byte variant. Retired by midpoint 3.0.0, so
+	// verify against tag `midpoint/v1.0.1`, not HEAD:
 	// Instrument ID spec 4, Symbol spec 8 (char[16]), Default Method spec 42, Price Bound spec 43, Manifest Seq spec 60.
 	instrDefMidpoint = instrDefLayout{MsgLen: 64, InstrumentID: 0, SourceID: -1, Symbol: 4, SymbolLen: 16, ManifestSeq: 56, PriceBound: 39, DefaultMethod: 38}
 )
@@ -60,11 +62,8 @@ var (
 // the caller must not fall back to a default layout, because decoding 130-byte
 // offsets out of an 80-byte message reads garbage rather than failing.
 func instrDefLayoutFor(feed core.Feed, schema uint8) (instrDefLayout, bool) {
-	if feed == core.FeedMidpoint {
-		if schema == 1 {
-			return instrDefMidpoint, true
-		}
-		return instrDefLayout{}, false
+	if feed == core.FeedMidpoint && schema == 1 {
+		return instrDefMidpoint, true
 	}
 	switch schema {
 	case 1:

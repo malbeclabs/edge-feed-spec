@@ -3,10 +3,20 @@ package engine
 // midpoint_test.go — Tests for the Midpoint feed validator (Task 17).
 //
 // Covers:
-//   - MID.METHOD0_REQUIRES_DEFAULT: fires for Method=0 when instrument's Default
-//     Method is also 0; silent when Method!=0; NA before refdata is ready.
+//   - MID.METHOD0_REQUIRES_DEFAULT (schema 1): fires for Method=0 when
+//     instrument's Default Method is also 0; silent when Method!=0; NA before
+//     refdata is ready, and NA at schema 3.
 //   - MID.PRICE_BOUND: fires for negative Mid Price when Price Bound==1 or 2;
 //     silent when Price Bound==0; NA before refdata is ready.
+//   - MID.SOURCE_ID_MATCHES_DEFINITION (schema 3): pass, violation, NA at
+//     schema 1, and unverifiable against a schema-1 definition.
+//   - MID.METHOD0_REQUIRES_DEFAULT: unverifiable for a schema-1 Method 0
+//     against a schema-3 definition.
+//   - The schema-3 tier-1 rules where the tier-1 table cannot reach: method 0
+//     at schema 1, and a method with no definition.
+//
+// The schema-1 tests forge Schema Version 1. The fixtures default to the
+// feed's current schema, which is 3.
 //
 // Uses the same Engine-level helpers (allCapture, findingsFor, etc.) defined in
 // refdata_test.go and the wirebuild package for frame construction.
@@ -65,7 +75,7 @@ func reachedReadyMid(e *Engine, ch uint8, instrID uint32, defaultMethod, priceBo
 	seq := startSeq
 
 	// ManifestSummary: valid=1, manifestSeq=1, count=1.
-	rawMf := wb.Frame(wire.MagicMid).
+	rawMf := wb.Frame(wire.MagicMid).Schema(1).
 		Channel(ch).
 		Msg(wire.TypeManifest, 24, manifestBody(1, 1, 1)).
 		Bytes()
@@ -75,7 +85,7 @@ func reachedReadyMid(e *Engine, ch uint8, instrID uint32, defaultMethod, priceBo
 	seq++
 
 	// InstrumentDefinition with metadata.
-	rawDef := wb.Frame(wire.MagicMid).
+	rawDef := wb.Frame(wire.MagicMid).Schema(1).
 		Channel(ch).
 		Msg(wire.TypeInstrumentDef, 64, instrDefMidBodyWithMeta(instrID, 1, defaultMethod, priceBound)).
 		Bytes()
@@ -85,7 +95,7 @@ func reachedReadyMid(e *Engine, ch uint8, instrID uint32, defaultMethod, priceBo
 	seq++
 
 	// Second ManifestSummary to close the cycle.
-	rawMf2 := wb.Frame(wire.MagicMid).
+	rawMf2 := wb.Frame(wire.MagicMid).Schema(1).
 		Channel(ch).
 		Msg(wire.TypeManifest, 24, manifestBody(1, 1, 1)).
 		Bytes()
@@ -101,7 +111,7 @@ func reachedReadyMid(e *Engine, ch uint8, instrID uint32, defaultMethod, priceBo
 // method: 0 = use instrument default; 1–4 specific methods.
 // midPrice: raw i64 Mid Price (Body[24]).
 func buildMidpointFrame(ch uint8, instrID uint32, method uint8, midPrice int64) []byte {
-	return wb.Frame(wire.MagicMid).
+	return wb.Frame(wire.MagicMid).Schema(1).
 		Channel(ch).
 		Msg(wire.TypeMidpoint, 40, func(b *wb.Body) {
 			b.U32(instrID)       // InstrumentID  Body[0:4]
@@ -360,7 +370,7 @@ func TestMidNoTier1Duplication(t *testing.T) {
 
 	// Build a Midpoint with QualityFlags having reserved bits 4-7 set (0xF0).
 	// This causes checkTier1Mid to emit exactly one MID.QUALITY_FLAGS finding.
-	raw := wb.Frame(wire.MagicMid).
+	raw := wb.Frame(wire.MagicMid).Schema(1).
 		Channel(ch).
 		Msg(wire.TypeMidpoint, 40, func(b *wb.Body) {
 			b.U32(instrID)       // InstrumentID  Body[0:4]
@@ -392,5 +402,220 @@ func TestMidNoTier1Duplication(t *testing.T) {
 		if len(findingsFor(ac, ruleID)) > 0 {
 			t.Errorf("%s: unexpected finding (message was otherwise valid)", ruleID)
 		}
+	}
+}
+
+// --- Schema 3 ---
+
+// instrDefMid3Body builds a schema-3 InstrumentDefinition body (130-byte msg)
+// with a Source ID and a Price Bound.
+func instrDefMid3Body(instrID uint32, manifestSeq, sourceID uint16, priceBound uint8) func(*wb.Body) {
+	return func(b *wb.Body) {
+		b.U32(instrID)     // Body[0:4]     Instrument ID
+		b.U16(sourceID)    // Body[4:6]     Source ID       ← spec offset 8
+		b.Pad(117)         // Body[6:123]   opaque fields
+		b.U8(priceBound)   // Body[123]     Price Bound     ← spec offset 127
+		b.U16(manifestSeq) // Body[124:126] Manifest Seq    ← spec offset 128
+	}
+}
+
+// reachedReadyMid3 is reachedReadyMid at schema 3. defSchema is the Schema
+// Version of the definition frame, so a test can send a schema-1 definition
+// before schema-3 traffic.
+func reachedReadyMid3(e *Engine, ch uint8, instrID uint32, sourceID uint16, priceBound uint8, defSchema uint8, startSeq uint64) uint64 {
+	seq := startSeq
+	send := func(raw []byte) {
+		f, sf := wire.Decode(raw, wire.MagicMid)
+		f.Header.Sequence = seq
+		e.Process(srcA, f, core.PortRefData, sf)
+		seq++
+	}
+	send(wb.Frame(wire.MagicMid).Channel(ch).Msg(wire.TypeManifest, 24, manifestBody(1, 1, 1)).Bytes())
+	if defSchema == 1 {
+		send(wb.Frame(wire.MagicMid).Schema(1).Channel(ch).
+			Msg(wire.TypeInstrumentDef, 64, instrDefMidBodyWithMeta(instrID, 1, 1, priceBound)).Bytes())
+	} else {
+		send(wb.Frame(wire.MagicMid).Channel(ch).
+			Msg(wire.TypeInstrumentDef, 130, instrDefMid3Body(instrID, 1, sourceID, priceBound)).Bytes())
+	}
+	send(wb.Frame(wire.MagicMid).Channel(ch).Msg(wire.TypeManifest, 24, manifestBody(1, 1, 1)).Bytes())
+	return seq
+}
+
+// buildMidpoint3Frame builds a schema-3 Midpoint (48 bytes).
+func buildMidpoint3Frame(ch uint8, instrID uint32, sourceID uint16, method uint8, price int64) []byte {
+	return wb.Frame(wire.MagicMid).
+		Channel(ch).
+		Msg(wire.TypeMidpoint, 48, func(b *wb.Body) {
+			b.U32(instrID)       // Body[0:4]   Instrument ID
+			b.U16(sourceID)      // Body[4:6]   Source ID
+			b.U8(method)         // Body[6]     Method
+			b.U8(0)              // Body[7]     Quality Flags
+			b.U64(1_000_000_000) // Body[8:16]  Input Timestamp
+			b.U64(1_000_000_001) // Body[16:24] Compute Timestamp
+			b.I64(price)         // Body[24:32] Price
+			b.U32(0)             // Body[32:36] Window
+			b.U64(0)             // Body[36:44] Volume
+		}).
+		Bytes()
+}
+
+func processMid(e *Engine, raw []byte, port core.Port, seq uint64) {
+	f, sf := wire.Decode(raw, wire.MagicMid)
+	f.Header.Sequence = seq
+	e.Process(srcA, f, port, sf)
+	e.Flush()
+}
+
+// statusesFor returns the statuses one rule reported, in order.
+func statusesFor(ac *allCapture, ruleID string) []core.Status {
+	var out []core.Status
+	for _, f := range findingsFor(ac, ruleID) {
+		out = append(out, f.Status)
+	}
+	return out
+}
+
+func TestMidSourceIDMatchesDefinition(t *testing.T) {
+	const ch, instrID = uint8(1), uint32(42)
+	cases := []struct {
+		name   string
+		src    uint16
+		status core.Status
+	}{
+		{"equal", 7, core.Pass},
+		{"different", 8, core.Violation},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			e, ac := newMidEngine()
+			reachedReadyMid3(e, ch, instrID, 7, 0, 3, 100)
+			clearFindings(ac)
+			processMid(e, buildMidpoint3Frame(ch, instrID, c.src, 1, 500), core.PortMktData, 1)
+			got := statusesFor(ac, "MID.SOURCE_ID_MATCHES_DEFINITION")
+			if len(got) != 1 || got[0] != c.status {
+				t.Errorf("statuses = %v, want [%v]", got, c.status)
+			}
+		})
+	}
+}
+
+// A schema-1 Midpoint has no Source ID, so the rule does not apply. A
+// schema-3 Midpoint against a schema-1 definition cannot be judged.
+func TestMidSourceIDAcrossSchemas(t *testing.T) {
+	const ch, instrID = uint8(1), uint32(42)
+
+	e, ac := newMidEngine()
+	reachedReadyMid(e, ch, instrID, 1, 0, 100)
+	clearFindings(ac)
+	processMid(e, buildMidpointFrame(ch, instrID, 1, 500), core.PortMktData, 1)
+	if got := statusesFor(ac, "MID.SOURCE_ID_MATCHES_DEFINITION"); len(got) != 1 || got[0] != core.NA {
+		t.Errorf("schema-1 Midpoint: statuses = %v, want [na]", got)
+	}
+
+	e, ac = newMidEngine()
+	reachedReadyMid3(e, ch, instrID, 7, 0, 1, 100)
+	clearFindings(ac)
+	processMid(e, buildMidpoint3Frame(ch, instrID, 7, 1, 500), core.PortMktData, 1)
+	fs := findingsFor(ac, "MID.SOURCE_ID_MATCHES_DEFINITION")
+	if len(fs) != 1 || fs[0].Status != core.Unverifiable || fs[0].Reason != core.ReasonTransition {
+		t.Errorf("schema-3 Midpoint, schema-1 definition: findings = %+v, want one unverifiable/transition", fs)
+	}
+}
+
+func TestMidSourceIDBeforeReady(t *testing.T) {
+	e, ac := newMidEngine()
+	processMid(e, buildMidpoint3Frame(1, 42, 7, 1, 500), core.PortMktData, 1)
+	if got := statusesFor(ac, "MID.SOURCE_ID_MATCHES_DEFINITION"); len(got) != 1 || got[0] != core.NA {
+		t.Errorf("statuses = %v, want [na]", got)
+	}
+}
+
+// Schema 3 has no Default Method. Method 0 there is MID.METHOD_NOT_UNKNOWN's.
+func TestMidMethod0RequiresDefaultNotApplicableAtSchema3(t *testing.T) {
+	e, ac := newMidEngine()
+	reachedReadyMid3(e, 1, 42, 7, 0, 3, 100)
+	clearFindings(ac)
+	processMid(e, buildMidpoint3Frame(1, 42, 7, 0, 500), core.PortMktData, 1)
+	if got := statusesFor(ac, "MID.METHOD0_REQUIRES_DEFAULT"); len(got) != 1 || got[0] != core.NA {
+		t.Errorf("MID.METHOD0_REQUIRES_DEFAULT statuses = %v, want [na]", got)
+	}
+	if !hasViolation(ac, "MID.METHOD_NOT_UNKNOWN") {
+		t.Error("MID.METHOD_NOT_UNKNOWN: expected Violation for Method 0 at schema 3")
+	}
+}
+
+// A schema-3 definition has no Default Method, so a schema-1 Method 0 against
+// it cannot be judged. This is the reverse of the Source ID transition.
+func TestMidMethod0RequiresDefaultAgainstSchema3Definition(t *testing.T) {
+	e, ac := newMidEngine()
+	reachedReadyMid3(e, 1, 42, 7, 0, 3, 100)
+	clearFindings(ac)
+	processMid(e, buildMidpointFrame(1, 42, 0, 500), core.PortMktData, 1)
+	fs := findingsFor(ac, "MID.METHOD0_REQUIRES_DEFAULT")
+	if len(fs) != 1 || fs[0].Status != core.Unverifiable || fs[0].Reason != core.ReasonTransition {
+		t.Errorf("schema-1 Method 0, schema-3 definition: findings = %+v, want one unverifiable/transition", fs)
+	}
+}
+
+// Price Bound is at a different offset in the 130-byte definition.
+func TestMidPriceBoundAtSchema3(t *testing.T) {
+	e, ac := newMidEngine()
+	reachedReadyMid3(e, 1, 42, 7, 2, 3, 100)
+	clearFindings(ac)
+	processMid(e, buildMidpoint3Frame(1, 42, 7, 1, -1), core.PortMktData, 1)
+	if !hasViolation(ac, "MID.PRICE_BOUND") {
+		t.Error("MID.PRICE_BOUND: expected Violation for negative price with Bound=2 at schema 3")
+	}
+}
+
+// Method 0 meant "use the instrument default" at schema 1, so the schema-3
+// rule does not judge it there.
+func TestMidMethodNotUnknownIsSchema3Only(t *testing.T) {
+	e, ac := newMidEngine()
+	reachedReadyMid(e, 1, 42, 1, 0, 100)
+	clearFindings(ac)
+	processMid(e, buildMidpointFrame(1, 42, 0, 500), core.PortMktData, 1)
+	if n := len(findingsFor(ac, "MID.METHOD_NOT_UNKNOWN")); n != 0 {
+		t.Errorf("MID.METHOD_NOT_UNKNOWN: %d findings at schema 1, want 0", n)
+	}
+}
+
+// "For all other methods, Window and Volume MUST be 0" includes a method
+// this schema does not define. A receiver treats it as Custom.
+func TestMidWindowVolumeJudgedForAnUndefinedMethod(t *testing.T) {
+	e, ac := newMidEngine()
+	raw := wb.Frame(wire.MagicMid).
+		Msg(wire.TypeMidpoint, 48, func(b *wb.Body) {
+			b.U32(42).U16(7).U8(6).U8(0).U64(1).U64(2).I64(500).U32(60_000).U64(7)
+		}).
+		Bytes()
+	processMid(e, raw, core.PortMktData, 1)
+	if !hasViolation(ac, "MID.WINDOW_VOLUME_ONLY_VWAP") {
+		t.Error("MID.WINDOW_VOLUME_ONLY_VWAP: expected Violation for method 6 with a window")
+	}
+	if n := len(findingsFor(ac, "MID.METHOD_RANGE")); n != 1 {
+		t.Errorf("MID.METHOD_RANGE: %d findings for method 6, want 1", n)
+	}
+}
+
+// VWAP (5) has a definition at schema 3 only. At schema 1 it is a value a
+// receiver treats as Custom.
+func TestMidMethodRangeIsPerSchema(t *testing.T) {
+	e, ac := newMidEngine()
+	processMid(e, buildMidpointFrame(1, 42, 5, 500), core.PortMktData, 1)
+	if n := len(findingsFor(ac, "MID.METHOD_RANGE")); n != 1 {
+		t.Errorf("schema 1, method 5: %d MID.METHOD_RANGE findings, want 1", n)
+	}
+
+	e, ac = newMidEngine()
+	raw := wb.Frame(wire.MagicMid).
+		Msg(wire.TypeMidpoint, 48, func(b *wb.Body) {
+			b.U32(42).U16(7).U8(5).U8(0).U64(1).U64(2).I64(500).U32(60_000).U64(7)
+		}).
+		Bytes()
+	processMid(e, raw, core.PortMktData, 1)
+	if n := len(findingsFor(ac, "MID.METHOD_RANGE")); n != 0 {
+		t.Errorf("schema 3, method 5: %d MID.METHOD_RANGE findings, want 0", n)
 	}
 }
