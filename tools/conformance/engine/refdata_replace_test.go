@@ -13,6 +13,10 @@ package engine
 //     restart from any value (reference-data supplement, step 7).
 //   - A new address in the same Reset Count is the same session on another path
 //     (a lease move, or a redundant path). It keeps the set.
+//   - A new address that starts in the Reset Count the channel left is behind
+//     the reset for one reorder window of datagrams, and then a new session.
+//   - A datagram of a session the channel left feeds nothing, and is reported
+//     Unverifiable on the rules it would reach.
 //
 // The session of a datagram is decided in arrival order, at intake. Each
 // instance has its own reorder buffer, so classification order is not arrival
@@ -21,6 +25,7 @@ package engine
 import (
 	"net/netip"
 	"testing"
+	"time"
 
 	"github.com/malbeclabs/edge-feed-spec/tools/conformance/core"
 	"github.com/malbeclabs/edge-feed-spec/tools/conformance/wire"
@@ -319,4 +324,200 @@ func TestRefdataShortPublisherClassifiedAfterItsReplacement(t *testing.T) {
 	e.Flush()
 
 	assertNewSet(t, e, ac, instrs)
+}
+
+// quote sends one Quote for instrument instr on the mktdata port of the
+// publisher, in its Reset Count and in a sequence space of its own.
+func (p *refdataPublisher) quote(e *Engine, mseq *uint64, sendTS uint64, instr uint32) {
+	*mseq++
+	raw := wb.Frame(wire.MagicTOB).Channel(p.ch).Seq(*mseq).ResetCount(p.era).SendTS(sendTS).
+		Msg(wire.TypeQuote, 60, func(b *wb.Body) {
+			b.U32(instr).U16(1).U8(0x03).U8(0).U64(1_000_000_000)
+			b.I64(100).U64(10).I64(200).U64(10).U16(1).U16(1).Pad(4)
+		}).Bytes()
+	f, sf := wire.Decode(raw, wire.MagicTOB)
+	e.Process(p.src, f, core.PortMktData, sf)
+}
+
+// statusCount counts the findings of a rule by status.
+func statusCount(ac *allCapture, ruleID string) map[core.Status]int {
+	out := make(map[core.Status]int)
+	for _, f := range findingsFor(ac, ruleID) {
+		out[f.Status]++
+	}
+	return out
+}
+
+// TestRefdataReplacementInTheResetCountItsPredecessorLeft: a publisher starts in
+// Reset Count 1, resets to 2 and stops. Its replacement, on another source IP
+// address, starts in Reset Count 1 with other instruments. Its first datagrams
+// read as behind the reset, as a datagram in transit would. But a run of them
+// longer than the reorder window is not a delay: it is a new session, and the
+// channel takes the replacement's set.
+//
+// Before the fix, the replacement stayed behind the reset for its whole era. The
+// channel kept the stopped publisher's set, and every quote of the replacement
+// was a TOB.QUOTE.REFDATA_KNOWN Violation.
+func TestRefdataReplacementInTheResetCountItsPredecessorLeft(t *testing.T) {
+	for _, window := range []int{1, 4} {
+		ac := &allCapture{}
+		e := New(Config{Feed: core.FeedTOB, ReorderWindow: window}, ac)
+
+		old := &refdataPublisher{src: srcA, ch: 1, era: 1}
+		old.cycle(e, 0, 1, []uint32{1, 2, 3})
+		old.era, old.seq = 2, 0
+		old.cycle(e, nsPerSec, 1, []uint32{1, 2, 3})
+		e.Flush()
+
+		instrs := []uint32{4, 5, 6}
+		repl := &refdataPublisher{src: srcB, ch: 1, era: 1}
+		var mseq uint64
+		quotes := 0
+		for i := uint64(0); i < 10; i++ {
+			repl.cycle(e, (100+i)*nsPerSec, 1, instrs)
+			if i < 5 {
+				continue // the replacement's set needs a cycle to complete
+			}
+			for _, id := range instrs {
+				repl.quote(e, &mseq, (100+i)*nsPerSec, id)
+				quotes++
+			}
+		}
+		e.Flush()
+
+		if v := violations(ac, "TOB.QUOTE.REFDATA_KNOWN"); len(v) != 0 {
+			t.Errorf("window %d: %d of %d quotes of the replacement are TOB.QUOTE.REFDATA_KNOWN Violations, first: %s",
+				window, len(v), quotes, v[0].Detail)
+		}
+		if got := statusCount(ac, "TOB.QUOTE.REFDATA_KNOWN")[core.Pass]; got != quotes {
+			t.Errorf("window %d: TOB.QUOTE.REFDATA_KNOWN passed %d of %d quotes of the replacement", window, got, quotes)
+		}
+		if ready, _, defs := channelSet(e, 1); !ready || defs != len(instrs) {
+			t.Errorf("window %d: the channel does not hold the replacement's set: ready=%v, %d definitions", window, ready, defs)
+		}
+	}
+}
+
+// TestRefdataPathLeftInAnOlderSessionIsReported: two paths carry one session in
+// Reset Count 1. Path A restarts into Reset Count 2, which is a new session, and
+// path B keeps sending in Reset Count 1. B's datagrams are of a session the
+// channel left, so they feed nothing to the set. They are still opportunities of
+// the rules they would reach: a Manifest Seq regress on B is reported, as
+// Unverifiable, and not dropped without a finding.
+func TestRefdataPathLeftInAnOlderSessionIsReported(t *testing.T) {
+	ac := &allCapture{}
+	e := New(Config{Feed: core.FeedTOB, ReorderWindow: 1}, ac)
+
+	instrs := []uint32{1, 2, 3}
+	a := &refdataPublisher{src: srcA, ch: 1, era: 1}
+	b := &refdataPublisher{src: srcB, ch: 1, era: 1, seq: 1000}
+	for i := uint64(0); i < 2; i++ {
+		a.cycle(e, i*nsPerSec, 5, instrs)
+		b.cycle(e, i*nsPerSec, 5, instrs)
+	}
+	a.era, a.seq = 2, 0
+	for i := uint64(2); i < 5; i++ {
+		a.cycle(e, i*nsPerSec, 1, instrs)
+		b.cycle(e, i*nsPerSec, 5, instrs)
+	}
+	b.send(e, 5*nsPerSec, 0x07, 24, manifestBody(1, 4, 3))
+	regress := b.seq
+	a.cycle(e, 5*nsPerSec, 1, instrs)
+	e.Flush()
+
+	found := false
+	for _, f := range findingsFor(ac, "REFDATA.SEQ_MONOTONIC_NO_REGRESS") {
+		if f.Seq != regress {
+			continue
+		}
+		found = true
+		if f.Status != core.Unverifiable || f.Reason != core.ReasonTransition {
+			t.Errorf("the regress on the path left in Reset Count 1 is %v (%s), want Unverifiable (%s)",
+				f.Status, f.Reason, core.ReasonTransition)
+		}
+	}
+	if !found {
+		t.Errorf("the Manifest Seq regress on the path left in Reset Count 1 gave no REFDATA.SEQ_MONOTONIC_NO_REGRESS finding")
+	}
+	if ready, mseq, _ := channelSet(e, 1); !ready || mseq != 1 {
+		t.Errorf("the path left in Reset Count 1 changed the set of Reset Count 2: ready=%v, Manifest Seq=%d", ready, mseq)
+	}
+}
+
+// TestRefdataSecondPublisherKeepsTheServingOneAccounted: a publisher serves the
+// channel, and a second publisher on another address, in another Reset Count,
+// sends more than one reorder window of datagrams. The second one starts a new
+// session, so the serving publisher's datagrams are of a session the channel
+// left. Its definition cycles are still opportunities of
+// REFDATA.DEFINITION_CYCLE_COVERAGE: each is reported, Unverifiable once it is
+// no longer graded, and the rule's denominator does not fall.
+func TestRefdataSecondPublisherKeepsTheServingOneAccounted(t *testing.T) {
+	const cycles = 10
+	run := func(second bool) map[core.Status]int {
+		ac := &allCapture{}
+		e := New(Config{Feed: core.FeedTOB, ReorderWindow: 2, ExpectDefinitionCycle: time.Second}, ac)
+		instrs := []uint32{1, 2, 3}
+		serving := &refdataPublisher{src: srcA, ch: 1, era: 7}
+		other := &refdataPublisher{src: srcB, ch: 1, era: 9}
+		for i := uint64(0); i <= cycles; i++ {
+			serving.cycle(e, i*nsPerSec, 5, instrs)
+			if second && i == 1 {
+				other.cycle(e, i*nsPerSec+1, 1, []uint32{8})
+				other.cycle(e, i*nsPerSec+2, 1, []uint32{8})
+			}
+		}
+		e.Flush()
+		return statusCount(ac, "REFDATA.DEFINITION_CYCLE_COVERAGE")
+	}
+	alone, with := run(false), run(true)
+	if alone[core.Pass] < cycles-2 {
+		t.Fatalf("setup: the serving publisher alone passed %d cycles", alone[core.Pass])
+	}
+	total := func(m map[core.Status]int) int { return m[core.Pass] + m[core.Violation] + m[core.Unverifiable] }
+	if total(with) < total(alone) {
+		t.Errorf("REFDATA.DEFINITION_CYCLE_COVERAGE accounts for %d cycles with a second publisher (%v), and for %d without (%v)",
+			total(with), with, total(alone), alone)
+	}
+	if with[core.Unverifiable] == 0 {
+		t.Errorf("REFDATA.DEFINITION_CYCLE_COVERAGE reports no Unverifiable for the cycles it no longer grades: %v", with)
+	}
+}
+
+// TestRefdataPathsInOneResetCountShareTheNewestSession: path A sends first, in
+// Reset Count 2. Path B sends in Reset Count 1, which starts a new session, and
+// then enters Reset Count 2, which starts another. A is in Reset Count 2 too, so
+// it is a path of that session, and is graded with B: a Manifest Seq regress on A
+// is a Violation.
+//
+// Before the fix, A kept the first session while its own Reset Count did not
+// change, and its datagrams fed nothing, with no finding.
+func TestRefdataPathsInOneResetCountShareTheNewestSession(t *testing.T) {
+	ac := &allCapture{}
+	e := New(Config{Feed: core.FeedTOB, ReorderWindow: 1}, ac)
+
+	instrs := []uint32{1, 2, 3}
+	a := &refdataPublisher{src: srcA, ch: 1, era: 2}
+	b := &refdataPublisher{src: srcB, ch: 1, era: 1, seq: 1000}
+	a.cycle(e, 0, 5, instrs)
+	b.cycle(e, 0, 5, instrs)
+	b.era, b.seq = 2, 2000
+	for i := uint64(1); i < 4; i++ {
+		b.cycle(e, i*nsPerSec, 5, instrs)
+		a.cycle(e, i*nsPerSec, 5, instrs)
+	}
+	a.send(e, 4*nsPerSec, 0x07, 24, manifestBody(1, 4, 3))
+	regress := a.seq
+	b.cycle(e, 4*nsPerSec, 5, instrs)
+	e.Flush()
+
+	found := false
+	for _, f := range violations(ac, "REFDATA.SEQ_MONOTONIC_NO_REGRESS") {
+		if f.Seq == regress {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("the Manifest Seq regress on path A in Reset Count 2 is not a Violation: %v",
+			statusCount(ac, "REFDATA.SEQ_MONOTONIC_NO_REGRESS"))
+	}
 }

@@ -149,6 +149,16 @@ type portTracker struct {
 	// neither.
 	refdataEra     uint8
 	refdataSession uint64
+	// refdataBehind counts the datagrams of this instance that intake gave the
+	// session the channel left, while the instance is marked behind the reset;
+	// zero when it is not. See Engine.stampRefdataSession.
+	refdataBehind int
+	// leftCycleStart opens the tumbling definition cycle that refdataLeftSession
+	// keeps while this instance's datagrams are of session leftCycleSess, which
+	// the channel left.
+	leftCycleStart uint64
+	leftCycleSess  uint64
+	leftCycleSet   bool
 	// refdataEraSeeded is false until the first refdata datagram of this instance.
 	refdataEraSeeded bool
 	// era is the current Reset Count we accept.
