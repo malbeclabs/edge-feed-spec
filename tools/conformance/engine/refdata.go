@@ -233,14 +233,166 @@ func newChannelRefdataState() *channelRefdataState {
 type refdataState struct {
 	e        *Engine
 	channels map[uint8]*channelRefdataState
+	// built holds, per channel, the reference-data session the state of that
+	// channel is built for; see Engine.stampRefdataSession.
+	built map[uint8]uint64
+	// leftCycle holds, per channel, the definition cycle the state had open when
+	// a newer session discarded it; see Engine.refdataLeftSession.
+	leftCycle map[uint8]leftCycle
+}
+
+// leftCycle is the definition cycle that session sess had open when the channel
+// left it.
+type leftCycle struct {
+	sess  uint64
+	start uint64
 }
 
 // newRefdataState creates a refdataState bound to the given engine.
 func newRefdataState(e *Engine) *refdataState {
 	return &refdataState{
-		e:        e,
-		channels: make(map[uint8]*channelRefdataState),
+		e:         e,
+		channels:  make(map[uint8]*channelRefdataState),
+		built:     make(map[uint8]uint64),
+		leftCycle: make(map[uint8]leftCycle),
 	}
+}
+
+// refdataSessions is the arrival-order record of the reference-data sessions of
+// one channel; see Engine.stampRefdataSession. A session number is never reused:
+// the same Reset Count can name two sessions, in turn.
+type refdataSessions struct {
+	set     bool
+	last    uint64 // the last number given
+	cur     uint64 // the session the channel is in
+	curEra  uint8  // its Reset Count
+	left    uint64 // the session the channel left last
+	leftEra uint8  // its Reset Count
+	leftSet bool
+}
+
+// stampRefdataSession gives a refdata datagram of the instance pt, on channel
+// ch in Reset Count era, its reference-data session. Intake calls it, in arrival
+// order; processRefdataFrame reads the result, in classification order.
+//
+// **A session is decided at intake, not at classification.** Each instance has
+// its own reorder buffer, so the instances of one channel are classified in an
+// order that is not the order of arrival. A publisher that stops leaves its last
+// datagrams in its buffer, and Flush classifies them after the publisher that
+// replaced it. Decided at classification, those datagrams read as the newer
+// session: they discarded the new set, and the new publisher's later datagrams
+// were then of a session the channel had left.
+//
+// **The state is keyed by channel, and the era by instance.** So each new era
+// of an instance, the first era of a new source IP address included, is compared
+// with the era of the channel's session. It starts a new session only when the
+// two Reset Counts differ:
+//
+//   - A publisher that replaces another on a new address, in another Reset
+//     Count, starts a new session. Its `Manifest Seq` MAY restart from any value
+//     (supplement, step 7). Kept, the old set read each summary of the new
+//     publisher as a regress, and discarded it. So the channel kept the old
+//     publisher's `Manifest Seq` until the process restarted, and each
+//     definition of the new publisher read as tagged with a stale seq.
+//   - The same Reset Count on another address is the same session on another
+//     path: a lease move, or a redundant path. Its set is the channel's set, and a
+//     discard would make the consumer rules wait a definition cycle for nothing.
+//     An instance that changes to the channel's Reset Count joins its session
+//     the same way.
+//
+// **An address whose first era is the one the channel last left is behind the
+// reset**, not a new session. Its datagram was in transit while another address
+// entered the new era. It is of the session the channel left, and it leaves the
+// record as it is, so its later entry into the new era does not start another.
+// The mark lasts one reorder window of datagrams, as a straggler run does in
+// portTracker.enqueue. A longer run in that Reset Count is not a delay: it is a
+// publisher that replaced one that reset and stopped, and it starts a new session.
+//
+// **An instance joins the channel's session whenever its Reset Count is that
+// session's**, also while its own Reset Count does not change. Another address
+// can open a newer session in the Reset Count the instance is already in, and
+// the two are then paths of one session.
+//
+// **An instance in an older session stays in it.** Its datagrams feed nothing
+// to the set, and the rules they would reach report them Unverifiable; see
+// Engine.refdataLeftSession.
+//
+// It is the rule that Engine.mbpObserveEra applies to the market-by-price state.
+func (e *Engine) stampRefdataSession(pt *portTracker, ch uint8, era uint8) uint64 {
+	if e.refdataSessions == nil {
+		e.refdataSessions = make(map[uint8]*refdataSessions)
+	}
+	c := e.refdataSessions[ch]
+	if c == nil {
+		c = &refdataSessions{}
+		e.refdataSessions[ch] = c
+	}
+	first := !pt.refdataEraSeeded
+	same := !first && era == pt.refdataEra
+	pt.refdataEra, pt.refdataEraSeeded = era, true
+	switch {
+	case !c.set:
+		// The first era of this channel in the run.
+		c.set = true
+		c.start(era)
+		pt.refdataBehind = 0
+	case era == c.curEra:
+		pt.refdataBehind = 0
+	case same && pt.refdataBehind > 0:
+		if pt.refdataBehind < max(e.cfg.ReorderWindow, 1) {
+			pt.refdataBehind++
+			return pt.refdataSession
+		}
+		// The run is longer than a delay.
+		pt.refdataBehind = 0
+		c.start(era)
+	case same:
+		// An older session, which the instance stays in.
+		return pt.refdataSession
+	case first && c.leftSet && era == c.leftEra:
+		pt.refdataSession, pt.refdataBehind = c.left, 1
+		return pt.refdataSession
+	default:
+		pt.refdataBehind = 0
+		c.start(era)
+	}
+	pt.refdataSession = c.cur
+	return pt.refdataSession
+}
+
+// start opens a new session in Reset Count era. The session the channel was in,
+// if any, becomes the one it left.
+func (c *refdataSessions) start(era uint8) {
+	if c.last > 0 {
+		c.left, c.leftEra, c.leftSet = c.cur, c.curEra, true
+	}
+	c.last++
+	c.cur, c.curEra = c.last, era
+}
+
+// enterSession reports whether a refdata datagram of session sess feeds the
+// state of channel ch, and discards that state when sess is newer than the
+// session the state is built for.
+//
+// A datagram of an older session feeds nothing. It belongs to a session the
+// channel left, or it arrives from an address that is still behind the reset.
+// Fed to the state, a stopped publisher's buffered Manifest Seq came back over
+// the set of the publisher that replaced it. The caller reports it instead; see
+// Engine.refdataLeftSession.
+func (rs *refdataState) enterSession(ch uint8, sess uint64) bool {
+	built, ok := rs.built[ch]
+	switch {
+	case ok && sess < built:
+		return false
+	case ok && sess > built:
+		delete(rs.leftCycle, ch)
+		if s, open := rs.channels[ch]; open && s.cycleStartSendTSSet {
+			rs.leftCycle[ch] = leftCycle{sess: built, start: s.cycleStartSendTS}
+		}
+		rs.onResetChannel(ch)
+	}
+	rs.built[ch] = sess
+	return true
 }
 
 func (rs *refdataState) channel(ch uint8) *channelRefdataState {
@@ -304,7 +456,8 @@ func channelReady(s *channelRefdataState) bool {
 	return s.valid && uint32(len(s.defs)) == s.expectedCount
 }
 
-// onResetChannel handles a Reset Count change on ONE channel instance. That
+// onResetChannel handles a new session of ONE channel; see
+// Engine.stampRefdataSession. That
 // channel's state is discarded per the supplement: "subscribers detect the reset
 // by comparing Reset Count against their last-seen value and discard all cached
 // state."
@@ -315,10 +468,9 @@ func channelReady(s *channelRefdataState) bool {
 // on every alternation.
 //
 // The discard is still by Channel ID, because `channels` is Channel-ID-keyed:
-// two instances sharing one Channel ID would share one set and reset each other.
-// That is pre-existing, and inert while redundant paths carry distinct ids, but
-// it is the reason this is not yet the full `(source address, Channel ID)` key
-// that "Redundant Channel Instances" asks for.
+// two instances sharing one Channel ID share one set. stampRefdataSession
+// decides which of their eras is a new session, so the paths of one session do
+// not discard each other's set.
 func (rs *refdataState) onResetChannel(only uint8) {
 	for ch, s := range rs.channels {
 		if ch != only {
@@ -997,30 +1149,30 @@ func (rs *refdataState) onDefinitionStrike(ch uint8, instrID uint32, symbol stri
 // --- Engine integration ---
 
 // processRefdataFrame is called from Engine.classify for frames arriving on
-// PortRefData.  It handles the reset-era detection, then routes ManifestSummary
+// PortRefData.  It applies the datagram's session, then routes ManifestSummary
 // (0x07) and InstrumentDefinition (0x02) messages to the state machine.
-func (e *Engine) processRefdataFrame(f *wire.Frame, pt *portTracker) {
+//
+// sess is the datagram's reference-data session, stamped at intake. Nil feeds the
+// state as it is.
+func (e *Engine) processRefdataFrame(f *wire.Frame, pt *portTracker, sess *uint64) {
 	if e.refdata == nil {
 		e.refdata = newRefdataState(e)
 	}
 
-	// Detect an era change (Reset Count change → discard that channel's state).
-	// Reset Count belongs to the channel instance — (source address, Channel ID,
-	// destination port) — so it is tracked on that instance's tracker and resets
-	// only its own channel. Tracked per port instead, two publishers on one port
-	// read as an era flip on every alternation, and each flip erases both paths'
-	// definition sets: the sets never survive to ready(), and the discard is
-	// silent because onInstrumentDef drops definitions on an invalid channel
-	// without a finding.
+	// Intake gave this datagram its session (see stampRefdataSession). A datagram
+	// of a newer session discards the channel's state, and one of an older session
+	// feeds nothing and is reported Unverifiable (refdataLeftSession). Reset Count
+	// belongs to the channel instance — (source IP address, Channel ID,
+	// destination port) — so it is tracked on that instance's tracker. Tracked per port instead, two publishers on one port read as an era
+	// flip on every alternation, and each flip erases both paths' definition sets:
+	// the sets never survive to ready(), and the discard is silent because
+	// onInstrumentDef drops definitions on an invalid channel without a finding.
 	ch := f.Header.ChannelID
-	if !pt.refdataEraSeeded {
-		// Seed on this instance's first refdata datagram (any Reset Count is valid).
-		pt.refdataEra = f.Header.ResetCount
-		pt.refdataEraSeeded = true
-	} else if f.Header.ResetCount != pt.refdataEra {
-		pt.refdataEra = f.Header.ResetCount
-		e.refdata.onResetChannel(ch)
+	if sess != nil && !e.refdata.enterSession(ch, *sess) {
+		e.refdataLeftSession(f, pt, ch, *sess)
+		return
 	}
+	pt.leftCycleSet = false
 
 	dirty := pt.dirtyWindow
 	sendTS := f.Header.SendTS
@@ -1076,5 +1228,78 @@ func (e *Engine) processRefdataFrame(f *wire.Frame, pt *portTracker) {
 			s.lastRefdataSendTSSet = true
 		}
 		e.decideNeverReachesReady(ch, s, f.Header.Sequence, false)
+	}
+}
+
+// refdataLeftSession reports a refdata datagram of a session the channel left,
+// which feeds nothing to the set (see refdataState.enterSession), as
+// Unverifiable on each rule that it would reach. Dropped without a finding, a
+// path that kept sending in an older session was never graded again, and no
+// finding or metric showed it: a regress on it read as no regress, and the
+// definition cycles of a serving publisher that another publisher's new session
+// had displaced fell out of REFDATA.DEFINITION_CYCLE_COVERAGE's denominator.
+//
+// The rules are those the state machine grades on a message of the same type and
+// Valid flag. REFDATA.DEFINITION_CYCLE_COVERAGE and REFDATA.NO_BURST_DEFINITIONS
+// have one opportunity per closed cycle, not per summary, so the instance keeps a
+// tumbling window of its own, on the summaries it sends while it is refused, and
+// reports one each time that window closes. The first window of a session that
+// the channel left continues the cycle the state had open for it, so the cycle a
+// discard cut short is not lost. The window is per instance: two paths
+// of one left session report a cycle each, which over-counts the Unverifiable
+// side and never a Violation. REFDATA.NEVER_REACHES_READY is a verdict on a
+// serving period of the channel, not on a datagram, and is not reported here.
+func (e *Engine) refdataLeftSession(f *wire.Frame, pt *portTracker, ch uint8, sess uint64) {
+	const detail = "a datagram of a reference-data session the channel has left: " +
+		"the set it would be graded against is of another session"
+	seq := f.Header.Sequence
+	sendTS := f.Header.SendTS
+	unverified := func(inst uint32, rules ...string) {
+		for _, rule := range rules {
+			e.unverified(rule, core.ReasonTransition, core.PortRefData, seq, ch, inst, detail)
+		}
+	}
+	for _, m := range f.Messages {
+		switch m.Type {
+		case wire.TypeManifest:
+			valid, _, _ := manifestFields(m)
+			unverified(0, "MANIFEST.STATE_MACHINE")
+			switch valid {
+			case 0:
+				unverified(0, "REFDATA.VALID_FLAG_WHILE_SERVING")
+			case 1:
+				unverified(0, "REFDATA.MANIFEST_SEQ_NONZERO_WHEN_VALID", "REFDATA.SEQ_MONOTONIC_NO_REGRESS",
+					"REFDATA.SEQ_BUMP_NOT_BY_ONE", "REFDATA.COUNT_CHANGE_NO_SEQ_BUMP")
+				if e.cfg.ExpectManifestCadence > 0 {
+					unverified(0, "REFDATA.MANIFEST_CADENCE")
+				}
+				if e.cfg.ExpectDefinitionCycle <= 0 {
+					break
+				}
+				if !pt.leftCycleSet || pt.leftCycleSess != sess {
+					pt.leftCycleStart, pt.leftCycleSess, pt.leftCycleSet = sendTS, sess, true
+					if open, ok := e.refdata.leftCycle[ch]; ok && open.sess == sess && open.start <= sendTS {
+						pt.leftCycleStart = open.start
+					}
+				}
+				switch {
+				case sendTS < pt.leftCycleStart:
+					pt.leftCycleStart = sendTS
+				case time.Duration(sendTS-pt.leftCycleStart)*time.Nanosecond >= e.cfg.ExpectDefinitionCycle:
+					unverified(0, "REFDATA.DEFINITION_CYCLE_COVERAGE", "REFDATA.NO_BURST_DEFINITIONS")
+					pt.leftCycleStart = sendTS
+				}
+			}
+		case wire.TypeInstrumentDef:
+			instrID, _, _, _, ok := instrDefAllFields(e.cfg.Feed, f.Header.SchemaVersion, m)
+			if !ok {
+				continue
+			}
+			unverified(instrID, "REFDATA.STALE_SEQ_TAG_AFTER_BUMP", "REFDATA.SET_CHANGE_NO_SEQ_BUMP",
+				"REFDATA.COUNT_VS_DISTINCT_DEFS")
+			if carriesStrikeInterval(e.cfg.Feed, f.Header.SchemaVersion) {
+				unverified(instrID, "STRIKE.PRESENCE_STABLE", "STRIKE.FIXED_STAYS_FIXED")
+			}
+		}
 	}
 }
