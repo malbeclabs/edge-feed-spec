@@ -1014,8 +1014,11 @@ func TestRemovedWindowEviction(t *testing.T) {
 
 // TestBookStaysBoundedUnderOrderChurn: the regression for a market-by-order
 // validator whose memory grew with the number of orders it saw. Each order in
-// the stream leaves the book once, so the removed window gets only new IDs. The windows must keep a fixed size however long the stream is: the live
-// set, the members of each window and the array that holds each window's queue.
+// the stream leaves the book once, so the removed window gets only new IDs. The
+// windows must keep a fixed size however long the stream is: the live set, the
+// members of each window and the array that holds each window's queue. Every
+// operation is on a live order or on a hidden ID still in its window, so
+// eviction must not make one of them Unverifiable.
 func TestBookStaysBoundedUnderOrderChurn(t *testing.T) {
 	const ch, instrID = uint8(1), uint32(130)
 	const limit = 64
@@ -1031,6 +1034,9 @@ func TestBookStaysBoundedUnderOrderChurn(t *testing.T) {
 	const rounds = 20_000
 	bk := e.mbo.book.book(ch, instrID)
 	for i := uint64(1); i <= rounds; i++ {
+		if cur := e.mbo.book.book(ch, instrID); cur != bk {
+			t.Fatalf("round %d: the engine replaced the instrument's book, so the test checks a detached one", i)
+		}
 		id := 3 * i
 		step(buildOrderAddFull(ch, instrID, per, id, 0, 1, 100, 0))
 		step(buildOrderCancelFull(ch, instrID, per, id, 1))
@@ -1060,6 +1066,9 @@ func TestBookStaysBoundedUnderOrderChurn(t *testing.T) {
 	for _, f := range ac.findings {
 		if f.Status == core.Violation {
 			t.Fatalf("a conformant stream must report no violation, got %s: %s", f.RuleID, f.Detail)
+		}
+		if f.Status == core.Unverifiable && f.Reason == core.ReasonOverflow {
+			t.Fatalf("an operation on a live or windowed ID must not be Unverifiable (overflow), got %s: %s", f.RuleID, f.Detail)
 		}
 	}
 }
