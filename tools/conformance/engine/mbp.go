@@ -167,17 +167,21 @@ type mbpState struct {
 	// sawBegin records the channels whose first SnapshotBegin this run has seen;
 	// until then an orphan predates the observation window (see mbpOrphanStatus).
 	sawBegin map[uint8]bool
-	// resetEra is the Reset Count this state was last wiped for, so the second and
-	// third port to cross the same reset do not wipe again.
-	resetEra    uint8
-	resetEraSet bool
+	// resetCount holds, per channel, the Reset Count of the era the state of
+	// that channel is built for; see Engine.mbpObserveEra.
+	resetCount map[uint8]uint8
+	// leftCount holds, per channel, the Reset Count of the era the channel left
+	// at its last wipe.
+	leftCount map[uint8]uint8
 }
 
 func newMBPState() *mbpState {
 	return &mbpState{
-		instr:    make(map[mbpInstrKey]*mbpInstr),
-		open:     make(map[uint8]*mbpOpenSnap),
-		sawBegin: make(map[uint8]bool),
+		instr:      make(map[mbpInstrKey]*mbpInstr),
+		open:       make(map[uint8]*mbpOpenSnap),
+		sawBegin:   make(map[uint8]bool),
+		resetCount: make(map[uint8]uint8),
+		leftCount:  make(map[uint8]uint8),
 	}
 }
 
@@ -196,44 +200,22 @@ func (s *mbpState) get(k mbpInstrKey, captureEpoch uint64) *mbpInstr {
 	return in
 }
 
-// onEraObserved records the Reset Count of an accepted frame and wipes
-// per-instrument state when that era is newer than the one this state was built
-// for. Per-Instrument Seq restarts at 1 and Snapshot ID is scoped to the era, so
-// carrying either across a reset would judge new-era messages against discarded
-// numbers.
+// wipeChannel discards the per-instrument state and the group in flight of one
+// channel. Per-Instrument Seq restarts at 1 and Snapshot ID is scoped to the era,
+// so carrying either across a reset would judge new-era messages against
+// discarded numbers.
 //
-// **Once per era, no matter which port sees it.** Reset Count is channel-wide but
-// each of the three ports observes it independently, and the wipe used to run
-// per-port: the second and third port to cross one reset destroyed state the first
-// had already rebuilt, so a real per-instrument gap right after a reset was
-// swallowed by the tool's own bookkeeping and any snapshot group in flight was
-// silently dropped.
-//
-// **Called on every accepted frame, not only on a port's era advance** — which is
-// where this diverges from `mboState.onResetCountForEra`. A port seeds its era from
-// whatever `ResetCount` arrives first without that counting as an advance, so a
-// capture whose mktdata frames all begin in era 1 while refdata still carries an
-// era-0 frame gets no advance on mktdata at all, and refdata's later advance is
-// then the *first* wipe — landing on state mktdata has already built. Seeding here
-// closes that: the first era observed is recorded rather than applied, and only a
-// genuinely newer one wipes.
-//
-// Returns true when it actually wiped.
-func (s *mbpState) onEraObserved(era uint8) bool {
-	if !s.resetEraSet {
-		// First era of the run: nothing has been built against another one.
-		s.resetEra, s.resetEraSet = era, true
-		return false
+// **One channel, not all of them.** Each channel has its own Reset Count. A wipe
+// of every channel on one channel's reset dropped the other channel's group in
+// flight, so each of its later SnapshotLevel datagrams read as a
+// MBP.SNAP.GROUP_STRUCTURE orphan, on a channel that did nothing.
+func (s *mbpState) wipeChannel(ch uint8) {
+	for k := range s.instr {
+		if k.ch == ch {
+			delete(s.instr, k)
+		}
 	}
-	// Only forward. An old-era straggler classified after another port advanced
-	// must not wipe the new era's state back out.
-	if eraRelation(s.resetEra, era) != eraNewer {
-		return false
-	}
-	s.resetEra = era
-	s.instr = make(map[mbpInstrKey]*mbpInstr)
-	clear(s.open)
-	return true
+	delete(s.open, ch)
 }
 
 func (e *Engine) ensureMBP() {
@@ -242,9 +224,42 @@ func (e *Engine) ensureMBP() {
 	}
 }
 
-// mbpObserveEra feeds one accepted frame's Reset Count to the channel-wide reset
-// bookkeeping, and taints the channel's snapshot series when a *different* port
-// led the reset.
+// mbpObserveEra discards the channel's market-by-price state when an accepted
+// frame is the first one of a new era for its source address and Channel ID. It
+// also taints the channel's snapshot series when a *different* port led the reset.
+//
+// **Once per era, no matter which port sees it.** Reset Count is shared across
+// the three ports, but each port observes it independently. A wipe per port let
+// the second and third port to cross one reset destroy state the first had
+// already rebuilt: a real per-instrument gap right after a reset was swallowed by
+// the tool's own bookkeeping, and a snapshot group in flight was dropped.
+//
+// **Era order is arrival order** (see eraOrder), not a comparison of values. The
+// spec makes any change of the Reset Count a reset. A comparison of values read a
+// reset of more than 127 steps as an older era and kept the old state, and it
+// compared the Reset Counts of different channels with each other.
+//
+// **Called on every accepted frame, not only on a port's era advance**, which is
+// where this diverges from `mboState.onResetCountForEra`. A port seeds its era from
+// whatever `ResetCount` arrives first without that counting as an advance, so a
+// capture whose mktdata frames all begin in era 1 while refdata still carries an
+// era-0 frame gets no advance on mktdata at all. A frame from a port that is
+// still behind the reset belongs to an earlier era and wipes nothing.
+//
+// **The state is keyed by channel, and the era order by source address.** So
+// every new era of an address is compared with the era the channel's state is
+// built for, the first era of the address included: a publisher that restarts
+// on a new address starts a new era, and the state of the old session would
+// read the new session's deltas as late duplicates. It wipes only when its Reset
+// Count differs from that era's. The same Reset Count on another address is a
+// lease move, in the era the channel already wiped for, and a second wipe would
+// discard state the first port rebuilt. Only the first era of the channel in the
+// run is recorded and not applied.
+//
+// **An address whose first era is the one the channel last left is behind the
+// reset**, not a new session. Its datagram was in a reorder buffer while another
+// address wiped for the new era. It wipes nothing and leaves the record as it
+// is, so its later entry into the new era does not wipe again.
 //
 // That taint is what keeps the wipe's own consequences off the publisher's record:
 // the group the wipe just dropped may still have frames in flight on the snapshot
@@ -252,12 +267,30 @@ func (e *Engine) ensureMBP() {
 // snapshot series clears the flag when it advances its own era. Skipped when the
 // snapshot port led the reset, since it has already advanced and its new-era groups
 // are clean (F4).
-func (e *Engine) mbpObserveEra(port core.Port, ch uint8, era uint8) {
+func (e *Engine) mbpObserveEra(pt *portTracker, port core.Port, ch uint8) {
 	if e.cfg.Feed != core.FeedMBP {
 		return
 	}
 	e.ensureMBP()
-	if !e.mbp.onEraObserved(era) || port == core.PortSnapshot {
+	o := pt.order
+	if o.mbpSeenSet && pt.eraPos <= o.mbpSeen {
+		return
+	}
+	first := !o.mbpSeenSet
+	o.mbpSeen, o.mbpSeenSet = pt.eraPos, true
+	if left, ok := e.mbp.leftCount[ch]; first && ok && left == pt.era {
+		return
+	}
+	last, ok := e.mbp.resetCount[ch]
+	e.mbp.resetCount[ch] = pt.era
+	if !ok || last == pt.era {
+		// The first era of this channel, or the era its state is built for, seen
+		// on another address.
+		return
+	}
+	e.mbp.leftCount[ch] = last
+	e.mbp.wipeChannel(ch)
+	if port == core.PortSnapshot {
 		return
 	}
 	e.taintOn(core.PortSnapshot, ch)
