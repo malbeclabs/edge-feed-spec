@@ -233,14 +233,76 @@ func newChannelRefdataState() *channelRefdataState {
 type refdataState struct {
 	e        *Engine
 	channels map[uint8]*channelRefdataState
+	// resetCount holds, per channel, the Reset Count of the era the state of that
+	// channel is built for; see observeEra.
+	resetCount map[uint8]uint8
+	// leftCount holds, per channel, the Reset Count of the era the channel left
+	// at its last discard.
+	leftCount map[uint8]uint8
 }
 
 // newRefdataState creates a refdataState bound to the given engine.
 func newRefdataState(e *Engine) *refdataState {
 	return &refdataState{
-		e:        e,
-		channels: make(map[uint8]*channelRefdataState),
+		e:          e,
+		channels:   make(map[uint8]*channelRefdataState),
+		resetCount: make(map[uint8]uint8),
+		leftCount:  make(map[uint8]uint8),
 	}
+}
+
+// observeEra discards the channel's state when one instance of the channel
+// starts a new era: its first refdata datagram (first is true), or a change of
+// its Reset Count. It is the rule Engine.mbpObserveEra applies to the
+// market-by-price state.
+//
+// **The state is keyed by channel, and the era by instance.** So each new era
+// of an instance is compared with the era the channel's state is built for, the
+// first era of a new source address included. It discards the state only when
+// the two Reset Counts differ:
+//
+//   - A publisher that replaces another on a new address, in another Reset
+//     Count, starts a new session. Its `Manifest Seq` MAY restart from any value
+//     (supplement, step 7). Kept, the old set read each summary of the new
+//     publisher as a regress, and discarded it. So the channel kept the old
+//     publisher's `Manifest Seq` until the process restarted, and each
+//     definition of the new publisher read as tagged with a stale seq.
+//   - The same Reset Count on another address is the same session on another
+//     path: a lease move, or a second arm. Its set is the channel's set, and a
+//     discard would make the consumer rules wait a definition cycle for nothing.
+//
+// Only the first era of the channel in the run is recorded and not applied.
+//
+// **An address whose first era is the one the channel last left is behind the
+// reset**, not a new session. Its datagram was in transit while another address
+// entered the new era. It discards nothing and leaves the record as it is, so
+// its later entry into the new era does not discard again.
+func (rs *refdataState) observeEra(ch uint8, era uint8, first bool) {
+	if left, ok := rs.leftCount[ch]; first && ok && left == era {
+		return
+	}
+	last, ok := rs.resetCount[ch]
+	rs.resetCount[ch] = era
+	if !ok || last == era {
+		// The first era of this channel, or the era its state is built for, seen
+		// on another address.
+		return
+	}
+	rs.leftCount[ch] = last
+	rs.onResetChannel(ch)
+}
+
+// inCurrentEra reports whether era is the era the state of channel ch is built
+// for. A datagram of another era belongs to a session the channel discarded, or
+// arrives from an address that is still behind the reset, so it feeds nothing.
+//
+// Such a datagram reaches classify late when it was in a reorder buffer. A
+// publisher that stops leaves its last datagrams in its instance's buffer, and
+// Flush classifies them after the publisher that replaced it. Fed to the state,
+// the old publisher's Manifest Seq came back over the new publisher's set.
+func (rs *refdataState) inCurrentEra(ch uint8, era uint8) bool {
+	cur, ok := rs.resetCount[ch]
+	return !ok || cur == era
 }
 
 func (rs *refdataState) channel(ch uint8) *channelRefdataState {
@@ -304,7 +366,7 @@ func channelReady(s *channelRefdataState) bool {
 	return s.valid && uint32(len(s.defs)) == s.expectedCount
 }
 
-// onResetChannel handles a Reset Count change on ONE channel instance. That
+// onResetChannel handles a new era of ONE channel; see observeEra. That
 // channel's state is discarded per the supplement: "subscribers detect the reset
 // by comparing Reset Count against their last-seen value and discard all cached
 // state."
@@ -315,10 +377,9 @@ func channelReady(s *channelRefdataState) bool {
 // on every alternation.
 //
 // The discard is still by Channel ID, because `channels` is Channel-ID-keyed:
-// two instances sharing one Channel ID would share one set and reset each other.
-// That is pre-existing, and inert while redundant paths carry distinct ids, but
-// it is the reason this is not yet the full `(source address, Channel ID)` key
-// that "Redundant Channel Instances" asks for.
+// two instances sharing one Channel ID share one set. observeEra decides which
+// of their eras is a new session, so the paths of one session do not discard
+// each other's set.
 func (rs *refdataState) onResetChannel(only uint8) {
 	for ch, s := range rs.channels {
 		if ch != only {
@@ -1004,22 +1065,22 @@ func (e *Engine) processRefdataFrame(f *wire.Frame, pt *portTracker) {
 		e.refdata = newRefdataState(e)
 	}
 
-	// Detect an era change (Reset Count change → discard that channel's state).
-	// Reset Count belongs to the channel instance — (source address, Channel ID,
-	// destination port) — so it is tracked on that instance's tracker and resets
-	// only its own channel. Tracked per port instead, two publishers on one port
-	// read as an era flip on every alternation, and each flip erases both paths'
-	// definition sets: the sets never survive to ready(), and the discard is
-	// silent because onInstrumentDef drops definitions on an invalid channel
-	// without a finding.
+	// Detect a new era (a new instance, or a Reset Count change → discard that
+	// channel's state when the era is a new session; see observeEra). Reset Count
+	// belongs to the channel instance — (source address, Channel ID, destination
+	// port) — so it is tracked on that instance's tracker and acts only on its own
+	// channel. Tracked per port instead, two publishers on one port read as an era
+	// flip on every alternation, and each flip erases both paths' definition sets:
+	// the sets never survive to ready(), and the discard is silent because
+	// onInstrumentDef drops definitions on an invalid channel without a finding.
 	ch := f.Header.ChannelID
-	if !pt.refdataEraSeeded {
-		// Seed on this instance's first refdata datagram (any Reset Count is valid).
+	if first := !pt.refdataEraSeeded; first || f.Header.ResetCount != pt.refdataEra {
 		pt.refdataEra = f.Header.ResetCount
 		pt.refdataEraSeeded = true
-	} else if f.Header.ResetCount != pt.refdataEra {
-		pt.refdataEra = f.Header.ResetCount
-		e.refdata.onResetChannel(ch)
+		e.refdata.observeEra(ch, f.Header.ResetCount, first)
+	}
+	if !e.refdata.inCurrentEra(ch, pt.refdataEra) {
+		return
 	}
 
 	dirty := pt.dirtyWindow
