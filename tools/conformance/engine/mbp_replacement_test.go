@@ -205,6 +205,43 @@ func TestMBPReplacementTwoGroupsBeforeItsDeltas(t *testing.T) {
 	}
 }
 
+// TestMBPReplacementRepeatsItsFirstGroup: like the test above, but the replacement
+// sends its first group twice before the group at 115. The repeat is at the
+// baseline's own Last Instrument Seq, so the journal has no entry to replay and the
+// diff always matches. That match proves nothing about the deltas, so it does not
+// end the wait, and the group at 115 is not diffed against the old session's deltas.
+func TestMBPReplacementRepeatsItsFirstGroup(t *testing.T) {
+	old := newMBPSession(srcA, 3, 1000)
+	replacement := newMBPSession(srcB, 3, 9000)
+	steps := old.cycles(101, 3, 1, false)
+	steps = append(steps, old.deltas(107, 14)...)
+	replacement.levels = [][2]int64{{9110, 10}}
+	steps = append(steps, replacement.group(110, 1, false)...)
+	steps = append(steps, replacement.group(110, 2, false)...)
+	replacement.levels = [][2]int64{{9110, 10}, {9111, 10}, {9112, 10}, {9113, 10}, {9114, 10}, {9115, 10}}
+	steps = append(steps, replacement.group(115, 3, false)...)
+	replacement.levels = [][2]int64{{9110, 10}}
+	steps = append(steps, replacement.deltas(111, 5)...)
+	steps = append(steps, replacement.cycles(116, 3, 4, false)...)
+	fs := runMBPAddrSteps(t, steps)
+
+	const oracle = "MBP.SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT"
+	for _, rule := range []string{oracle, "MBP.DELTA.PERINSTR_DENSITY"} {
+		if viol, _ := countByStatus(t, fs, rule); viol != 0 {
+			t.Errorf("%s: %d violation(s) against a replacement publisher that is conformant on its own", rule, viol)
+		}
+	}
+	passes := 0
+	for _, f := range fs {
+		if f.RuleID == oracle && f.Status == core.Pass {
+			passes++
+		}
+	}
+	if passes == 0 {
+		t.Errorf("%s: no pass for the replacement's later groups", oracle)
+	}
+}
+
 // TestMBPTwoLivePathsOnOneChannelAreNotJudged pins what the engine does with two
 // paths that serve one Channel ID at the same time with the same Per-Instrument Seq
 // series, which the spec allows (Redundant Channel Instances). The per-instrument

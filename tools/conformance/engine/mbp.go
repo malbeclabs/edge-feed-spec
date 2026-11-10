@@ -915,8 +915,13 @@ func (e *Engine) finishMBPSnapshot(m wire.Message, ch uint8, seq uint64) {
 				fmt.Sprintf("at Last Instrument Seq %d the delta-reconstructed ladder differs from the snapshot in %d level(s): %s",
 					open.lastK, len(d), describeMBPDiff(d)))
 		default:
-			// A match settles the wait: the deltas reconstruct this address's ladder.
-			in.replacedSrc, in.replacedDeltaSrc = netip.Addr{}, netip.Addr{}
+			// A match settles the wait only when deltas past the baseline were
+			// replayed: then the deltas reconstruct this address's ladder. A group at
+			// the baseline's own Last Instrument Seq replays no delta and always
+			// matches, so it proves nothing about the deltas.
+			if open.lastK > in.baseK {
+				in.replacedSrc, in.replacedDeltaSrc = netip.Addr{}, netip.Addr{}
+			}
 			e.passed(oracle, core.PortSnapshot, seq, ch, open.key.instrID,
 				fmt.Sprintf("delta-reconstructed ladder matches the snapshot at Last Instrument Seq %d (%d level(s))",
 					open.lastK, len(open.levels)))
