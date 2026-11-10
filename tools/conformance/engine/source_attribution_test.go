@@ -7,7 +7,6 @@ import (
 
 	"github.com/malbeclabs/edge-feed-spec/tools/conformance/core"
 	"github.com/malbeclabs/edge-feed-spec/tools/conformance/wire"
-	wb "github.com/malbeclabs/edge-feed-spec/tools/conformance/wire/wirebuild"
 )
 
 // The publisher a finding names, which is the whole point of carrying the source
@@ -246,14 +245,6 @@ func TestChannelKeyedCounterNamesNoPublisher(t *testing.T) {
 				{srcA, core.PortMktData, 1, buildOrderAddFrameWithPayload(chArmA, instrID, 1, 100)},
 				{srcA, core.PortMktData, 2, buildOrderAddFrameWithPayload(chArmA, instrID, 2, 200)},
 				{srcB, core.PortMktData, 1, buildOrderAddFrameWithPayload(chArmA, instrID, 2, 999)},
-			},
-		},
-		{
-			// The Manifest Seq is keyed on the channel. A sends 5 and B sends 4.
-			ruleID: "REFDATA.SEQ_MONOTONIC_NO_REGRESS", feed: core.FeedTOB, magic: wire.MagicTOB,
-			steps: []step{
-				{srcA, core.PortRefData, 1, wb.Frame(wire.MagicTOB).Channel(chArmA).Msg(0x07, 24, manifestBody(1, 5, 1)).Bytes()},
-				{srcB, core.PortRefData, 1, wb.Frame(wire.MagicTOB).Channel(chArmA).Msg(0x07, 24, manifestBody(1, 4, 1)).Bytes()},
 			},
 		},
 	} {

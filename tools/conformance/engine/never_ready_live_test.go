@@ -13,8 +13,8 @@ package engine
 // channel that reaches ready *late* is a violation rather than a pass.
 //
 // They also pin what a live verdict must not do. It must not grade a set the engine has
-// not read to the end of — the definitions that complete it can still be in a reorder
-// buffer, on this path or on another — and it must not measure a serving period with the
+// not read to the end of — the definitions that complete it can still be in the
+// instance's reorder buffer — and it must not measure a serving period with the
 // clock of the one before it, which is what a publisher restart leaves behind.
 
 import (
@@ -136,7 +136,7 @@ func TestNeverReachesReadyDecidesAgainOnANewEra(t *testing.T) {
 	}
 
 	// New era on this channel instance: state is discarded and the window reopens.
-	e.refdata.onResetChannel(1)
+	e.refdata.onResetChannel(refdataKey{src: srcA, ch: 1})
 	clearFindings(ac)
 
 	for i := 7; i <= 12; i++ {
@@ -345,20 +345,20 @@ func processDatagramInEra(e *Engine, raw []byte, seq uint64, era uint8) {
 	e.Process(srcA, f, core.PortRefData, sf)
 }
 
-// TestNeverReachesReadyWaitsForTheDefinitionsStillInAReorderBuffer: a channel served by
-// two paths is graded on what BOTH have delivered, so a verdict taken while either
-// buffer still holds an in-window datagram grades a set the engine has not read to the
-// end of — and neverReadyDecided makes that first answer the period's only answer.
+// TestNeverReachesReadyWaitsForTheDefinitionsStillInAReorderBuffer: a verdict taken while
+// the instance's own reorder buffer still holds an in-window datagram grades a set the
+// engine has not read to the end of, and neverReadyDecided makes that first answer the
+// period's only answer.
 //
-// The drain is what exposes it. Flush walks one path at a time, so the last path drains
-// with every other buffer already empty, and drainAll empties the heap before the first
-// item is classified: the definitions that complete the set are in flight, invisible to
-// anything that asks the buffer. Here the set completes at t=0.2s of a 2s window and the
-// channel is ready at the end of the run, which is what makes the Violation this used to
-// report a false one.
+// The drain is what exposes it: drainAll empties the heap before the first item is
+// classified, so the datagrams behind the current one are in flight and invisible to
+// anything that asks the buffer. Here the definitions carry SendTS values inside the
+// window but sequence numbers after the summary that closes it, so the set completes at
+// t=0.2s of a 2s window and is classified after t=3s. The Violation this would report
+// is a false one.
 //
-// **Reorder window 8, the CLI default.** At 1 a path holds one datagram, and the shapes
-// this covers need a buffer deep enough to hold a whole serving period.
+// **Reorder window 8, the CLI default.** At 1 a path holds one datagram, and the shape
+// this covers needs a buffer deep enough to hold a whole serving period.
 func TestNeverReachesReadyWaitsForTheDefinitionsStillInAReorderBuffer(t *testing.T) {
 	ac := &allCapture{}
 	e := New(Config{
@@ -369,9 +369,37 @@ func TestNeverReachesReadyWaitsForTheDefinitionsStillInAReorderBuffer(t *testing
 	}, ac)
 
 	manifest := func(ts uint64) []byte { return buildManifestFrameWithTS(wire.MagicTOB, ts, 1, 1, 2, 1) }
-	// Both paths announce the same two instruments and keep the cadence out to t=3s,
-	// past the 2s window. Path A carries instrument 100, path B instrument 101, so the
-	// subscriber's set is complete at t=0.2s and neither path completes it alone.
+	path := [][]byte{manifest(0), manifest(nsPerSec), manifest(2 * nsPerSec), manifest(3 * nsPerSec),
+		buildInstrDefFrameWithTS(nsPerSec/10, 100, 1, 1), buildInstrDefFrameWithTS(nsPerSec/5, 101, 1, 1)}
+	for i, raw := range path {
+		processDatagramFrom(e, srcA, raw, core.PortRefData, uint64(i+1))
+	}
+	e.Flush()
+	e.EndRun()
+
+	if hasViolation(ac, "REFDATA.NEVER_REACHES_READY") {
+		t.Errorf("REFDATA.NEVER_REACHES_READY: the channel was ready at t=0.2s of a 2s window; the verdict was taken over datagrams still in flight (%s)",
+			findingsFor(ac, "REFDATA.NEVER_REACHES_READY")[0].Detail)
+	}
+	if !hasPass(ac, "REFDATA.NEVER_REACHES_READY") {
+		t.Error("REFDATA.NEVER_REACHES_READY: no pass for a channel that reached ready inside its window")
+	}
+}
+
+// TestNeverReachesReadyGradesEachInstanceOnItsOwnSet: two paths on one Channel ID are two
+// channel instances, and each one is graded on the set it sent. Path A sends instrument
+// 100 and path B sends instrument 101 of a set of two, so neither instance completes its
+// set. Keyed by Channel ID, the two paths filled one set and the channel passed.
+func TestNeverReachesReadyGradesEachInstanceOnItsOwnSet(t *testing.T) {
+	ac := &allCapture{}
+	e := New(Config{
+		Feed:                  core.FeedTOB,
+		ExpectManifestCadence: 1 * time.Second,
+		ExpectDefinitionCycle: 1 * time.Second,
+		ReorderWindow:         8,
+	}, ac)
+
+	manifest := func(ts uint64) []byte { return buildManifestFrameWithTS(wire.MagicTOB, ts, 1, 1, 2, 1) }
 	pathA := [][]byte{manifest(0), buildInstrDefFrameWithTS(nsPerSec/10, 100, 1, 1),
 		manifest(nsPerSec), manifest(2 * nsPerSec), manifest(3 * nsPerSec)}
 	pathB := [][]byte{manifest(0), buildInstrDefFrameWithTS(nsPerSec/5, 101, 1, 1),
@@ -383,12 +411,15 @@ func TestNeverReachesReadyWaitsForTheDefinitionsStillInAReorderBuffer(t *testing
 	e.Flush()
 	e.EndRun()
 
-	if hasViolation(ac, "REFDATA.NEVER_REACHES_READY") {
-		t.Errorf("REFDATA.NEVER_REACHES_READY: the channel was ready at t=0.2s of a 2s window; the verdict was taken over datagrams still in flight (%s)",
-			findingsFor(ac, "REFDATA.NEVER_REACHES_READY")[0].Detail)
+	found := findingsFor(ac, "REFDATA.NEVER_REACHES_READY")
+	if len(found) != 2 {
+		t.Fatalf("REFDATA.NEVER_REACHES_READY: want one verdict per instance (2), got %d", len(found))
 	}
-	if !hasPass(ac, "REFDATA.NEVER_REACHES_READY") {
-		t.Error("REFDATA.NEVER_REACHES_READY: no pass for a channel that reached ready inside its window")
+	for _, f := range found {
+		if f.Status != core.Violation {
+			t.Errorf("REFDATA.NEVER_REACHES_READY: want a Violation for each instance, got %v (%s); one path's definitions completed the other path's set",
+				f.Status, f.Detail)
+		}
 	}
 }
 
@@ -503,20 +534,22 @@ func TestNeverReachesReadyDoesNotWaitForAPathThatStopped(t *testing.T) {
 	}
 }
 
-// TestNeverReachesReadyStoppedPathInsideThePeriodIsUnverifiable: the converse. The old
-// path stops at t=1s of a 2s window with datagrams from inside the serving period still
-// in its buffer. One of them could be the definition that completes the set, and the
-// engine does not read it before Flush. A Violation over it grades a set the engine has
-// not read to the end of; waiting for it is silence. It is Unverifiable, for the reason
-// an evicted buffer is: received and never judged.
-func TestNeverReachesReadyStoppedPathInsideThePeriodIsUnverifiable(t *testing.T) {
+// TestNeverReachesReadyStoppedPathDoesNotDowngradeAnotherInstance: the old path stops at
+// t=2s with datagrams from inside the new path's serving period still in its buffer. They
+// belong to another channel instance, so they cannot complete the new path's set, and the
+// new path's verdict neither waits for them nor reads them as loss. The new path sends
+// one instrument of a set of two, so the verdict is a Violation.
+//
+// Keyed by Channel ID, the two paths shared one set, and these datagrams first held the
+// verdict and then downgraded it to Unverifiable.
+func TestNeverReachesReadyStoppedPathDoesNotDowngradeAnotherInstance(t *testing.T) {
 	e, ac := reassignedPathEngine()
 
 	manifest := func(ts uint64) []byte { return buildManifestFrameWithTS(wire.MagicTOB, ts, 1, 1, 2, 1) }
-	// Enough datagrams on the old path that the first ones are classified and open the
-	// serving period at t=0; the last eight stay in its buffer.
+	// The old path sends to t=2s; its last eight datagrams (t=1.3s to t=2s) stay in its
+	// buffer, and the ones from t=1.5s on are inside the new path's serving period.
 	seq := uint64(1)
-	for ts := uint64(0); ts <= nsPerSec; ts += nsPerSec / 10 {
+	for ts := uint64(0); ts <= 2*nsPerSec; ts += nsPerSec / 10 {
 		processDatagramFrom(e, srcA, manifest(ts), core.PortRefData, seq)
 		seq++
 	}
@@ -529,10 +562,52 @@ func TestNeverReachesReadyStoppedPathInsideThePeriodIsUnverifiable(t *testing.T)
 
 	found := findingsFor(ac, "REFDATA.NEVER_REACHES_READY")
 	if len(found) != 1 {
-		t.Fatalf("REFDATA.NEVER_REACHES_READY: want 1 verdict before Flush, got %d; a path that stopped sending holds the wait for the life of the process", len(found))
+		t.Fatalf("REFDATA.NEVER_REACHES_READY: want 1 verdict before Flush, got %d", len(found))
 	}
-	if found[0].Status != core.Unverifiable || found[0].Reason != core.ReasonLoss {
-		t.Errorf("REFDATA.NEVER_REACHES_READY: want Unverifiable/%s, got %v/%s (%s); the stopped path holds datagrams from inside the window",
-			core.ReasonLoss, found[0].Status, found[0].Reason, found[0].Detail)
+	if found[0].Status != core.Violation {
+		t.Errorf("REFDATA.NEVER_REACHES_READY: want a Violation, got %v/%s (%s); another instance's buffer cannot complete this set",
+			found[0].Status, found[0].Reason, found[0].Detail)
+	}
+}
+
+// TestNeverReachesReadyLossOnAnotherPathDoesNotDowngrade: path A loses a datagram,
+// and path B on the same Channel ID never completes its own set. A's definitions
+// cannot complete B's set, so A's loss cannot explain B's verdict: it is a
+// Violation, not Unverifiable.
+func TestNeverReachesReadyLossOnAnotherPathDoesNotDowngrade(t *testing.T) {
+	e, ac := reassignedPathEngine()
+
+	manifest := func(ts uint64) []byte { return buildManifestFrameWithTS(wire.MagicTOB, ts, 1, 1, 2, 1) }
+	// Path A: complete, but frame 2 is lost.
+	processDatagramFrom(e, srcA, manifest(0), core.PortRefData, 1)
+	processDatagramFrom(e, srcA, buildInstrDefFrameWithTS(nsPerSec/10, 100, 1, 1), core.PortRefData, 3)
+	processDatagramFrom(e, srcA, buildInstrDefFrameWithTS(nsPerSec/5, 101, 1, 1), core.PortRefData, 4)
+	e.Flush()
+	if !e.dirtyOn(core.PortRefData, 1) {
+		t.Fatal("setup: path A's loss did not taint its window")
+	}
+	// Path B: one instrument of a set of two, past the window.
+	seq := uint64(1)
+	for ts := uint64(0); ts <= 4*nsPerSec; ts += nsPerSec / 2 {
+		processDatagramFrom(e, srcB, manifest(ts), core.PortRefData, seq)
+		seq++
+		processDatagramFrom(e, srcB, buildInstrDefFrameWithTS(ts+nsPerSec/10, 100, 1, 1), core.PortRefData, seq)
+		seq++
+	}
+	e.Flush()
+	e.EndRun()
+
+	var bVerdict *core.Finding
+	for i, f := range ac.findings {
+		if f.RuleID == "REFDATA.NEVER_REACHES_READY" && f.Status != core.Pass {
+			bVerdict = &ac.findings[i]
+		}
+	}
+	if bVerdict == nil {
+		t.Fatal("REFDATA.NEVER_REACHES_READY: no verdict for path B")
+	}
+	if bVerdict.Status != core.Violation {
+		t.Errorf("REFDATA.NEVER_REACHES_READY: want a Violation for path B, got %v/%s (%s); path A's loss cannot complete B's set",
+			bVerdict.Status, bVerdict.Reason, bVerdict.Detail)
 	}
 }
