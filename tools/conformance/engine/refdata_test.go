@@ -163,20 +163,23 @@ func TestInstrumentDefinitionV3FieldOffsets(t *testing.T) {
 
 // --- refdataState direct-drive helpers ---
 
+// testRefdataKey is the one channel instance the direct-drive helpers feed.
+var testRefdataKey = refdataKey{src: srcA, ch: 1}
+
 // feedManifest feeds a ManifestSummary message directly into the state
 // (bypasses the engine reorder buffer). sendTS is set to 0 (no timing checks).
 func feedManifest(rd *refdataState, valid uint8, seq uint16, count uint32) {
-	rd.onManifestSummary(1 /*channelID*/, valid, seq, count, 0 /*sendTS*/, false /*clean*/, 0 /*frameSeq*/)
+	rd.onManifestSummary(testRefdataKey, valid, seq, count, 0 /*sendTS*/, false /*clean*/, 0 /*frameSeq*/)
 }
 
 // feedDef feeds an InstrumentDefinition directly into the state.
 func feedDef(rd *refdataState, instrID uint32, manifestSeq uint16) {
-	rd.onInstrumentDef(1 /*channelID*/, instrID, manifestSeq, 0 /*defaultMethod*/, 0 /*priceBound*/, 0 /*sendTS*/, false /*clean*/, 0 /*frameSeq*/)
+	rd.onInstrumentDef(testRefdataKey, instrID, manifestSeq, 0 /*defaultMethod*/, 0 /*priceBound*/, 0 /*sendTS*/, false /*clean*/, 0 /*frameSeq*/)
 }
 
 // feedDefDirty feeds a def on a dirty window.
 func feedDefDirty(rd *refdataState, instrID uint32, manifestSeq uint16) {
-	rd.onInstrumentDef(1 /*channelID*/, instrID, manifestSeq, 0 /*defaultMethod*/, 0 /*priceBound*/, 0 /*sendTS*/, true /*dirty*/, 0 /*frameSeq*/)
+	rd.onInstrumentDef(testRefdataKey, instrID, manifestSeq, 0 /*defaultMethod*/, 0 /*priceBound*/, 0 /*sendTS*/, true /*dirty*/, 0 /*frameSeq*/)
 }
 
 // --- Tests ---
@@ -250,7 +253,7 @@ func TestRefdataResetClear(t *testing.T) {
 		t.Fatal("precondition: should be ready")
 	}
 
-	rd.onResetChannel(1) // new Reset Count on this channel's instance
+	rd.onResetChannel(testRefdataKey) // new Reset Count on this channel's instance
 	if rd.ready() {
 		t.Fatal("should NOT be ready after reset")
 	}
@@ -265,7 +268,7 @@ func TestRefdataValidFlagWhileServingSilent(t *testing.T) {
 	if len(findingsFor(ac, "REFDATA.VALID_FLAG_WHILE_SERVING")) != 0 {
 		t.Error("REFDATA.VALID_FLAG_WHILE_SERVING: must be silent when set not yet established")
 	}
-	if rd.channel(1).pendingValidZero != nil {
+	if rd.channel(testRefdataKey).pendingValidZero != nil {
 		t.Error("held a verdict on a channel that was never serving")
 	}
 }
@@ -878,7 +881,7 @@ func TestShutdownDoesNotEraseTheObservationWindow(t *testing.T) {
 
 	feedManifest(rd, 0, 1, 2)
 
-	s := rd.channel(1)
+	s := rd.channel(testRefdataKey)
 	if !s.everReady || !s.firstSendTSSet {
 		t.Error("shutdown cleared the observation window")
 	}
