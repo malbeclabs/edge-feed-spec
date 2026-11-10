@@ -102,10 +102,30 @@ groups:
       # alert is doing its job even though its wording is about verification. For
       # this one it means a publisher is old, which is a dashboard fact, not an
       # incident.
+      #
+      # Unverifiable reports with reason="transition" are taken out of the work count.
+      # A path left in an older reference-data session is reported that way on every
+      # rule its datagrams would reach, for as long as its Reset Count differs from
+      # the session's. Several of those rules (REFDATA.SEQ_MONOTONIC_NO_REGRESS among
+      # them) record no pass even on the served path, so counting the reports as work
+      # would hold this warning on two healthy paths whose Reset Counts differ. Every
+      # other result still counts, so a rule whose work is unverifiable for any other
+      # reason still fires.
       - alert: ConformanceRuleNoLongerVerifying
         expr: >
-          sum by (feed, rule_id) (
-            increase(dz_conformance_checks_total{result=~"pass|violation|unverifiable",rule_id!="FRAME.SCHEMA_VERSION_SUPERSEDED"}[15m])
+          (
+            sum by (feed, rule_id) (
+              increase(dz_conformance_checks_total{result=~"pass|violation|unverifiable",rule_id!="FRAME.SCHEMA_VERSION_SUPERSEDED"}[15m])
+            )
+            - (
+              sum by (feed, rule_id) (
+                increase(dz_conformance_unverifiable_total{reason="transition"}[15m])
+              )
+              or
+              sum by (feed, rule_id) (
+                increase(dz_conformance_checks_total{result=~"pass|violation|unverifiable",rule_id!="FRAME.SCHEMA_VERSION_SUPERSEDED"}[15m])
+              ) * 0
+            )
           ) > 10
           unless
           sum by (feed, rule_id) (

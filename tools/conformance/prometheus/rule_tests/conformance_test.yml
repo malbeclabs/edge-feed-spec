@@ -77,6 +77,43 @@ tests:
         eval_time: 25m
         exp_samples: []
 
+  # A path left in an older reference-data session is reported Unverifiable with
+  # reason="transition" on each rule its datagrams would reach, and some of those
+  # rules record no pass on the served path either. A steady stream of those reports
+  # alone must not read as a rule that verifies nothing.
+  - interval: 1m
+    input_series:
+      - series: 'dz_conformance_checks_total{feed="tob",rule_id="REFDATA.SEQ_MONOTONIC_NO_REGRESS",result="unverifiable",source_addr="10.0.0.2"}'
+        values: "0+3x30"
+      - series: 'dz_conformance_unverifiable_total{feed="tob",rule_id="REFDATA.SEQ_MONOTONIC_NO_REGRESS",reason="transition",source_addr="10.0.0.2"}'
+        values: "0+3x30"
+    promql_expr_test:
+      - expr: ALERTS{alertname="ConformanceRuleNoLongerVerifying"}
+        eval_time: 25m
+        exp_samples: []
+
+  # The carve-out is only the transition reports: the same rule, with unverifiable
+  # work for another reason on top of them and still no pass, alerts.
+  - interval: 1m
+    input_series:
+      - series: 'dz_conformance_checks_total{feed="tob",rule_id="REFDATA.SEQ_MONOTONIC_NO_REGRESS",result="unverifiable",source_addr="10.0.0.2"}'
+        values: "0+6x30"
+      - series: 'dz_conformance_unverifiable_total{feed="tob",rule_id="REFDATA.SEQ_MONOTONIC_NO_REGRESS",reason="transition",source_addr="10.0.0.2"}'
+        values: "0+3x30"
+      - series: 'dz_conformance_unverifiable_total{feed="tob",rule_id="REFDATA.SEQ_MONOTONIC_NO_REGRESS",reason="loss",source_addr="10.0.0.2"}'
+        values: "0+3x30"
+    alert_rule_test:
+      - eval_time: 25m
+        alertname: ConformanceRuleNoLongerVerifying
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              feed: tob
+              rule_id: REFDATA.SEQ_MONOTONIC_NO_REGRESS
+            exp_annotations:
+              summary: "Rule REFDATA.SEQ_MONOTONIC_NO_REGRESS is no longer verifying anything"
+              description: "Rule REFDATA.SEQ_MONOTONIC_NO_REGRESS on feed tob was handed work but produced no passing check in the last 15 minutes, so its clean result proves nothing. Check dz_conformance_unverifiable_total{rule_id=\"REFDATA.SEQ_MONOTONIC_NO_REGRESS\"} for which cause is blocking it.\n"
+
   # Routine cold_start/pending churn must not trip the coverage-loss alert. This
   # is the volume a healthy market-by-price feed produces on every snapshot
   # cycle; alerting on it is how an operator learns to ignore the alert.
