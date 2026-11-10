@@ -160,9 +160,7 @@ type openSnapshot struct {
 	// lastInstrSeqK is the Last Instrument Seq from SnapshotBegin. The oracle
 	// uses this as the per-instrument seq K at which the snapshot was taken.
 	lastInstrSeqK uint32
-	// orderIDs tracks Order IDs seen in this group for dup detection.
-	orderIDs map[uint64]struct{}
-	// orders holds the full SnapshotOrder records collected for the oracle (Task 26).
+	// orders holds the SnapshotOrder records collected for dup detection and the oracle (Task 26).
 	orders map[uint64]snapOrderRecord
 	// dirty is true if a snapshot-port seq gap was observed DURING this group
 	// (i.e. after this group's SnapshotBegin). Pre-group gaps do not set dirty.
@@ -896,6 +894,10 @@ func (e *Engine) handleSnapBegin(m wire.Message, ch uint8, snapPortSeq uint64) {
 	// (from this Begin's frame onward). Pre-group era gaps do not taint this
 	// group. lastSnapPortSeq is seeded with snapPortSeq so subsequent frames
 	// can detect forward gaps within the group.
+	// Cap preallocation to prevent a corrupt TotalOrders header from exhausting memory.
+	const maxSnapOrdersPrealloc = 1 << 16
+	ordersCap := min(int(totalOrders), maxSnapOrdersPrealloc)
+
 	e.mbo.openSnaps[ch] = &openSnapshot{
 		instrID:         instrID,
 		snapshotID:      snapID,
@@ -903,8 +905,7 @@ func (e *Engine) handleSnapBegin(m wire.Message, ch uint8, snapPortSeq uint64) {
 		total:           totalOrders,
 		received:        0,
 		lastInstrSeqK:   lastInstrSeq,
-		orderIDs:        make(map[uint64]struct{}),
-		orders:          make(map[uint64]snapOrderRecord),
+		orders:          make(map[uint64]snapOrderRecord, ordersCap),
 		dirty:           false,
 		captureEpoch:    e.curCaptureEpoch,
 		lastSnapPortSeq: snapPortSeq,
@@ -962,7 +963,7 @@ func (e *Engine) handleSnapOrder(m wire.Message, ch uint8, snapPortSeq uint64) {
 	}
 
 	// SNAP.SNAPSHOT_ORDER_NO_DUP_ORDER_ID: order IDs within a group must be unique.
-	if _, dup := open.orderIDs[orderID]; dup {
+	if _, dup := open.orders[orderID]; dup {
 		st := core.Violation
 		if open.dirty {
 			st = core.Unverifiable
@@ -972,12 +973,9 @@ func (e *Engine) handleSnapOrder(m wire.Message, ch uint8, snapPortSeq uint64) {
 		e.Emit("SNAP.SNAPSHOT_ORDER_NO_DUP_ORDER_ID", st, core.PortSnapshot, snapPortSeq, ch, open.instrID,
 			fmt.Sprintf("instrument %d: duplicate order id %d in snapshot group (snapshot id %d)",
 				open.instrID, orderID, open.snapshotID))
-	}
-
-	open.orderIDs[orderID] = struct{}{}
-	// Collect full order record for the oracle (Task 26). Only store once per
-	// order ID (first occurrence wins; dup detection fires separately above).
-	if _, already := open.orders[orderID]; !already {
+	} else {
+		// Collect full order record for the oracle (Task 26). First occurrence wins;
+		// dup detection fires separately above.
 		open.orders[orderID] = snapOrderRecord{
 			side:       side,
 			orderFlags: flags,
