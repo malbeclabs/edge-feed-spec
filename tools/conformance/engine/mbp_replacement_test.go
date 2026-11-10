@@ -231,10 +231,10 @@ func TestMBPTwoLivePathsOnOneChannelAreNotJudged(t *testing.T) {
 			k, snapID := uint32(1), uint32(1)
 			for c := 0; c < 4; c++ {
 				for j := 0; j < 2; j++ {
-					if !(tc.gap && k == 8) {
-						steps = append(steps, a.deltas(k, 1)...)
-					} else {
+					if tc.gap && k == 8 {
 						a.levels = append(a.levels, [2]int64{a.priceBase + int64(k), 10})
+					} else {
+						steps = append(steps, a.deltas(k, 1)...)
 					}
 					steps = append(steps, b.deltas(k, 1)...)
 					k++
