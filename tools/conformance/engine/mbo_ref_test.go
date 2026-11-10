@@ -1049,9 +1049,9 @@ func TestBookStaysBoundedUnderOrderChurn(t *testing.T) {
 			name string
 			w    *idWindow
 		}{{"removed", bk.removed}, {"hiddenIDs", bk.hiddenIDs}, {"execTradeIDs", bk.execTradeIDs}} {
-			if w.w.size() > limit || len(w.w.queue) > 2*limit+1 || cap(w.w.queue) > 4*limit {
+			if w.w.size() > limit || len(w.w.queue) > 2*limit || cap(w.w.queue) > 4*limit {
 				t.Fatalf("round %d: %s holds %d members, queue len %d cap %d; want at most %d, %d and %d",
-					i, w.name, w.w.size(), len(w.w.queue), cap(w.w.queue), limit, 2*limit+1, 4*limit)
+					i, w.name, w.w.size(), len(w.w.queue), cap(w.w.queue), limit, 2*limit, 4*limit)
 			}
 		}
 	}

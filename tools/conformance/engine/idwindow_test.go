@@ -14,8 +14,8 @@ func TestIDWindowStaysBounded(t *testing.T) {
 	w := newIDWindow(8)
 	for id := uint64(1); id <= 10_000; id++ {
 		w.add(id)
-		if w.size() > 8 || len(w.queue) > 17 || cap(w.queue) > 32 {
-			t.Fatalf("after %d adds: %d members, queue len %d cap %d, want at most 8, 17 and 32",
+		if w.size() > 8 || len(w.queue) > 16 || cap(w.queue) > 32 {
+			t.Fatalf("after %d adds: %d members, queue len %d cap %d, want at most 8, 16 and 32",
 				id, w.size(), len(w.queue), cap(w.queue))
 		}
 	}
@@ -108,8 +108,8 @@ func TestIDWindowStaleEntriesStayBounded(t *testing.T) {
 		if i%7 == 0 {
 			w.remove(uint64(i % 3))
 		}
-		if len(w.queue) > 9 || cap(w.queue) > 16 {
-			t.Fatalf("after %d operations: queue len %d cap %d, want at most 9 and 16", i+1, len(w.queue), cap(w.queue))
+		if len(w.queue) > 8 || cap(w.queue) > 16 {
+			t.Fatalf("after %d operations: queue len %d cap %d, want at most 8 and 16", i+1, len(w.queue), cap(w.queue))
 		}
 	}
 	if w.evicted {
