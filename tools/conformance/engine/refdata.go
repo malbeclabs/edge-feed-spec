@@ -17,7 +17,8 @@ package engine
 // in tests: callers set frame.Header.SendTS explicitly to control time without
 // any real wall-clock dependency.
 //
-// State per channel (keyed by channelID):
+// State per channel instance (keyed by source address and Channel ID; see
+// refdataKey):
 //
 //	valid            bool
 //	latest_seq       u16
@@ -30,7 +31,10 @@ package engine
 //	is_later(b, a) = ((b-a) mod 65536) != 0 && ((b-a) mod 65536) < 32768
 
 import (
+	"cmp"
 	"fmt"
+	"net/netip"
+	"slices"
 	"time"
 
 	"github.com/malbeclabs/edge-feed-spec/tools/conformance/core"
@@ -219,6 +223,11 @@ type channelRefdataState struct {
 	defFramesSeen     int
 	prevDefFrameTS    uint64 // SendTS of the last def frame
 	prevDefFrameTSSet bool
+
+	// lastActive is refdataState.seen at this instance's last refdata datagram. It
+	// orders instances by activity, not by wire time, so that a publisher clock
+	// cannot pin the choice; see forChannel.
+	lastActive uint64
 }
 
 func newChannelRefdataState() *channelRefdataState {
@@ -229,27 +238,116 @@ func newChannelRefdataState() *channelRefdataState {
 	}
 }
 
-// refdataState is the engine-level holder of per-channel refdata state.
+// refdataKey identifies the channel instance that owns one refdata set-state
+// machine.
+//
+// A channel instance is `(source address, Channel ID, destination port)`
+// (GLOSSARY.md). The destination port is not in the key because this state exists
+// only for the refdata port: one engine reads one refdata port, so the port is the
+// same for every entry. The source address is in the key. Two publishers can
+// serve one Channel ID on one group and one port, and each one advances its own
+// Manifest Seq and its own Reset Count ("Redundant Channel Instances" in
+// market-by-price/spec.md).
+//
+// Keyed by Channel ID only, a replacement publisher that starts a new era at a
+// lower Manifest Seq inherits the old publisher's latest_seq. Each of its summaries
+// then reads as REFDATA.SEQ_MONOTONIC_NO_REGRESS and is discarded, and each of its
+// definitions reads as REFDATA.STALE_SEQ_TAG_AFTER_BUMP, until its Manifest Seq
+// passes the old one. A replacement instance must start cold.
+type refdataKey struct {
+	src netip.Addr
+	ch  uint8
+}
+
+// refdataState is the engine-level holder of per-instance refdata state.
 type refdataState struct {
 	e        *Engine
-	channels map[uint8]*channelRefdataState
+	channels map[refdataKey]*channelRefdataState
+	// seen stamps channelRefdataState.lastActive.
+	seen uint64
 }
 
 // newRefdataState creates a refdataState bound to the given engine.
 func newRefdataState(e *Engine) *refdataState {
 	return &refdataState{
 		e:        e,
-		channels: make(map[uint8]*channelRefdataState),
+		channels: make(map[refdataKey]*channelRefdataState),
 	}
 }
 
-func (rs *refdataState) channel(ch uint8) *channelRefdataState {
-	s, ok := rs.channels[ch]
+func (rs *refdataState) channel(k refdataKey) *channelRefdataState {
+	s, ok := rs.channels[k]
 	if !ok {
 		s = newChannelRefdataState()
-		rs.channels[ch] = s
+		rs.channels[k] = s
 	}
 	return s
+}
+
+// forChannel returns the refdata state that a consumer on Channel ID ch reads.
+//
+// The consumers (the quote, midpoint, MBO and snapshot rules) judge an instrument
+// on a channel, and the channel can have more than one refdata instance. The
+// choice is:
+//
+//  1. The instance at the address of the datagram in front of the engine
+//     (Engine.curSrc). A publisher sends its mktdata and its refdata from one
+//     address, so this is the set that publisher declared. It is used even when
+//     it is not ready: a replacement publisher that is still collecting its set
+//     is not judged against the set of the publisher it replaced.
+//  2. Otherwise, the instance that sent a refdata datagram most recently. An
+//     instance that stopped stops being chosen as soon as another one sends, so
+//     a silent instance does not hold the consumers on an old set.
+//
+// It returns nil when the channel has no refdata instance.
+func (rs *refdataState) forChannel(ch uint8) *channelRefdataState {
+	if src := rs.e.curSrc; src.IsValid() {
+		if s, ok := rs.channels[refdataKey{src: src, ch: ch}]; ok {
+			return s
+		}
+	}
+	var best *channelRefdataState
+	for k, s := range rs.channels {
+		if k.ch == ch && (best == nil || s.lastActive > best.lastActive) {
+			best = s
+		}
+	}
+	return best
+}
+
+// keys returns the instance keys ordered by Channel ID then source address, so
+// the callers that iterate every instance emit in a fixed order.
+func (rs *refdataState) keys() []refdataKey {
+	keys := make([]refdataKey, 0, len(rs.channels))
+	for k := range rs.channels {
+		keys = append(keys, k)
+	}
+	slices.SortFunc(keys, func(a, b refdataKey) int {
+		if c := cmp.Compare(a.ch, b.ch); c != 0 {
+			return c
+		}
+		return a.src.Compare(b.src)
+	})
+	return keys
+}
+
+// drop removes the state of one instance that the engine stopped tracking (see
+// Engine.evictOldestInstance). The instance's observation ends here, so the
+// verdicts that EndRun decides for it are decided now, the same way. Without
+// this, the refdata state of an instance would outlive its tracker, and an
+// address change at each publisher replacement would add one set that is never
+// released.
+func (rs *refdataState) drop(k refdataKey) {
+	s, ok := rs.channels[k]
+	if !ok {
+		return
+	}
+	if s.pendingValidZero != nil {
+		rs.resolveValidZero(k.ch, s.pendingValidZero, false)
+		s.pendingValidZero = nil
+	}
+	rs.e.decideNeverReachesReady(k, s, 0, true)
+	delete(rs.channels, k)
 }
 
 // channelKnown returns two booleans: (ready, known).
@@ -259,11 +357,12 @@ func (rs *refdataState) channel(ch uint8) *channelRefdataState {
 //   - known is true when ready is true AND the instrument instrID is present in
 //     the channel's current def set.
 //
-// If the channel has not been seen yet, both return false.
+// If the channel has not been seen yet, both return false. The instance that
+// answers is the one forChannel chooses.
 // Used by the TOB validator (tob.go) to gate TOB.QUOTE.REFDATA_KNOWN.
 func (rs *refdataState) channelKnown(ch uint8, instrID uint32) (ready bool, known bool) {
-	s, ok := rs.channels[ch]
-	if !ok {
+	s := rs.forChannel(ch)
+	if s == nil {
 		return false, false
 	}
 	if !channelReady(s) {
@@ -274,21 +373,21 @@ func (rs *refdataState) channelKnown(ch uint8, instrID uint32) (ready bool, know
 }
 
 // defInfoFor returns the defInfo for an instrument on a channel, plus ok=true
-// when the channel is ready() and the instrument is in the def set.
+// when the channel is ready() and the instrument is in the def set. The instance
+// that answers is the one forChannel chooses.
 // Used by the Midpoint validator to gate refdata-consumer rules.
 func (rs *refdataState) defInfoFor(ch uint8, instrID uint32) (defInfo, bool) {
-	s, ok := rs.channels[ch]
-	if !ok || !channelReady(s) {
+	s := rs.forChannel(ch)
+	if s == nil || !channelReady(s) {
 		return defInfo{}, false
 	}
 	di, ok := s.defs[instrID]
 	return di, ok
 }
 
-// ready returns true if any channel's state satisfies ready().
+// ready returns true if any channel instance's state satisfies ready().
 // Exposed as a method on refdataState for Task 15 hooks.
 func (rs *refdataState) ready() bool {
-	// For unit tests the single-channel case is keyed by channelID 1.
 	for _, s := range rs.channels {
 		if channelReady(s) {
 			return true
@@ -305,23 +404,17 @@ func channelReady(s *channelRefdataState) bool {
 }
 
 // onResetChannel handles a Reset Count change on ONE channel instance. That
-// channel's state is discarded per the supplement: "subscribers detect the reset
+// instance's state is discarded per the supplement: "subscribers detect the reset
 // by comparing Reset Count against their last-seen value and discard all cached
 // state."
 //
-// **Only that channel.** Reset Count belongs to the channel instance, not to the
-// port: two publishers serving one group and one port advance independent Reset
-// Counts, so a port-wide reset lets either path erase the other's established set
-// on every alternation.
-//
-// The discard is still by Channel ID, because `channels` is Channel-ID-keyed:
-// two instances sharing one Channel ID would share one set and reset each other.
-// That is pre-existing, and inert while redundant paths carry distinct ids, but
-// it is the reason this is not yet the full `(source address, Channel ID)` key
-// that "Redundant Channel Instances" asks for.
-func (rs *refdataState) onResetChannel(only uint8) {
-	for ch, s := range rs.channels {
-		if ch != only {
+// **Only that instance.** Reset Count belongs to the channel instance, not to the
+// port or to the Channel ID: two publishers serving one group and one port advance
+// independent Reset Counts, so a wider reset lets either path erase the other's
+// established set on every alternation.
+func (rs *refdataState) onResetChannel(only refdataKey) {
+	for k, s := range rs.channels {
+		if k != only {
 			continue
 		}
 		s.valid = false
@@ -352,7 +445,6 @@ func (rs *refdataState) onResetChannel(only uint8) {
 		s.defFramesSeen = 0
 		s.prevDefFrameTS = 0
 		s.prevDefFrameTSSet = false
-		rs.channels[ch] = s
 	}
 }
 
@@ -361,8 +453,9 @@ func (rs *refdataState) onResetChannel(only uint8) {
 // sendTS is the frame-level SendTS (nanoseconds) used for cadence checks.
 // dirty is true when the refdata port had a gap in the reorder window: checks
 // that cannot be proven on gapped data downgrade to Unverifiable.
-func (rs *refdataState) onManifestSummary(ch uint8, valid uint8, seq uint16, count uint32, sendTS uint64, dirty bool, frameSeq uint64) {
-	s := rs.channel(ch)
+func (rs *refdataState) onManifestSummary(k refdataKey, valid uint8, seq uint16, count uint32, sendTS uint64, dirty bool, frameSeq uint64) {
+	ch := k.ch
+	s := rs.channel(k)
 
 	// REFDATA.MANIFEST_SEQ_NONZERO_WHEN_VALID: a Valid=1 summary must have both
 	// Manifest Seq > 0 and Instrument Count > 0.
@@ -509,17 +602,24 @@ func (rs *refdataState) onManifestSummary(ch uint8, valid uint8, seq uint16, cou
 
 	// A Valid=1 summary means the publisher is serving, so any session it ended is
 	// over and cannot excuse a later Valid=0. Clear on EVERY Valid=1, not only one
-	// that seeds or advances state: in steady state a summary does neither, and two
-	// arms feed one channel-keyed state machine, so one arm's shutdown would sit
-	// here excusing the other arm's later drop.
+	// that seeds or advances state: in steady state a summary does neither, and the
+	// session-end mark is keyed by channel, so one arm's shutdown would sit here
+	// excusing the other arm's later drop.
 	//
-	// Reaching here with a verdict outstanding means the channel went invalid and
+	// Reaching here with a verdict outstanding means the instance went invalid and
 	// came back, which settles it without waiting for end-of-run.
 	if s.pendingValidZero != nil {
 		rs.resolveValidZero(ch, s.pendingValidZero, true)
 		s.pendingValidZero = nil
 	}
-	delete(rs.e.sessionEnd, ch)
+	// **Not while another instance of the channel holds a verdict.** The mark is keyed
+	// by channel and the verdicts by instance. One arm that ends its session sends
+	// EndOfSession and Valid=0, and the other arm keeps sending Valid=1. Cleared here,
+	// the mark is gone before the first arm's verdict is decided, and its conformant
+	// shutdown becomes a must violation.
+	if !rs.validZeroPendingOn(ch) {
+		delete(rs.e.sessionEnd, ch)
+	}
 
 	// --- Task 15: REFDATA.MANIFEST_CADENCE ---
 	// Check cadence between successive ManifestSummary messages.
@@ -624,7 +724,7 @@ func (rs *refdataState) onManifestSummary(ch uint8, valid uint8, seq uint16, cou
 	// window, or the next period inherits the previous one's readiness and is
 	// credited with the wall-clock time the channel spent invalid.
 	if !s.valid && s.firstSendTSSet {
-		rs.e.decideNeverReachesReady(ch, s, frameSeq, true)
+		rs.e.decideNeverReachesReady(k, s, frameSeq, true)
 		s.everReady = false
 		s.readySendTS = 0
 		s.readySendTSSet = false
@@ -696,17 +796,29 @@ func (rs *refdataState) onManifestSummary(ch uint8, valid uint8, seq uint16, cou
 	}
 }
 
+// validZeroPendingOn reports whether any instance of Channel ID ch holds an
+// undecided REFDATA.VALID_FLAG_WHILE_SERVING verdict.
+func (rs *refdataState) validZeroPendingOn(ch uint8) bool {
+	for k, s := range rs.channels {
+		if k.ch == ch && s.pendingValidZero != nil {
+			return true
+		}
+	}
+	return false
+}
+
 // resolveShutdownVerdicts decides every held Valid=0 verdict at end of run.
 //
 // It must run after Flush: a publisher emits EndOfSession and then stops, so
 // nothing follows to push that last frame out of the reorder window, and before
 // the drain the signal reads as absent rather than buffered.
 func (rs *refdataState) resolveShutdownVerdicts() {
-	for ch, s := range rs.channels {
+	for _, k := range rs.keys() {
+		s := rs.channels[k]
 		if s.pendingValidZero == nil {
 			continue
 		}
-		rs.resolveValidZero(ch, s.pendingValidZero, false)
+		rs.resolveValidZero(k.ch, s.pendingValidZero, false)
 		s.pendingValidZero = nil
 	}
 }
@@ -720,7 +832,7 @@ func (rs *refdataState) resolveShutdownVerdicts() {
 // equally explain.
 //
 // The mark deliberately outranks resumed, even though a resume looks like stronger
-// evidence. Under channel-keyed state "EndOfSession, Valid=0, Valid=1" is the same
+// evidence. With the mark keyed by channel, "EndOfSession, Valid=0, Valid=1" is the same
 // byte sequence for a publisher that ended its session and then resumed, and for
 // one arm shutting down cleanly while the other keeps serving — the routine shape
 // in a two-arm deployment. Ranking resumed first turns that conformant shutdown
@@ -766,8 +878,9 @@ func (rs *refdataState) resolveValidZero(ch uint8, ev *validZeroEvent, resumed b
 //
 // It reports whether the definition was accepted into the set. A definition that
 // was discarded gives no opportunity to the rules that judge accepted definitions.
-func (rs *refdataState) onInstrumentDef(ch uint8, instrID uint32, manifestSeq uint16, defaultMethod, priceBound uint8, sendTS uint64, dirty bool, frameSeq uint64) bool {
-	s := rs.channel(ch)
+func (rs *refdataState) onInstrumentDef(k refdataKey, instrID uint32, manifestSeq uint16, defaultMethod, priceBound uint8, sendTS uint64, dirty bool, frameSeq uint64) bool {
+	ch := k.ch
+	s := rs.channel(k)
 
 	if !s.valid {
 		// No established state: silently discard.
@@ -908,12 +1021,13 @@ func strikeAfter(feed core.Feed, schema uint8, msgs []wire.Message, i int, instr
 // instrument in one Manifest Seq change. No spec forbids that, and the ID is then
 // in two successive sets. Symbol tells the two instruments apart: a definition
 // with a different Symbol starts a new instrument, with no history.
-func (rs *refdataState) onDefinitionStrike(ch uint8, instrID uint32, symbol string, obs strikeObs, taints uint64, frameSeq uint64) {
+func (rs *refdataState) onDefinitionStrike(k refdataKey, instrID uint32, symbol string, obs strikeObs, taints uint64, frameSeq uint64) {
 	const (
 		presence   = "STRIKE.PRESENCE_STABLE"
 		staysFixed = "STRIKE.FIXED_STAYS_FIXED"
 	)
-	s := rs.channel(ch)
+	ch := k.ch
+	s := rs.channel(k)
 	prev, had := s.strikes[instrID]
 	reused := had && prev.symbol != symbol
 	if reused {
@@ -1013,13 +1127,14 @@ func (e *Engine) processRefdataFrame(f *wire.Frame, pt *portTracker) {
 	// silent because onInstrumentDef drops definitions on an invalid channel
 	// without a finding.
 	ch := f.Header.ChannelID
+	k := refdataKey{src: pt.src, ch: ch}
 	if !pt.refdataEraSeeded {
 		// Seed on this instance's first refdata datagram (any Reset Count is valid).
 		pt.refdataEra = f.Header.ResetCount
 		pt.refdataEraSeeded = true
 	} else if f.Header.ResetCount != pt.refdataEra {
 		pt.refdataEra = f.Header.ResetCount
-		e.refdata.onResetChannel(ch)
+		e.refdata.onResetChannel(k)
 	}
 
 	dirty := pt.dirtyWindow
@@ -1030,7 +1145,7 @@ func (e *Engine) processRefdataFrame(f *wire.Frame, pt *portTracker) {
 		switch m.Type {
 		case wire.TypeManifest:
 			valid, seq, count := manifestFields(m)
-			e.refdata.onManifestSummary(ch, valid, seq, count, sendTS, dirty, frameSeq)
+			e.refdata.onManifestSummary(k, valid, seq, count, sendTS, dirty, frameSeq)
 
 		case wire.TypeInstrumentDef:
 			instrID, manifestSeq, defaultMethod, priceBound, ok := instrDefAllFields(e.cfg.Feed, f.Header.SchemaVersion, m)
@@ -1040,7 +1155,7 @@ func (e *Engine) processRefdataFrame(f *wire.Frame, pt *portTracker) {
 				// on would grade zero values as published data.
 				continue
 			}
-			accepted := e.refdata.onInstrumentDef(ch, instrID, manifestSeq, defaultMethod, priceBound, sendTS, dirty, frameSeq)
+			accepted := e.refdata.onInstrumentDef(k, instrID, manifestSeq, defaultMethod, priceBound, sendTS, dirty, frameSeq)
 			// StrikeInterval has no case of its own: the supplement reads it only as
 			// the message after an accepted definition.
 			if accepted && carriesStrikeInterval(e.cfg.Feed, f.Header.SchemaVersion) {
@@ -1049,7 +1164,7 @@ func (e *Engine) processRefdataFrame(f *wire.Frame, pt *portTracker) {
 				// ok discarded: instrDefAllFields above already proved the layout and
 				// the canonical length, which is all instrDefSymbol checks.
 				symbol, _ := instrDefSymbol(e.cfg.Feed, f.Header.SchemaVersion, m)
-				e.refdata.onDefinitionStrike(ch, instrID, symbol, obs, pt.taints, frameSeq)
+				e.refdata.onDefinitionStrike(k, instrID, symbol, obs, pt.taints, frameSeq)
 			}
 		}
 	}
@@ -1063,7 +1178,9 @@ func (e *Engine) processRefdataFrame(f *wire.Frame, pt *portTracker) {
 	// otherwise materialize state for a channel that has no reference data at all —
 	// a runt decoding to the all-zero header, or a Heartbeat — and EndRun would then
 	// report a cold-start Unverified for it.
-	if s, ok := e.refdata.channels[ch]; ok {
+	if s, ok := e.refdata.channels[k]; ok {
+		e.refdata.seen++
+		s.lastActive = e.refdata.seen
 		// Advances the clock the window closes on — see lastRefdataSendTS — but only
 		// while the channel is SERVING. A definition or a heartbeat past the deadline is
 		// proof the deadline passed; a datagram sent while `Valid = 0` is not, because
@@ -1075,6 +1192,6 @@ func (e *Engine) processRefdataFrame(f *wire.Frame, pt *portTracker) {
 			s.lastRefdataSendTS = f.Header.SendTS
 			s.lastRefdataSendTSSet = true
 		}
-		e.decideNeverReachesReady(ch, s, f.Header.Sequence, false)
+		e.decideNeverReachesReady(k, s, f.Header.Sequence, false)
 	}
 }

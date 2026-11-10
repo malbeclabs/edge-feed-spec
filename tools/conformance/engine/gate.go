@@ -1298,7 +1298,17 @@ func (e *Engine) checkRoundRobinCoversManifest() {
 	// to hold two cycles must not read as one where every instrument was covered.
 	enoughCycles := e.mbo.maxSnapCycle >= 2
 	// Iterate over all ready channels and check each instrument in the manifest.
-	for ch, cs := range e.refdata.channels {
+	// One channel can have more than one refdata instance; the rule judges the
+	// channel once, on the set forChannel chooses (EndRun has no datagram in front
+	// of it, so that is the instance that sent refdata most recently).
+	var chans []uint8
+	for _, k := range e.refdata.keys() {
+		if len(chans) == 0 || chans[len(chans)-1] != k.ch {
+			chans = append(chans, k.ch)
+		}
+	}
+	for _, ch := range chans {
+		cs := e.refdata.forChannel(ch)
 		if !channelReady(cs) {
 			// The manifest for this channel never completed, so its instrument set is
 			// not knowable. Reported once for the channel rather than silently: a

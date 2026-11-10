@@ -261,6 +261,11 @@ func (e *Engine) evictOldestInstance() {
 		e.rep.TransportLoss(oldest.port)
 	}
 	delete(e.ports, oldest)
+	// The refdata set-state machine of the instance goes with its tracker, so that
+	// the cap bounds it too.
+	if oldest.port == core.PortRefData && e.refdata != nil {
+		e.refdata.drop(refdataKey{src: oldest.src, ch: oldest.ch})
+	}
 }
 
 // instancesOn lists the instances observed on a port, ordered by channel then
@@ -284,10 +289,11 @@ func (e *Engine) instancesOn(port core.Port) []instanceKey {
 // dirtyOn reports whether any instance of this (port, channel) has a tainted
 // verifiability window.
 //
-// The OR across instances is deliberate and is the counterpart of what this
-// change does NOT rescope: per-instrument, book and reference-data state stay
-// keyed by channel, so the state a gated rule judges is fed by every instance of
-// that channel and any one of them losing datagrams can explain an anomaly in it.
+// The OR across instances is deliberate and is the counterpart of what is NOT
+// rescoped: per-instrument and book state stay keyed by channel, so the state a
+// gated rule judges is fed by every instance of that channel and any one of them
+// losing datagrams can explain an anomaly in it. (The reference-data state is keyed
+// by instance, and its per-datagram rules read their own instance's window.)
 // Gating per instance there would report a Violation the loss could account for.
 // HEARTBEAT.CADENCE is the exception and gates on its own instance's window,
 // because its baseline is per instance too.
@@ -436,62 +442,51 @@ func (e *Engine) classifyDrained(items []*bufferItem, pt *portTracker) {
 	pt.unclassified = nil
 }
 
-// refdataUnclassifiedWithin reports what the refdata reorder buffers of this channel still
-// hold from before deadlineTS. It looks at EVERY path of the channel, the one being
-// classified included. `pending` is a datagram on a path that still sends, and the verdict
-// waits for it. `stranded` is a datagram from inside the serving period on a path that
-// stopped, and the verdict cannot wait for it.
+// refdataUnclassifiedWithin reports what the refdata reorder buffer of one channel
+// instance still holds from before deadlineTS. `pending` is a datagram on a path that
+// still sends, and the verdict waits for it. `stranded` is a datagram from inside the
+// serving period on a path that stopped, and the verdict cannot wait for it.
+//
+// **Only the instance's own buffer.** The refdata set-state machine is keyed on the
+// channel instance (refdataKey), so a datagram of another path cannot complete this
+// set, and neither waiting for it nor downgrading for it is correct. Under the earlier
+// Channel-ID key the paths of one channel shared one set, and the scan covered every
+// path: the last path to drain at Flush then held the definitions that completed a
+// set another path had started.
 //
 // **A verdict taken before those datagrams are classified grades the publisher on a set
-// the engine has not finished reading.** The paths of one channel share its reference-data
-// state and have one reorder buffer each, and `Flush` drains one path at a time, so the
-// last path drains with every other buffer already empty while its own buffer still holds
-// the definitions that complete the set. `neverReadyDecided` then latches a Violation that
-// the next datagram disproves. Repro: two paths on Channel ID 1, the set complete at
-// t=0.2s of a 2s window, reported as a Must Violation with the channel ready at the end.
+// the engine has not finished reading.** `neverReadyDecided` then latches a Violation
+// that the next datagram disproves.
 //
 // **The SendTS bound is what keeps the rule live.** A buffer is never empty until Flush —
 // it holds up to `--reorder-window` datagrams at all times — so a gate on "anything
 // pending" would silence every mid-run verdict and give back the silence of #50. A
 // datagram sent after the deadline cannot change whether the deadline was met, so those
-// are not worth waiting for, and once the deadline is behind the publisher every buffer
+// are not worth waiting for, and once the deadline is behind the publisher the buffer
 // holds only datagrams past it.
 //
 // **A path that stopped sending never releases its buffer.** A datagram leaves a reorder
-// buffer only when later datagrams of the same path push it out, or at Flush. A publisher
-// address is a tunnel lease, and a reassigned lease leaves the old path's buffer full for
-// the life of the process, with SendTS values at or before every later deadline. A wait
-// on it is a wait without end, which is #50 again. So a path is stopped when its last
-// arrival is more than `silence` behind nowTS, the channel's refdata clock. The caller
-// passes the rule's own window: a path that sends a ManifestSummary every cadence cannot
-// be silent for a whole cadence + cycle. A path that is only behind still arrives, and the
-// verdict still waits for it.
-//
-// **A stopped path's datagram is not a wait, and it is not nothing either.** One sent
-// inside the serving period, at or after periodStartTS, could be the definition that
-// completes the set, and the engine does not read it before Flush. That is `stranded`,
-// and the caller reports Unverifiable for it — received and never judged, the reason
-// evictOldestInstance accounts a buffer as loss. One sent before the period started is
-// not something a fresh subscriber at the period start receives, so it is neither: were
-// it counted, one lease change would downgrade every later period for the life of the
-// process.
-func (e *Engine) refdataUnclassifiedWithin(ch uint8, periodStartTS, deadlineTS, nowTS uint64, silence time.Duration) (pending, stranded bool) {
-	for k, pt := range e.ports {
-		if k.port != core.PortRefData || k.ch != ch {
-			continue
-		}
-		stopped := pt.lastArrivalSendTSSet && nowTS > pt.lastArrivalSendTS &&
-			nowTS-pt.lastArrivalSendTS > uint64(silence)
-		for _, items := range [][]*bufferItem{pt.buf, pt.unclassified} {
-			for _, item := range items {
-				ts := item.tuple.frame.Header.SendTS
-				switch {
-				case ts > deadlineTS:
-				case !stopped:
-					pending = true
-				case ts >= periodStartTS:
-					stranded = true
-				}
+// buffer only when later datagrams of the same path push it out, or at Flush. So a path
+// is stopped when its last arrival is more than `silence` behind nowTS, the instance's
+// refdata clock, and a datagram it holds from inside the serving period (at or after
+// periodStartTS) is `stranded`: the caller reports Unverifiable for it — received and
+// never judged, the reason evictOldestInstance accounts a buffer as loss.
+func (e *Engine) refdataUnclassifiedWithin(k refdataKey, periodStartTS, deadlineTS, nowTS uint64, silence time.Duration) (pending, stranded bool) {
+	pt, ok := e.ports[instanceKey{src: k.src, port: core.PortRefData, ch: k.ch}]
+	if !ok {
+		return false, false
+	}
+	stopped := pt.lastArrivalSendTSSet && nowTS > pt.lastArrivalSendTS &&
+		nowTS-pt.lastArrivalSendTS > uint64(silence)
+	for _, items := range [][]*bufferItem{pt.buf, pt.unclassified} {
+		for _, item := range items {
+			ts := item.tuple.frame.Header.SendTS
+			switch {
+			case ts > deadlineTS:
+			case !stopped:
+				pending = true
+			case ts >= periodStartTS:
+				stranded = true
 			}
 		}
 	}
@@ -923,9 +918,9 @@ func (e *Engine) EndRun() {
 	}
 	e.refdata.resolveShutdownVerdicts()
 
-	for ch, s := range e.refdata.channels {
+	for _, k := range e.refdata.keys() {
 		// Seq 0: the end of the feed is not a datagram, so there is nothing to point at.
-		e.decideNeverReachesReady(ch, s, 0, true)
+		e.decideNeverReachesReady(k, e.refdata.channels[k], 0, true)
 	}
 }
 
@@ -951,10 +946,10 @@ func (e *Engine) EndRun() {
 //   - ready reached past it, or the window closed without ready → Violation, at the
 //     datagram that settled it.
 //
-// **A mid-run Violation waits for every path's in-window datagrams.** A reorder buffer
-// can still hold the definitions that complete the set, on this path or on another, and
-// a verdict taken over them grades a publisher on a set the engine has not read to the
-// end of — see refdataUnclassifiedWithin. A Pass does not wait: a definition still in a
+// **A mid-run Violation waits for the instance's in-window datagrams.** Its reorder
+// buffer can still hold the definitions that complete the set, and a verdict taken
+// over them grades a publisher on a set the engine has not read to the end of — see
+// refdataUnclassifiedWithin. A Pass does not wait: a definition still in a
 // buffer can add to the set, never take from it, so it cannot unmake a readiness the
 // channel already reached in time. The wait covers only paths that still send. A path
 // silent for a whole window does not release its buffer before Flush, so its in-window
@@ -971,7 +966,8 @@ func (e *Engine) EndRun() {
 // the readiness timestamp, not the span: the span ends at the last Valid=1 summary, so
 // where none lands between the window closing and a late readiness there is no span
 // past the window to catch it.
-func (e *Engine) decideNeverReachesReady(ch uint8, s *channelRefdataState, datagramSeq uint64, final bool) {
+func (e *Engine) decideNeverReachesReady(k refdataKey, s *channelRefdataState, datagramSeq uint64, final bool) {
+	ch := k.ch
 	if s.neverReadyDecided {
 		return
 	}
@@ -1015,7 +1011,7 @@ func (e *Engine) decideNeverReachesReady(ch uint8, s *channelRefdataState, datag
 		if s.lastRefdataSendTSSet && s.lastRefdataSendTS > nowTS {
 			nowTS = s.lastRefdataSendTS
 		}
-		unread, stranded = e.refdataUnclassifiedWithin(ch, s.firstSendTS,
+		unread, stranded = e.refdataUnclassifiedWithin(k, s.firstSendTS,
 			readyDeadlineTS(s.firstSendTS, window), nowTS, window)
 	}
 	if s.everReady {
