@@ -1014,8 +1014,8 @@ func TestRemovedWindowEviction(t *testing.T) {
 
 // TestBookStaysBoundedUnderOrderChurn: the regression for a market-by-order
 // validator whose memory grew with the number of orders it saw. Each order in
-// the stream leaves the book once, so the removed window gets only new IDs. The
-// windows must keep a fixed size however long the stream is: the live set, the
+// the feed leaves the book once, so the removed window gets only new IDs. The
+// windows must keep a fixed size however long the feed runs: the live set, the
 // members of each window and the array that holds each window's queue. Every
 // operation is on a live order or on a hidden ID still in its window, so
 // eviction must not make one of them Unverifiable.
@@ -1065,7 +1065,7 @@ func TestBookStaysBoundedUnderOrderChurn(t *testing.T) {
 	e.Flush()
 	for _, f := range ac.findings {
 		if f.Status == core.Violation {
-			t.Fatalf("a conformant stream must report no violation, got %s: %s", f.RuleID, f.Detail)
+			t.Fatalf("a conformant feed must report no violation, got %s: %s", f.RuleID, f.Detail)
 		}
 		if f.Status == core.Unverifiable && f.Reason == core.ReasonOverflow {
 			t.Fatalf("an operation on a live or windowed ID must not be Unverifiable (overflow), got %s: %s", f.RuleID, f.Detail)
