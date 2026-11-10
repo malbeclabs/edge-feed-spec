@@ -369,8 +369,8 @@ func (rs *refdataState) drop(k refdataKey) {
 		return
 	}
 	if ev := s.pendingValidZero; ev != nil {
-		if _, ended := rs.e.sessionEnd[k.ch]; ended {
-			rs.resolveValidZero(k.ch, ev, false)
+		if _, ended := rs.e.sessionEnd[k]; ended {
+			rs.resolveValidZero(k, ev, false)
 		} else {
 			rs.e.unverified("REFDATA.VALID_FLAG_WHILE_SERVING", core.ReasonTruncated, core.PortRefData, ev.frameSeq, k.ch, 0,
 				"ManifestSummary Valid=0 on an instance the tracker map evicted, before an EndOfSession still in a reorder buffer could be read")
@@ -379,6 +379,7 @@ func (rs *refdataState) drop(k refdataKey) {
 	}
 	rs.e.decideNeverReachesReady(k, s, 0, true, true)
 	delete(rs.channels, k)
+	delete(rs.e.sessionEnd, k)
 }
 
 // notifyMBO passes a newly frozen definition set to the MBO per-instrument state,
@@ -654,24 +655,18 @@ func (rs *refdataState) onManifestSummary(k refdataKey, valid uint8, seq uint16,
 
 	// A Valid=1 summary means the publisher is serving, so any session it ended is
 	// over and cannot excuse a later Valid=0. Clear on EVERY Valid=1, not only one
-	// that seeds or advances state: in steady state a summary does neither, and the
-	// session-end mark is keyed by channel, so one path's shutdown would sit here
-	// excusing the other path's later drop.
+	// that seeds or advances state: in steady state a summary does neither.
 	//
 	// Reaching here with a verdict outstanding means the instance went invalid and
 	// came back, which settles it without waiting for end-of-run.
 	if s.pendingValidZero != nil {
-		rs.resolveValidZero(ch, s.pendingValidZero, true)
+		rs.resolveValidZero(k, s.pendingValidZero, true)
 		s.pendingValidZero = nil
 	}
-	// **Not while another instance of the channel holds a verdict.** The mark is keyed
-	// by channel and the verdicts by instance. One path that ends its session sends
-	// EndOfSession and Valid=0, and the other path keeps sending Valid=1. Cleared here,
-	// the mark is gone before the first path's verdict is decided, and its conformant
-	// shutdown becomes a must violation.
-	if !rs.validZeroPendingOn(ch) {
-		delete(rs.e.sessionEnd, ch)
-	}
+	// The mark and the verdicts are both keyed by instance, so another path's
+	// Valid=1 does not clear this path's mark, and this path's mark does not excuse
+	// another path's Valid=0.
+	delete(rs.e.sessionEnd, k)
 
 	// --- Task 15: REFDATA.MANIFEST_CADENCE ---
 	// Check cadence between successive ManifestSummary messages.
@@ -848,17 +843,6 @@ func (rs *refdataState) onManifestSummary(k refdataKey, valid uint8, seq uint16,
 	}
 }
 
-// validZeroPendingOn reports whether any instance of Channel ID ch holds an
-// undecided REFDATA.VALID_FLAG_WHILE_SERVING verdict.
-func (rs *refdataState) validZeroPendingOn(ch uint8) bool {
-	for k, s := range rs.channels {
-		if k.ch == ch && s.pendingValidZero != nil {
-			return true
-		}
-	}
-	return false
-}
-
 // resolveShutdownVerdicts decides every held Valid=0 verdict at end of run.
 //
 // It must run after Flush: a publisher emits EndOfSession and then stops, so
@@ -870,7 +854,7 @@ func (rs *refdataState) resolveShutdownVerdicts() {
 		if s.pendingValidZero == nil {
 			continue
 		}
-		rs.resolveValidZero(k.ch, s.pendingValidZero, false)
+		rs.resolveValidZero(k, s.pendingValidZero, false)
 		s.pendingValidZero = nil
 	}
 }
@@ -883,16 +867,15 @@ func (rs *refdataState) resolveShutdownVerdicts() {
 // turns on the *absence* of one, which loss or an unwatched mktdata port can
 // equally explain.
 //
-// The mark deliberately outranks resumed, even though a resume looks like stronger
-// evidence. With the mark keyed by channel, "EndOfSession, Valid=0, Valid=1" is the same
-// byte sequence for a publisher that ended its session and then resumed, and for
-// one arm shutting down cleanly while the other keeps serving — the routine shape
-// in a two-arm deployment. Ranking resumed first turns that conformant shutdown
-// into a must violation; this way round the cost is a missed one. See the README's
-// channel-vs-instance limitation.
-func (rs *refdataState) resolveValidZero(ch uint8, ev *validZeroEvent, resumed bool) {
+// The mark deliberately outranks resumed. Both are read on one instance, so
+// "EndOfSession, Valid=0, Valid=1" is a publisher that ended its session and then
+// started a new one, which the spec allows. Another path on the same Channel ID
+// has its own mark and its own verdict, so its shutdown cannot excuse this
+// instance's drop.
+func (rs *refdataState) resolveValidZero(k refdataKey, ev *validZeroEvent, resumed bool) {
 	const rule = "REFDATA.VALID_FLAG_WHILE_SERVING"
-	if _, ended := rs.e.sessionEnd[ch]; ended {
+	ch := k.ch
+	if _, ended := rs.e.sessionEnd[k]; ended {
 		rs.e.passed(rule, core.PortRefData, ev.frameSeq, ch, 0,
 			"ManifestSummary Valid=0 paired with EndOfSession on mktdata: the shutdown the spec mandates")
 		return

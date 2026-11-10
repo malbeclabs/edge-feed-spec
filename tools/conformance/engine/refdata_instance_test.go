@@ -410,6 +410,48 @@ func TestRefdataOnePathShutdownWhileTheOtherServesIsNotAViolation(t *testing.T) 
 	}
 }
 
+// TestRefdataOnePathShutdownDoesNotExcuseTheOtherPathsDrop: the converse. Path A
+// ends its session cleanly, and later path B on the same Channel ID drops to Valid=0
+// with no EndOfSession while its mktdata keeps arriving. A's session-end mark is A's
+// alone, so A's shutdown passes and B's drop is a violation.
+func TestRefdataOnePathShutdownDoesNotExcuseTheOtherPathsDrop(t *testing.T) {
+	ac := &allCapture{}
+	e := New(Config{Feed: core.FeedTOB, ReorderWindow: 1}, ac)
+	seqs := map[instanceKey]uint64{}
+	send := func(src netip.Addr, port core.Port, raw []byte) {
+		f, sf := wire.Decode(raw, wire.MagicTOB)
+		k := instanceKey{src: src, port: port, ch: f.Header.ChannelID}
+		seqs[k]++
+		f.Header.Sequence = seqs[k]
+		e.Process(src, f, port, sf)
+	}
+	for _, src := range []netip.Addr{srcA, srcB} {
+		send(src, core.PortMktData, buildHeartbeatFrame(wire.MagicTOB, 0, 0))
+		send(src, core.PortRefData, buildManifestFrame(wire.MagicTOB, 1, 1, 2))
+		send(src, core.PortRefData, buildInstrDefFrameTOB(100, 1))
+		send(src, core.PortRefData, buildInstrDefFrameTOB(200, 1))
+	}
+	// Path A ends its session.
+	send(srcA, core.PortMktData, buildEndOfSessionFrame(wire.MagicTOB))
+	send(srcA, core.PortMktData, buildHeartbeatFrame(wire.MagicTOB, 0, 0))
+	send(srcA, core.PortRefData, buildManifestFrame(wire.MagicTOB, 0, 1, 2))
+	send(srcA, core.PortRefData, buildManifestFrame(wire.MagicTOB, 0, 1, 2))
+	// Path B drops to Valid=0 with no EndOfSession, and its mktdata keeps arriving.
+	send(srcB, core.PortMktData, buildHeartbeatFrame(wire.MagicTOB, 0, 0))
+	send(srcB, core.PortMktData, buildHeartbeatFrame(wire.MagicTOB, 0, 0))
+	send(srcB, core.PortRefData, buildManifestFrame(wire.MagicTOB, 0, 1, 2))
+	send(srcB, core.PortRefData, buildManifestFrame(wire.MagicTOB, 0, 1, 2))
+	e.Flush()
+	e.EndRun()
+
+	if got := countStatus(ac, "REFDATA.VALID_FLAG_WHILE_SERVING", core.Violation); got != 1 {
+		t.Errorf("REFDATA.VALID_FLAG_WHILE_SERVING: %d violation(s), want 1 for path B's drop with no EndOfSession", got)
+	}
+	if got := countStatus(ac, "REFDATA.VALID_FLAG_WHILE_SERVING", core.Pass); got != 1 {
+		t.Errorf("REFDATA.VALID_FLAG_WHILE_SERVING: %d pass(es), want 1 for path A's shutdown", got)
+	}
+}
+
 // TestRefdataSecondPathReadyKeepsAnOpenSnapshotGroup: path B completes the same
 // definition set that path A already established, while A has a snapshot group
 // open. B's set is no change to the channel's set, so A's group must survive it.

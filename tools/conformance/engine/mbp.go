@@ -97,6 +97,11 @@ type mbpInstr struct {
 	// The zero Addr means "not known". See mbpNewSession.
 	deltaSrc netip.Addr
 	baseSrc  netip.Addr
+	// awaitBaseSrcDelta is set when a group from another address than the old
+	// baseline is adopted, and cleared when a delta from the baseline's address is
+	// accepted. Until then lastSeq and the journal past baseK can be the old
+	// session's, so a later group from the new address is not diffed against them.
+	awaitBaseSrcDelta bool
 }
 
 // restart discards the instrument's reconstruction and its Per-Instrument Seq
@@ -111,6 +116,19 @@ func (in *mbpInstr) restart() {
 	in.base, in.baseSet, in.journal = nil, false, nil
 	in.overflow, in.droppedMax = false, 0
 	in.deltaSrc, in.baseSrc = netip.Addr{}, netip.Addr{}
+	in.awaitBaseSrcDelta = false
+}
+
+// accept records that the delta in front of the engine, from src, seeded or
+// advanced the Per-Instrument Seq tracker.
+func (in *mbpInstr) accept(src netip.Addr, captureEpoch uint64, dense bool) {
+	if dense {
+		in.captureEpoch = captureEpoch
+	}
+	in.deltaSrc = src
+	if src == in.baseSrc {
+		in.awaitBaseSrcDelta = false
+	}
 }
 
 // stateAsOf replays the base ladder plus every journalled delta at or below k.
@@ -461,8 +479,7 @@ func (e *Engine) checkMBPSeq(in *mbpInstr, k mbpInstrKey, got uint32, seq uint64
 
 	if !in.lastSeqSet {
 		in.lastSeq, in.lastSeqSet = got, true
-		in.captureEpoch = e.curCaptureEpoch
-		in.deltaSrc = e.curSrc
+		in.accept(e.curSrc, e.curCaptureEpoch, true)
 		return true
 	}
 
@@ -493,8 +510,7 @@ func (e *Engine) checkMBPSeq(in *mbpInstr, k mbpInstrKey, got uint32, seq uint64
 		// survived whatever the capture admitted losing, so the excuse below is
 		// spent rather than held for a gap this drop cannot have caused.
 		in.lastSeq = got
-		in.captureEpoch = e.curCaptureEpoch
-		in.deltaSrc = e.curSrc
+		in.accept(e.curSrc, e.curCaptureEpoch, true)
 		return true
 	case got > in.lastSeq+1:
 		// A forward gap. Publishers MUST emit densely, but loss is
@@ -509,7 +525,7 @@ func (e *Engine) checkMBPSeq(in *mbpInstr, k mbpInstrKey, got uint32, seq uint64
 			reason)
 		in.gapped = true
 		in.lastSeq = got
-		in.deltaSrc = e.curSrc
+		in.accept(e.curSrc, e.curCaptureEpoch, false)
 		return true
 	default:
 		// `<= lastSeq` is a duplicate or a late message, which is exactly what the
@@ -843,7 +859,14 @@ func (e *Engine) finishMBPSnapshot(m wire.Message, ch uint8, seq uint64) {
 		// deltas are still behind this group would be diffed against the old
 		// session's ladder and journal; one comparison of a lease move is the price.
 		e.unverified(oracle, core.ReasonTransition, core.PortSnapshot, seq, ch, open.key.instrID,
-			"group from another source IP address than the adopted baseline: adopted as the baseline, compared from the next group")
+			"group from another source IP address than the adopted baseline: adopted as the baseline, compared once a delta from its address is applied")
+	case in.awaitBaseSrcDelta:
+		// The baseline is this address's, but no delta from it has been applied
+		// since. lastSeq and the journal past the baseline can still be the old
+		// session's, and replaying them against a replacement's group is the false
+		// mismatch the case above exists to avoid.
+		e.unverified(oracle, core.ReasonTransition, core.PortSnapshot, seq, ch, open.key.instrID,
+			"no delta from the baseline's source IP address applied since it was adopted: compared once one is")
 	case !in.baseSet:
 		// No adopted ladder to replay from yet; this group becomes it.
 		e.unverified(oracle, core.ReasonColdStart, core.PortSnapshot, seq, ch, open.key.instrID,
@@ -879,6 +902,9 @@ func (e *Engine) finishMBPSnapshot(m wire.Message, ch uint8, seq uint64) {
 	in.baseK = open.lastK
 	in.baseSet = true
 	in.baseSrc = e.curSrc
+	if fromNewAddress {
+		in.awaitBaseSrcDelta = true
+	}
 	kept := in.journal[:0]
 	for _, ent := range in.journal {
 		if ent.perSeq > open.lastK {

@@ -59,10 +59,11 @@ type Engine struct {
 	mbo *mboState
 	// Market-by-price consumer state; lazily initialised by ensureMBP.
 	mbp *mbpState
-	// sessionEnd holds the channels that have announced EndOfSession on mktdata.
-	// The refdata state machine reads it to tell the shutdown ManifestSummary the
-	// spec mandates from a mid-service Valid drop; see resolveValidZero.
-	sessionEnd map[uint8]struct{}
+	// sessionEnd holds the channel instances that have announced EndOfSession on
+	// mktdata, keyed like the refdata state: (source IP address, Channel ID). The
+	// refdata state machine reads it to tell the shutdown ManifestSummary the spec
+	// mandates from a mid-service Valid drop; see resolveValidZero.
+	sessionEnd map[refdataKey]struct{}
 	// captureLossEpoch counts the admissions ObserveCaptureLoss has taken. A
 	// series that carries a stale value has had a drop admitted since its last
 	// message and so has one gap the drop can account for; one that carries the
@@ -87,7 +88,7 @@ func New(cfg Config, rep report.Reporter) *Engine {
 		rep:        rep,
 		now:        time.Now,
 		ports:      make(map[instanceKey]*portTracker),
-		sessionEnd: make(map[uint8]struct{}),
+		sessionEnd: make(map[refdataKey]struct{}),
 	}
 }
 
@@ -810,16 +811,22 @@ func (e *Engine) classify(item *bufferItem, pt *portTracker) {
 	}
 }
 
-// observeSessionEnd records that a channel announced the end of its session.
-// EndOfSession is per channel ("no more data on this channel for the current
-// session") and carries no channel field of its own, so the frame header names it.
+// observeSessionEnd records that a channel instance announced the end of its
+// session. EndOfSession is per channel ("no more data on this channel for the
+// current session") and carries no channel field of its own, so the frame header
+// names it.
+//
+// The mark is keyed by the datagram's source IP address as well, because one path
+// ending its session says nothing about another path on the same Channel ID. A
+// publisher sends its mktdata and its refdata from one address (see forChannel),
+// so the key is the one its refdata instance has.
 //
 // Only a mktdata placement counts. Anywhere else the message is already
 // MSG.WRONG_PORT_PLACEMENT, and a misplaced one must not excuse a refdata finding.
 func (e *Engine) observeSessionEnd(f *wire.Frame) {
 	for _, m := range f.Messages {
 		if m.Type == wire.TypeEndOfSession {
-			e.sessionEnd[f.Header.ChannelID] = struct{}{}
+			e.sessionEnd[refdataKey{src: e.curSrc, ch: f.Header.ChannelID}] = struct{}{}
 			return
 		}
 	}

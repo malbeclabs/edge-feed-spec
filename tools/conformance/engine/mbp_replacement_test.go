@@ -166,3 +166,106 @@ func TestMBPReplacementPublisherMismatchIsStillReported(t *testing.T) {
 		t.Errorf("MBP.SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT: want 1 violation for the replacement's own mismatch, got %d", viol)
 	}
 }
+
+// TestMBPReplacementTwoGroupsBeforeItsDeltas: like the test above, with a second
+// replacement group before the replacement's first delta. The first group is
+// adopted from a new address, so the old session's lastSeq and its journal past the
+// group's Last Instrument Seq are still in place when the second group arrives. The
+// second group is not diffed against them: it is unverifiable until a delta from
+// the replacement's address is applied, and the replacement's later groups compare.
+func TestMBPReplacementTwoGroupsBeforeItsDeltas(t *testing.T) {
+	old := newMBPSession(srcA, 3, 1000)
+	replacement := newMBPSession(srcB, 3, 9000)
+	steps := old.cycles(101, 3, 1, false)
+	steps = append(steps, old.deltas(107, 14)...)
+	replacement.levels = [][2]int64{{9110, 10}}
+	steps = append(steps, replacement.group(110, 1, false)...)
+	replacement.levels = [][2]int64{{9110, 10}, {9111, 10}, {9112, 10}, {9113, 10}, {9114, 10}, {9115, 10}}
+	steps = append(steps, replacement.group(115, 2, false)...)
+	replacement.levels = [][2]int64{{9110, 10}}
+	steps = append(steps, replacement.deltas(111, 5)...)
+	steps = append(steps, replacement.cycles(116, 3, 3, false)...)
+	fs := runMBPAddrSteps(t, steps)
+
+	const oracle = "MBP.SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT"
+	for _, rule := range []string{oracle, "MBP.DELTA.PERINSTR_DENSITY"} {
+		if viol, _ := countByStatus(t, fs, rule); viol != 0 {
+			t.Errorf("%s: %d violation(s) against a replacement publisher that is conformant on its own", rule, viol)
+		}
+	}
+	passes := 0
+	for _, f := range fs {
+		if f.RuleID == oracle && f.Status == core.Pass {
+			passes++
+		}
+	}
+	if passes == 0 {
+		t.Errorf("%s: no pass for the replacement's later groups", oracle)
+	}
+}
+
+// TestMBPTwoLivePathsOnOneChannelAreNotJudged pins what the engine does with two
+// paths that serve one Channel ID at the same time with the same Per-Instrument Seq
+// series, which the spec allows (Redundant Channel Instances). The per-instrument
+// state is keyed by channel, not by channel instance, so the two paths feed one
+// tracker, and each delta from the other address that does not continue the series
+// reads as a new session and restarts the instrument. The intended result is the
+// conservative one: no finding is fabricated, the reconstruction rule reports
+// unverifiable rather than staying silent, and a real gap or a real mismatch on one
+// path is missed. Keying the per-instrument state by channel instance (see the
+// README's known limitations) is what would let these rules judge each path.
+func TestMBPTwoLivePathsOnOneChannelAreNotJudged(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		gap    bool // path A skips Per-Instrument Seq 8
+		mutate bool // path A's last group disagrees with its deltas
+	}{
+		{name: "conformant"},
+		{name: "gap on one path", gap: true},
+		{name: "mismatch on one path", mutate: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := newMBPSession(srcA, 3, 1000)
+			b := newMBPSession(srcB, 3, 1000)
+			var steps []mbpAddrStep
+			k, snapID := uint32(1), uint32(1)
+			for c := 0; c < 4; c++ {
+				for j := 0; j < 2; j++ {
+					if !(tc.gap && k == 8) {
+						steps = append(steps, a.deltas(k, 1)...)
+					} else {
+						a.levels = append(a.levels, [2]int64{a.priceBase + int64(k), 10})
+					}
+					steps = append(steps, b.deltas(k, 1)...)
+					k++
+				}
+				steps = append(steps, a.group(k-1, snapID, tc.mutate && c == 3)...)
+				steps = append(steps, b.group(k-1, snapID, false)...)
+				snapID++
+			}
+			fs := runMBPAddrSteps(t, steps)
+
+			const oracle = "MBP.SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT"
+			for _, rule := range []string{oracle, "MBP.DELTA.PERINSTR_DENSITY"} {
+				if viol, _ := countByStatus(t, fs, rule); viol != 0 {
+					t.Errorf("%s: %d violation(s) on two paths whose state the engine cannot tell apart", rule, viol)
+				}
+			}
+			unverifiable := 0
+			for _, f := range fs {
+				if f.RuleID != oracle {
+					continue
+				}
+				switch f.Status {
+				case core.Pass:
+					t.Errorf("%s: a pass on two paths whose state the engine cannot tell apart: %s", oracle, f.Detail)
+				case core.Unverifiable:
+					unverifiable++
+				}
+			}
+			if unverifiable != 8 {
+				t.Errorf("%s: %d unverifiable finding(s), want one per group (8)", oracle, unverifiable)
+			}
+		})
+	}
+}
