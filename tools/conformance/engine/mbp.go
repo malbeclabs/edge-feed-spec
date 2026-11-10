@@ -92,8 +92,8 @@ type mbpInstr struct {
 	// droppedMax is the highest Per-Instrument Seq the bound discarded. A dropped
 	// delta never comes back, so overflow clears only once a baseline subsumes it.
 	droppedMax uint32
-	// deltaSrc is the source address of the last delta that seeded or advanced
-	// lastSeq, and baseSrc the source address of the snapshot group adopted as base.
+	// deltaSrc is the source IP address of the last delta that seeded or advanced
+	// lastSeq, and baseSrc the source IP address of the snapshot group adopted as base.
 	// The zero Addr means "not known". See mbpNewSession.
 	deltaSrc netip.Addr
 	baseSrc  netip.Addr
@@ -407,11 +407,11 @@ func (e *Engine) checkMBP(f *wire.Frame, ch uint8) {
 }
 
 // mbpNewSession reports whether the datagram in front of the engine starts a new
-// publisher session for one instrument: it comes from another source address than
+// publisher session for one instrument: it comes from another source IP address than
 // prev, and it does not continue that address's series. checkMBPSeq and
 // finishMBPSnapshot then restart the instrument.
 //
-// **A publisher session on a new source address restarts the instrument.** The
+// **A publisher session on a new source IP address restarts the instrument.** The
 // state is keyed by channel, and mbpObserveEra wipes it when a new address arrives
 // in a new era. It does not wipe when the new address arrives in the era the
 // channel's state is built for (read as a lease move), or in the era the channel
@@ -843,7 +843,7 @@ func (e *Engine) finishMBPSnapshot(m wire.Message, ch uint8, seq uint64) {
 		// deltas are still behind this group would be diffed against the old
 		// session's ladder and journal; one comparison of a lease move is the price.
 		e.unverified(oracle, core.ReasonTransition, core.PortSnapshot, seq, ch, open.key.instrID,
-			"group from another source address than the adopted baseline: adopted as the baseline, compared from the next group")
+			"group from another source IP address than the adopted baseline: adopted as the baseline, compared from the next group")
 	case !in.baseSet:
 		// No adopted ladder to replay from yet; this group becomes it.
 		e.unverified(oracle, core.ReasonColdStart, core.PortSnapshot, seq, ch, open.key.instrID,

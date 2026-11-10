@@ -3,7 +3,7 @@ package engine
 // mbp_replacement_test.go — a replacement publisher on the same Channel ID.
 //
 // The market-by-price state is keyed by channel. A publisher host is replaced: the
-// old one stops, and a new one starts the same Channel ID from a new source address,
+// old one stops, and a new one starts the same Channel ID from a new source IP address,
 // with its own Per-Instrument Seq series and its own ladders. If the new address
 // does not trigger a wipe (its Reset Count is the era the channel's state is built
 // for, or the era the channel last left), the old session's per-instrument state

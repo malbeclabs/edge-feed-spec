@@ -569,3 +569,45 @@ func TestNeverReachesReadyStoppedPathDoesNotDowngradeAnotherInstance(t *testing.
 			found[0].Status, found[0].Reason, found[0].Detail)
 	}
 }
+
+// TestNeverReachesReadyLossOnAnotherPathDoesNotDowngrade: path A loses a datagram,
+// and path B on the same Channel ID never completes its own set. A's definitions
+// cannot complete B's set, so A's loss cannot explain B's verdict: it is a
+// Violation, not Unverifiable.
+func TestNeverReachesReadyLossOnAnotherPathDoesNotDowngrade(t *testing.T) {
+	e, ac := reassignedPathEngine()
+
+	manifest := func(ts uint64) []byte { return buildManifestFrameWithTS(wire.MagicTOB, ts, 1, 1, 2, 1) }
+	// Path A: complete, but frame 2 is lost.
+	processDatagramFrom(e, srcA, manifest(0), core.PortRefData, 1)
+	processDatagramFrom(e, srcA, buildInstrDefFrameWithTS(nsPerSec/10, 100, 1, 1), core.PortRefData, 3)
+	processDatagramFrom(e, srcA, buildInstrDefFrameWithTS(nsPerSec/5, 101, 1, 1), core.PortRefData, 4)
+	e.Flush()
+	if !e.dirtyOn(core.PortRefData, 1) {
+		t.Fatal("setup: path A's loss did not taint its window")
+	}
+	// Path B: one instrument of a set of two, past the window.
+	seq := uint64(1)
+	for ts := uint64(0); ts <= 4*nsPerSec; ts += nsPerSec / 2 {
+		processDatagramFrom(e, srcB, manifest(ts), core.PortRefData, seq)
+		seq++
+		processDatagramFrom(e, srcB, buildInstrDefFrameWithTS(ts+nsPerSec/10, 100, 1, 1), core.PortRefData, seq)
+		seq++
+	}
+	e.Flush()
+	e.EndRun()
+
+	var bVerdict *core.Finding
+	for i, f := range ac.findings {
+		if f.RuleID == "REFDATA.NEVER_REACHES_READY" && f.Status != core.Pass {
+			bVerdict = &ac.findings[i]
+		}
+	}
+	if bVerdict == nil {
+		t.Fatal("REFDATA.NEVER_REACHES_READY: no verdict for path B")
+	}
+	if bVerdict.Status != core.Violation {
+		t.Errorf("REFDATA.NEVER_REACHES_READY: want a Violation for path B, got %v/%s (%s); path A's loss cannot complete B's set",
+			bVerdict.Status, bVerdict.Reason, bVerdict.Detail)
+	}
+}

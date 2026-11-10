@@ -81,8 +81,8 @@ const (
 //     Batch ID and the snapshot anchors. Two publishers that serve one channel
 //     advance the same counter. The datagram in front of the engine can thus
 //     complete a verdict that its peer started. The Manifest Seq is in this kind
-//     too, but engine.refdata keys it on the instance (source address and
-//     Channel ID); its rules stay here, and so report no source address, until
+//     too, but engine.refdata keys it on the instance (source IP address and
+//     Channel ID); its rules stay here, and so report no source IP address, until
 //     the catalog moves them.
 //   - StateOrderIDSet, StateFullBook, StateSnapshotGroup and StateRefdata are
 //     reconstructed from every path. They have the same keys as StateCounters.

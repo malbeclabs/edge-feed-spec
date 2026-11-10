@@ -257,15 +257,16 @@ func (e *Engine) evictOldestInstance() {
 	if oldestPT == nil {
 		return
 	}
+	// The refdata set-state machine of the instance goes with its tracker, so that
+	// the cap bounds it too. It goes first, while the tracker's loss state and
+	// buffer still exist for the verdicts it decides.
+	if oldest.port == core.PortRefData && e.refdata != nil {
+		e.refdata.drop(refdataKey{src: oldest.src, ch: oldest.ch})
+	}
 	for range oldestPT.drainAll() {
 		e.rep.TransportLoss(oldest.port)
 	}
 	delete(e.ports, oldest)
-	// The refdata set-state machine of the instance goes with its tracker, so that
-	// the cap bounds it too.
-	if oldest.port == core.PortRefData && e.refdata != nil {
-		e.refdata.drop(refdataKey{src: oldest.src, ch: oldest.ch})
-	}
 }
 
 // instancesOn lists the instances observed on a port, ordered by channel then
@@ -293,7 +294,7 @@ func (e *Engine) instancesOn(port core.Port) []instanceKey {
 // rescoped: per-instrument and book state stay keyed by channel, so the state a
 // gated rule judges is fed by every instance of that channel and any one of them
 // losing datagrams can explain an anomaly in it. (The reference-data state is keyed
-// by instance, and its per-datagram rules read their own instance's window.)
+// by instance, and its rules read their own instance's window.)
 // Gating per instance there would report a Violation the loss could account for.
 // HEARTBEAT.CADENCE is the exception and gates on its own instance's window,
 // because its baseline is per instance too.
@@ -491,6 +492,15 @@ func (e *Engine) refdataUnclassifiedWithin(k refdataKey, periodStartTS, deadline
 		}
 	}
 	return pending, stranded
+}
+
+// refdataDirty reports whether the refdata verifiability window of one channel
+// instance is tainted. The refdata set-state machine is keyed on the instance, so
+// only that instance's loss can explain an anomaly in its set: loss on another path
+// of the channel cannot remove a definition from this one.
+func (e *Engine) refdataDirty(k refdataKey) bool {
+	pt, ok := e.ports[instanceKey{src: k.src, port: core.PortRefData, ch: k.ch}]
+	return ok && pt.dirtyWindow
 }
 
 // readyDeadlineTS returns the wire time by which a serving period that started at
@@ -920,7 +930,7 @@ func (e *Engine) EndRun() {
 
 	for _, k := range e.refdata.keys() {
 		// Seq 0: the end of the feed is not a datagram, so there is nothing to point at.
-		e.decideNeverReachesReady(k, e.refdata.channels[k], 0, true)
+		e.decideNeverReachesReady(k, e.refdata.channels[k], 0, true, false)
 	}
 }
 
@@ -966,7 +976,11 @@ func (e *Engine) EndRun() {
 // the readiness timestamp, not the span: the span ends at the last Valid=1 summary, so
 // where none lands between the window closing and a late readiness there is no span
 // past the window to catch it.
-func (e *Engine) decideNeverReachesReady(k refdataKey, s *channelRefdataState, datagramSeq uint64, final bool) {
+//
+// `evicted` is true from refdataState.drop: the verdict is final, and the instance's
+// reorder buffer is discarded rather than drained, so every in-window datagram in it
+// is stranded.
+func (e *Engine) decideNeverReachesReady(k refdataKey, s *channelRefdataState, datagramSeq uint64, final, evicted bool) {
 	ch := k.ch
 	if s.neverReadyDecided {
 		return
@@ -1013,6 +1027,11 @@ func (e *Engine) decideNeverReachesReady(k refdataKey, s *channelRefdataState, d
 		}
 		unread, stranded = e.refdataUnclassifiedWithin(k, s.firstSendTS,
 			readyDeadlineTS(s.firstSendTS, window), nowTS, window)
+	} else if evicted && s.firstSendTSSet {
+		// Read as a path that stopped: nowTS past every arrival, no silence allowed.
+		pending, st := e.refdataUnclassifiedWithin(k, s.firstSendTS,
+			readyDeadlineTS(s.firstSendTS, window), math.MaxUint64, 0)
+		stranded = pending || st
 	}
 	if s.everReady {
 		// Ready alone is not a Pass — the rule grades a deadline. Compare the moment
@@ -1048,7 +1067,7 @@ func (e *Engine) decideNeverReachesReady(k refdataKey, s *channelRefdataState, d
 			}
 			st := core.Violation
 			reason := ""
-			if stranded || e.dirtyOn(core.PortRefData, ch) {
+			if stranded || e.refdataDirty(k) {
 				st = core.Unverifiable
 				reason = core.ReasonLoss
 			}
@@ -1114,9 +1133,9 @@ func (e *Engine) decideNeverReachesReady(k refdataKey, s *channelRefdataState, d
 	if unread {
 		return
 	}
-	// Gate: if any refdata window on this channel is dirty, or a path that stopped holds
-	// a datagram from inside the window, downgrade.
-	dirty := stranded || e.dirtyOn(core.PortRefData, ch)
+	// Gate: if this instance's refdata window is dirty, or its buffer holds a datagram
+	// from inside the window that it will not release, downgrade.
+	dirty := stranded || e.refdataDirty(k)
 	st := core.Violation
 	reason := ""
 	if dirty {

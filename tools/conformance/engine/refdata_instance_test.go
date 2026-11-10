@@ -22,7 +22,7 @@ package engine
 // other channel's standing.
 //
 // The tests after them put two instances on ONE Channel ID, told apart only by the
-// source address. Keyed by Channel ID, a replacement publisher that starts a new era
+// source IP address. Keyed by Channel ID, a replacement publisher that starts a new era
 // at a lower Manifest Seq inherited the old publisher's latest_seq: each of its
 // summaries read as REFDATA.SEQ_MONOTONIC_NO_REGRESS, and each of its definitions as
 // REFDATA.STALE_SEQ_TAG_AFTER_BUMP, until its Manifest Seq passed the old one. The
@@ -31,13 +31,14 @@ package engine
 import (
 	"net/netip"
 	"testing"
+	"time"
 
 	"github.com/malbeclabs/edge-feed-spec/tools/conformance/core"
 	"github.com/malbeclabs/edge-feed-spec/tools/conformance/wire"
 	wb "github.com/malbeclabs/edge-feed-spec/tools/conformance/wire/wirebuild"
 )
 
-// refdataPath is one publisher's refdata datagrams: its own source address, its
+// refdataPath is one publisher's refdata datagrams: its own source IP address, its
 // own Reset Count, its own sequence space, its own Channel ID. The zero src is srcA.
 type refdataPath struct {
 	src netip.Addr
@@ -45,7 +46,7 @@ type refdataPath struct {
 	era uint8
 }
 
-func (a refdataPath) source() netip.Addr {
+func (a refdataPath) sourceAddr() netip.Addr {
 	if a.src.IsValid() {
 		return a.src
 	}
@@ -62,7 +63,7 @@ func (a refdataPath) sendManifest(e *Engine, seq uint64, mseq uint16, count uint
 		Msg(0x07, 24, manifestBody(1, mseq, count)).
 		Bytes()
 	f, sf := wire.Decode(raw, wire.MagicTOB)
-	e.Process(a.source(), f, core.PortRefData, sf)
+	e.Process(a.sourceAddr(), f, core.PortRefData, sf)
 }
 
 // sendDef feeds one InstrumentDefinition for this path.
@@ -75,7 +76,7 @@ func (a refdataPath) sendDef(e *Engine, seq uint64, instrID uint32, mseq uint16,
 		Msg(0x02, 130, instrDefTOBBody(instrID, mseq)).
 		Bytes()
 	f, sf := wire.Decode(raw, wire.MagicTOB)
-	e.Process(a.source(), f, core.PortRefData, sf)
+	e.Process(a.sourceAddr(), f, core.PortRefData, sf)
 }
 
 // readyOn reports whether one channel has reached ready(), with its def count.
@@ -219,7 +220,7 @@ func readyAt(e *Engine, src netip.Addr, ch uint8) (bool, uint16) {
 }
 
 // TestRefdataReplacementInstanceStartsCold: a publisher on Channel ID 150 at Manifest
-// Seq 206 stops, and a replacement publisher at a new source address starts the same
+// Seq 206 stops, and a replacement publisher at a new source IP address starts the same
 // Channel ID on the same group and port in a new era at Manifest Seq 4, with every
 // definition tagged 4. The replacement is conformant on its own. It must not be
 // judged against the old publisher's Manifest Seq.
@@ -343,7 +344,7 @@ func TestRefdataRegressionInsideOneInstanceIsStillReported(t *testing.T) {
 
 // TestRefdataStateIsBoundedWithTheTrackers: the refdata state of an instance goes
 // with its tracker when the tracker map evicts it. Each publisher replacement can add
-// a source address, so without this the state of every replaced instance stays for
+// a source IP address, so without this the state of every replaced instance stays for
 // the life of the process.
 func TestRefdataStateIsBoundedWithTheTrackers(t *testing.T) {
 	ac := &allCapture{}
@@ -368,12 +369,12 @@ func TestRefdataStateIsBoundedWithTheTrackers(t *testing.T) {
 	}
 }
 
-// TestRefdataOneArmShutdownWhileTheOtherServesIsNotAViolation: one arm ends its
-// session — EndOfSession on mktdata, then Valid=0 on refdata — and the other arm on
+// TestRefdataOnePathShutdownWhileTheOtherServesIsNotAViolation: one path ends its
+// session — EndOfSession on mktdata, then Valid=0 on refdata — and the other path on
 // the same Channel ID keeps sending Valid=1. That is the spec-mandated shutdown of one
-// instance. The other arm's Valid=1 must not clear the session-end mark before the
-// first arm's verdict is decided.
-func TestRefdataOneArmShutdownWhileTheOtherServesIsNotAViolation(t *testing.T) {
+// instance. The other path's Valid=1 must not clear the session-end mark before the
+// first path's verdict is decided.
+func TestRefdataOnePathShutdownWhileTheOtherServesIsNotAViolation(t *testing.T) {
 	ac := &allCapture{}
 	e := New(Config{Feed: core.FeedTOB, ReorderWindow: 1}, ac)
 	seqs := map[instanceKey]uint64{}
@@ -390,21 +391,164 @@ func TestRefdataOneArmShutdownWhileTheOtherServesIsNotAViolation(t *testing.T) {
 		send(src, core.PortRefData, buildInstrDefFrameTOB(100, 1))
 		send(src, core.PortRefData, buildInstrDefFrameTOB(200, 1))
 	}
-	// Arm A ends its session. The heartbeat pushes the EndOfSession out of the window.
+	// Path A ends its session. The heartbeat pushes the EndOfSession out of the window.
 	send(srcA, core.PortMktData, buildEndOfSessionFrame(wire.MagicTOB))
 	send(srcA, core.PortMktData, buildHeartbeatFrame(wire.MagicTOB, 0, 0))
 	send(srcA, core.PortRefData, buildManifestFrame(wire.MagicTOB, 0, 1, 2))
 	send(srcA, core.PortRefData, buildManifestFrame(wire.MagicTOB, 0, 1, 2))
-	// Arm B keeps serving.
+	// Path B keeps serving.
 	send(srcB, core.PortRefData, buildManifestFrame(wire.MagicTOB, 1, 1, 2))
 	send(srcB, core.PortRefData, buildManifestFrame(wire.MagicTOB, 1, 1, 2))
 	e.Flush()
 	e.EndRun()
 
 	if hasViolation(ac, "REFDATA.VALID_FLAG_WHILE_SERVING") {
-		t.Error("REFDATA.VALID_FLAG_WHILE_SERVING: one arm's spec-mandated shutdown was reported because the other arm kept serving")
+		t.Error("REFDATA.VALID_FLAG_WHILE_SERVING: one path's spec-mandated shutdown was reported because the other path kept serving")
 	}
 	if !hasPass(ac, "REFDATA.VALID_FLAG_WHILE_SERVING") {
-		t.Error("REFDATA.VALID_FLAG_WHILE_SERVING: no pass for the arm that ended its session")
+		t.Error("REFDATA.VALID_FLAG_WHILE_SERVING: no pass for the path that ended its session")
+	}
+}
+
+// TestRefdataSecondPathReadyKeepsAnOpenSnapshotGroup: path B completes the same
+// definition set that path A already established, while A has a snapshot group
+// open. B's set is no change to the channel's set, so A's group must survive it.
+// Each call of onManifestBump discards the channel's open group.
+func TestRefdataSecondPathReadyKeepsAnOpenSnapshotGroup(t *testing.T) {
+	const ch, instrID, snapID = uint8(1), uint32(200), uint32(1)
+	e, ac := newMBOEngineW1()
+	send := func(src netip.Addr, port core.Port, raw []byte, seq uint64) {
+		f, sf := wire.Decode(raw, wire.MagicMBO)
+		f.Header.Sequence = seq
+		e.Process(src, f, port, sf)
+	}
+	def := func() []byte {
+		return wb.Frame(wire.MagicMBO).Channel(ch).Msg(0x02, 130, instrDefTOBBody(instrID, 1)).Bytes()
+	}
+	manifest := func() []byte {
+		return wb.Frame(wire.MagicMBO).Channel(ch).Msg(0x07, 24, manifestBody(1, 1, 1)).Bytes()
+	}
+
+	send(srcA, core.PortMktData, buildOrderAddFrame(ch, instrID, 1), 1)
+	send(srcA, core.PortRefData, manifest(), 1)
+	send(srcA, core.PortRefData, def(), 2)
+	e.Flush()
+	// Path A opens a group.
+	send(srcA, core.PortSnapshot, buildSnapBeginFull(ch, instrID, 1, 2, snapID, 1), 1)
+	send(srcA, core.PortSnapshot, buildSnapOrderFull(ch, snapID, 1001, 100), 2)
+	e.Flush()
+	// Path B completes the same set.
+	send(srcB, core.PortRefData, manifest(), 1)
+	send(srcB, core.PortRefData, def(), 2)
+	e.Flush()
+	// Path A finishes its group.
+	send(srcA, core.PortSnapshot, buildSnapOrderFull(ch, snapID, 1002, 200), 3)
+	send(srcA, core.PortSnapshot, buildSnapEndFull(ch, instrID, 1, snapID), 4)
+	e.Flush()
+
+	if hasViolation(ac, "SNAP.BEGIN_ORDER_END_GROUPING") {
+		t.Errorf("SNAP.BEGIN_ORDER_END_GROUPING: path B's first complete set discarded path A's open group (%s)",
+			findingsFor(ac, "SNAP.BEGIN_ORDER_END_GROUPING")[0].Detail)
+	}
+}
+
+// TestRefdataFallbackUsesTheLastPathToArrive: a quote from an address with no refdata
+// instance reads the instance that sent refdata most recently. The old publisher's
+// address sorts after its replacement's, and Flush drains in (channel, address)
+// order, so the old instance is classified last. The choice must follow arrival,
+// not classification.
+func TestRefdataFallbackUsesTheLastPathToArrive(t *testing.T) {
+	old := refdataPath{src: srcB, ch: incidentChannel, era: 3}
+	replacement := refdataPath{src: srcA, ch: incidentChannel, era: 0}
+
+	ac := &allCapture{}
+	e := New(Config{Feed: core.FeedTOB, ReorderWindow: 8}, ac)
+	old.establish(e, 1, 206, []uint32{500, 501}, 0)
+	replacement.establish(e, 1, 4, []uint32{1, 2}, 10*nsPerSec)
+	e.Flush()
+
+	srcC := netip.MustParseAddr("10.0.0.3")
+	raw := wb.Frame(wire.MagicTOB).Channel(incidentChannel).Seq(1).SendTS(20*nsPerSec).
+		Msg(wire.TypeQuote, 60, quoteBody(1, 0x03, 100, 101, 10, 10, 1, 1)).Bytes()
+	f, sf := wire.Decode(raw, wire.MagicTOB)
+	e.Process(srcC, f, core.PortMktData, sf)
+	e.Flush()
+
+	if n := countStatus(ac, "TOB.QUOTE.REFDATA_KNOWN", core.Pass); n != 1 {
+		t.Errorf("TOB.QUOTE.REFDATA_KNOWN: want 1 pass (instrument 1 is in the set of the path that arrived last), got %d; the old path's set was used", n)
+	}
+}
+
+// floodInstances opens more channel instances than the tracker map holds, on
+// another Channel ID, so that the oldest instances are evicted.
+func floodInstances(e *Engine, magic uint16) {
+	for i := 0; i < maxChannelInstances+8; i++ {
+		src := netip.AddrFrom4([4]byte{172, 16, byte(i >> 8), byte(i)})
+		f, sf := wire.Decode(buildHeartbeatFrame(magic, 0, 2), magic)
+		f.Header.Sequence = 1
+		e.Process(src, f, core.PortMktData, sf)
+	}
+}
+
+// TestRefdataEvictionDoesNotDecideAShutdownWithoutItsEvidence: path A sends
+// ManifestSummary(Valid=0) and EndOfSession, the spec-mandated shutdown, and the
+// EndOfSession is still in A's mktdata reorder buffer when A's refdata instance
+// is evicted. The verdict cannot see the EndOfSession, so it is not a Violation.
+func TestRefdataEvictionDoesNotDecideAShutdownWithoutItsEvidence(t *testing.T) {
+	ac := &allCapture{}
+	e := New(Config{Feed: core.FeedTOB, ReorderWindow: 1}, ac)
+	send := func(port core.Port, raw []byte, seq uint64) {
+		f, sf := wire.Decode(raw, wire.MagicTOB)
+		f.Header.Sequence = seq
+		e.Process(srcA, f, port, sf)
+	}
+	send(core.PortRefData, buildManifestFrame(wire.MagicTOB, 1, 1, 2), 1)
+	send(core.PortRefData, buildInstrDefFrameTOB(100, 1), 2)
+	send(core.PortRefData, buildInstrDefFrameTOB(200, 1), 3)
+	send(core.PortRefData, buildManifestFrame(wire.MagicTOB, 0, 1, 2), 4)
+	send(core.PortRefData, buildManifestFrame(wire.MagicTOB, 0, 1, 2), 5)
+	send(core.PortMktData, buildHeartbeatFrame(wire.MagicTOB, 0, 0), 1)
+	// The EndOfSession stays in the reorder buffer: nothing follows it.
+	send(core.PortMktData, buildEndOfSessionFrame(wire.MagicTOB), 2)
+
+	floodInstances(e, wire.MagicTOB)
+	if _, ok := e.refdata.channels[refdataKey{src: srcA, ch: 0}]; ok {
+		t.Fatal("setup: path A's refdata instance was not evicted")
+	}
+	if hasViolation(ac, "REFDATA.VALID_FLAG_WHILE_SERVING") {
+		t.Errorf("REFDATA.VALID_FLAG_WHILE_SERVING: a Violation decided at eviction, with the EndOfSession still buffered (%s)",
+			findingsFor(ac, "REFDATA.VALID_FLAG_WHILE_SERVING")[0].Detail)
+	}
+}
+
+// TestRefdataEvictionDoesNotDecideReadinessOverItsBuffer: path A's last definition,
+// sent inside the window, is still in its reorder buffer when the instance is
+// evicted. Eviction discards it, so the incomplete set is not a Violation.
+func TestRefdataEvictionDoesNotDecideReadinessOverItsBuffer(t *testing.T) {
+	ac := &allCapture{}
+	e := New(Config{
+		Feed:                  core.FeedTOB,
+		ExpectManifestCadence: 1 * time.Second,
+		ExpectDefinitionCycle: 1 * time.Second,
+		ReorderWindow:         1,
+	}, ac)
+	manifest := func(ts uint64) []byte { return buildManifestFrameWithTS(wire.MagicTOB, ts, 1, 1, 2, 1) }
+	path := [][]byte{manifest(0), buildInstrDefFrameWithTS(nsPerSec/10, 100, 1, 1),
+		manifest(nsPerSec), manifest(2 * nsPerSec), manifest(3 * nsPerSec),
+		buildInstrDefFrameWithTS(nsPerSec/5, 101, 1, 1)}
+	for i, raw := range path {
+		processDatagramFrom(e, srcA, raw, core.PortRefData, uint64(i+1))
+	}
+	if n := len(findingsFor(ac, "REFDATA.NEVER_REACHES_READY")); n != 0 {
+		t.Fatalf("setup: want no verdict before eviction, got %d", n)
+	}
+
+	floodInstances(e, wire.MagicTOB)
+	if _, ok := e.refdata.channels[refdataKey{src: srcA, ch: 1}]; ok {
+		t.Fatal("setup: path A's refdata instance was not evicted")
+	}
+	if hasViolation(ac, "REFDATA.NEVER_REACHES_READY") {
+		t.Errorf("REFDATA.NEVER_REACHES_READY: a Violation decided at eviction over a definition the eviction discarded (%s)",
+			findingsFor(ac, "REFDATA.NEVER_REACHES_READY")[0].Detail)
 	}
 }

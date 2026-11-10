@@ -17,7 +17,7 @@ package engine
 // in tests: callers set frame.Header.SendTS explicitly to control time without
 // any real wall-clock dependency.
 //
-// State per channel instance (keyed by source address and Channel ID; see
+// State per channel instance (keyed by source IP address and Channel ID; see
 // refdataKey):
 //
 //	valid            bool
@@ -33,6 +33,7 @@ package engine
 import (
 	"cmp"
 	"fmt"
+	"maps"
 	"net/netip"
 	"slices"
 	"time"
@@ -223,11 +224,6 @@ type channelRefdataState struct {
 	defFramesSeen     int
 	prevDefFrameTS    uint64 // SendTS of the last def frame
 	prevDefFrameTSSet bool
-
-	// lastActive is refdataState.seen at this instance's last refdata datagram. It
-	// orders instances by activity, not by wire time, so that a publisher clock
-	// cannot pin the choice; see forChannel.
-	lastActive uint64
 }
 
 func newChannelRefdataState() *channelRefdataState {
@@ -241,10 +237,10 @@ func newChannelRefdataState() *channelRefdataState {
 // refdataKey identifies the channel instance that owns one refdata set-state
 // machine.
 //
-// A channel instance is `(source address, Channel ID, destination port)`
+// A channel instance is `(source IP address, Channel ID, destination port)`
 // (GLOSSARY.md). The destination port is not in the key because this state exists
 // only for the refdata port: one engine reads one refdata port, so the port is the
-// same for every entry. The source address is in the key. Two publishers can
+// same for every entry. The source IP address is in the key. Two publishers can
 // serve one Channel ID on one group and one port, and each one advances its own
 // Manifest Seq and its own Reset Count ("Redundant Channel Instances" in
 // market-by-price/spec.md).
@@ -263,8 +259,15 @@ type refdataKey struct {
 type refdataState struct {
 	e        *Engine
 	channels map[refdataKey]*channelRefdataState
-	// seen stamps channelRefdataState.lastActive.
-	seen uint64
+	// bumped is the definition set last passed to mboState.onManifestBump for each
+	// Channel ID, and the instance that passed it; see notifyMBO.
+	bumped map[uint8]bumpedSet
+}
+
+// bumpedSet is one set passed to mboState.onManifestBump, and its instance.
+type bumpedSet struct {
+	k   refdataKey
+	ids map[uint32]struct{}
 }
 
 // newRefdataState creates a refdataState bound to the given engine.
@@ -272,6 +275,7 @@ func newRefdataState(e *Engine) *refdataState {
 	return &refdataState{
 		e:        e,
 		channels: make(map[refdataKey]*channelRefdataState),
+		bumped:   make(map[uint8]bumpedSet),
 	}
 }
 
@@ -295,9 +299,12 @@ func (rs *refdataState) channel(k refdataKey) *channelRefdataState {
 //     address, so this is the set that publisher declared. It is used even when
 //     it is not ready: a replacement publisher that is still collecting its set
 //     is not judged against the set of the publisher it replaced.
-//  2. Otherwise, the instance that sent a refdata datagram most recently. An
-//     instance that stopped stops being chosen as soon as another one sends, so
-//     a silent instance does not hold the consumers on an old set.
+//  2. Otherwise, the instance whose refdata datagram ARRIVED most recently, read
+//     from its tracker's arrival stamp (portTracker.lastSeen). An instance that
+//     stopped stops being chosen as soon as another one sends, so a silent
+//     instance does not hold the consumers on an old set. Arrival, not
+//     classification: Flush drains in (channel, address) order, so the order of
+//     classification can put a stopped instance last.
 //
 // It returns nil when the channel has no refdata instance.
 func (rs *refdataState) forChannel(ch uint8) *channelRefdataState {
@@ -307,15 +314,23 @@ func (rs *refdataState) forChannel(ch uint8) *channelRefdataState {
 		}
 	}
 	var best *channelRefdataState
+	var bestSeen uint64
 	for k, s := range rs.channels {
-		if k.ch == ch && (best == nil || s.lastActive > best.lastActive) {
-			best = s
+		if k.ch != ch {
+			continue
+		}
+		var seen uint64
+		if pt, ok := rs.e.ports[instanceKey{src: k.src, port: core.PortRefData, ch: ch}]; ok {
+			seen = pt.lastSeen
+		}
+		if best == nil || seen > bestSeen {
+			best, bestSeen = s, seen
 		}
 	}
 	return best
 }
 
-// keys returns the instance keys ordered by Channel ID then source address, so
+// keys returns the instance keys ordered by Channel ID then source IP address, so
 // the callers that iterate every instance emit in a fixed order.
 func (rs *refdataState) keys() []refdataKey {
 	keys := make([]refdataKey, 0, len(rs.channels))
@@ -331,23 +346,60 @@ func (rs *refdataState) keys() []refdataKey {
 	return keys
 }
 
-// drop removes the state of one instance that the engine stopped tracking (see
-// Engine.evictOldestInstance). The instance's observation ends here, so the
-// verdicts that EndRun decides for it are decided now, the same way. Without
-// this, the refdata state of an instance would outlive its tracker, and an
-// address change at each publisher replacement would add one set that is never
-// released.
+// drop removes the state of one instance that the engine stops tracking (see
+// Engine.evictOldestInstance). Without this, the refdata state of an instance
+// would outlive its tracker, and an address change at each publisher replacement
+// would add one set that is never released.
+//
+// The instance's observation ends here, so its open verdicts are decided now. The
+// caller runs it while the instance's tracker still exists, so the verdict reads
+// the tracker's loss state and its reorder buffer. **Eviction is not end of run.**
+// The buffers are not drained, so a verdict that turns on the absence of a
+// datagram cannot be a Violation:
+//
+//   - A held Valid=0 verdict passes when an EndOfSession is already recorded. If
+//     not, the EndOfSession can still be in a mktdata reorder buffer, so it is
+//     Unverifiable.
+//   - REFDATA.NEVER_REACHES_READY treats every in-window datagram still in the
+//     instance's buffer as stranded: eviction discards it, and it could have
+//     completed the set.
 func (rs *refdataState) drop(k refdataKey) {
 	s, ok := rs.channels[k]
 	if !ok {
 		return
 	}
-	if s.pendingValidZero != nil {
-		rs.resolveValidZero(k.ch, s.pendingValidZero, false)
+	if ev := s.pendingValidZero; ev != nil {
+		if _, ended := rs.e.sessionEnd[k.ch]; ended {
+			rs.resolveValidZero(k.ch, ev, false)
+		} else {
+			rs.e.unverified("REFDATA.VALID_FLAG_WHILE_SERVING", core.ReasonTruncated, core.PortRefData, ev.frameSeq, k.ch, 0,
+				"ManifestSummary Valid=0 on an instance the tracker map evicted, before an EndOfSession still in a reorder buffer could be read")
+		}
 		s.pendingValidZero = nil
 	}
-	rs.e.decideNeverReachesReady(k, s, 0, true)
+	rs.e.decideNeverReachesReady(k, s, 0, true, true)
 	delete(rs.channels, k)
+}
+
+// notifyMBO passes a newly frozen definition set to the MBO per-instrument state,
+// which prunes the trackers of instruments that left the set and discards the
+// channel's open snapshot group.
+//
+// **Not for another instance's equal set.** Each instance freezes its own set. Two
+// paths that serve one channel freeze the same set, and the second freeze is not a
+// change to the channel's set: passing it on would discard the open snapshot group
+// of the first path, and the rest of that group would read as
+// SNAP.BEGIN_ORDER_END_GROUPING violations. One instance re-freezing its set still
+// passes it on, as before.
+func (rs *refdataState) notifyMBO(k refdataKey, set map[uint32]struct{}) {
+	if rs.e.mbo == nil {
+		return
+	}
+	if prev, ok := rs.bumped[k.ch]; ok && prev.k != k && maps.Equal(prev.ids, set) {
+		return
+	}
+	rs.bumped[k.ch] = bumpedSet{k: k, ids: set}
+	rs.e.mbo.onManifestBump(k.ch, set)
 }
 
 // channelKnown returns two booleans: (ready, known).
@@ -603,8 +655,8 @@ func (rs *refdataState) onManifestSummary(k refdataKey, valid uint8, seq uint16,
 	// A Valid=1 summary means the publisher is serving, so any session it ended is
 	// over and cannot excuse a later Valid=0. Clear on EVERY Valid=1, not only one
 	// that seeds or advances state: in steady state a summary does neither, and the
-	// session-end mark is keyed by channel, so one arm's shutdown would sit here
-	// excusing the other arm's later drop.
+	// session-end mark is keyed by channel, so one path's shutdown would sit here
+	// excusing the other path's later drop.
 	//
 	// Reaching here with a verdict outstanding means the instance went invalid and
 	// came back, which settles it without waiting for end-of-run.
@@ -613,9 +665,9 @@ func (rs *refdataState) onManifestSummary(k refdataKey, valid uint8, seq uint16,
 		s.pendingValidZero = nil
 	}
 	// **Not while another instance of the channel holds a verdict.** The mark is keyed
-	// by channel and the verdicts by instance. One arm that ends its session sends
-	// EndOfSession and Valid=0, and the other arm keeps sending Valid=1. Cleared here,
-	// the mark is gone before the first arm's verdict is decided, and its conformant
+	// by channel and the verdicts by instance. One path that ends its session sends
+	// EndOfSession and Valid=0, and the other path keeps sending Valid=1. Cleared here,
+	// the mark is gone before the first path's verdict is decided, and its conformant
 	// shutdown becomes a must violation.
 	if !rs.validZeroPendingOn(ch) {
 		delete(rs.e.sessionEnd, ch)
@@ -724,7 +776,7 @@ func (rs *refdataState) onManifestSummary(k refdataKey, valid uint8, seq uint16,
 	// window, or the next period inherits the previous one's readiness and is
 	// credited with the wall-clock time the channel spent invalid.
 	if !s.valid && s.firstSendTSSet {
-		rs.e.decideNeverReachesReady(k, s, frameSeq, true)
+		rs.e.decideNeverReachesReady(k, s, frameSeq, true, false)
 		s.everReady = false
 		s.readySendTS = 0
 		s.readySendTSSet = false
@@ -960,10 +1012,8 @@ func (rs *refdataState) onInstrumentDef(k refdataKey, instrID uint32, manifestSe
 		}
 		// Task 18: notify the MBO per-instrument tracker gate of the new survivor
 		// set so it can drop trackers for instruments removed by the seq bump.
-		// Pass ch so only trackers for this refdata channel are pruned.
-		if rs.e.mbo != nil {
-			rs.e.mbo.onManifestBump(ch, s.setSnapshot)
-		}
+		// Only trackers for this refdata channel are pruned.
+		rs.notifyMBO(k, s.setSnapshot)
 	}
 
 	// Task 15: track def retransmissions for DEFINITION_CYCLE_COVERAGE and
@@ -1179,8 +1229,6 @@ func (e *Engine) processRefdataFrame(f *wire.Frame, pt *portTracker) {
 	// a runt decoding to the all-zero header, or a Heartbeat — and EndRun would then
 	// report a cold-start Unverified for it.
 	if s, ok := e.refdata.channels[k]; ok {
-		e.refdata.seen++
-		s.lastActive = e.refdata.seen
 		// Advances the clock the window closes on — see lastRefdataSendTS — but only
 		// while the channel is SERVING. A definition or a heartbeat past the deadline is
 		// proof the deadline passed; a datagram sent while `Valid = 0` is not, because
@@ -1192,6 +1240,6 @@ func (e *Engine) processRefdataFrame(f *wire.Frame, pt *portTracker) {
 			s.lastRefdataSendTS = f.Header.SendTS
 			s.lastRefdataSendTSSet = true
 		}
-		e.decideNeverReachesReady(k, s, f.Header.Sequence, false)
+		e.decideNeverReachesReady(k, s, f.Header.Sequence, false, false)
 	}
 }
