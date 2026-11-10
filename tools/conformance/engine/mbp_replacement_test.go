@@ -11,6 +11,7 @@ package engine
 
 import (
 	"net/netip"
+	"strings"
 	"testing"
 
 	"github.com/malbeclabs/edge-feed-spec/tools/conformance/core"
@@ -266,6 +267,81 @@ func TestMBPTwoLivePathsOnOneChannelAreNotJudged(t *testing.T) {
 			if unverifiable != 8 {
 				t.Errorf("%s: %d unverifiable finding(s), want one per group (8)", oracle, unverifiable)
 			}
+			if _, unv := countByStatus(t, fs, "MBP.DELTA.PERINSTR_DENSITY"); unv == 0 {
+				t.Error("MBP.DELTA.PERINSTR_DENSITY: no unverifiable finding for the restarts; the rule is silent")
+			}
 		})
+	}
+}
+
+// TestMBPReplacementOnAnInstrumentWithOnlyGroups: the old session sent groups for
+// the instrument and no delta, so a group raised the tracker and no delta set its
+// address. The replacement's first delta is compared with the group's address, so it
+// restarts the instrument whether its series starts at 1 or above the old groups.
+func TestMBPReplacementOnAnInstrumentWithOnlyGroups(t *testing.T) {
+	for _, first := range []uint32{1, 60} {
+		old := newMBPSession(srcA, 3, 1000)
+		replacement := newMBPSession(srcB, 3, 9000)
+		old.levels = [][2]int64{{1050, 10}}
+		steps := old.group(50, 1, false)
+		steps = append(steps, old.group(50, 2, false)...)
+		steps = append(steps, replacement.cycles(first, 3, 1, false)...)
+		fs := runMBPAddrSteps(t, steps)
+		for _, rule := range []string{"MBP.DELTA.PERINSTR_NO_SNAPSHOT_RESET", "MBP.DELTA.PERINSTR_DENSITY", "MBP.SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT"} {
+			if viol, _ := countByStatus(t, fs, rule); viol != 0 {
+				t.Errorf("series from %d: %s: %d violation(s) against a replacement publisher that is conformant on its own", first, rule, viol)
+			}
+		}
+	}
+}
+
+// TestMBPGroupRestartClearsTheTracker: a group from a new address behind the old
+// baseline restarts the instrument and becomes its baseline at its own Last
+// Instrument Seq. The old session's higher tracker is gone with the restart, so the
+// group seeds the tracker, and the replacement's 5 -> 7 gap is reported.
+func TestMBPGroupRestartClearsTheTracker(t *testing.T) {
+	old := newMBPSession(srcA, 3, 1000)
+	replacement := newMBPSession(srcB, 3, 9000)
+	steps := old.cycles(101, 3, 1, false)
+	replacement.levels = [][2]int64{{9005, 10}}
+	steps = append(steps, replacement.group(5, 1, false)...)
+	steps = append(steps, replacement.deltas(7, 2)...)
+	fs := runMBPAddrSteps(t, steps)
+	n := 0
+	for _, f := range fs {
+		if f.RuleID == "MBP.DELTA.PERINSTR_DENSITY" && f.Status != core.Pass && strings.Contains(f.Detail, "5 -> 7") {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("MBP.DELTA.PERINSTR_DENSITY: %d finding(s) for the replacement's 5 -> 7 gap, want 1", n)
+	}
+}
+
+// TestMBPSnapshotAddressMovesOnSplitPorts: the deltas come from one address
+// throughout and the groups from another, which moves once. The move adopts the
+// first group from the new address unverified, and the next delta, from the
+// mktdata address, ends the wait: the later groups are compared again.
+func TestMBPSnapshotAddressMovesOnSplitPorts(t *testing.T) {
+	delta := netip.MustParseAddr("10.0.0.1")
+	snaps := []netip.Addr{netip.MustParseAddr("10.0.0.3"), netip.MustParseAddr("10.0.0.4")}
+	s := newMBPSession(delta, 3, 1000)
+	var steps []mbpAddrStep
+	k, snapID := uint32(1), uint32(1)
+	for _, snap := range snaps {
+		for c := 0; c < 4; c++ {
+			s.src = delta
+			steps = append(steps, s.deltas(k, 2)...)
+			k += 2
+			s.src = snap
+			steps = append(steps, s.group(k-1, snapID, false)...)
+			snapID++
+		}
+	}
+	fs := runMBPAddrSteps(t, steps)
+	const oracle = "MBP.SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT"
+	viol, unv := countByStatus(t, fs, oracle)
+	if viol != 0 || unv != 2 {
+		t.Errorf("%s: %d violation(s) and %d unverifiable, want 0 and 2 (the first group, and the first group after the move)", oracle, viol, unv)
 	}
 }

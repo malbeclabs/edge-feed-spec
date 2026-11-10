@@ -97,11 +97,14 @@ type mbpInstr struct {
 	// The zero Addr means "not known". See mbpNewSession.
 	deltaSrc netip.Addr
 	baseSrc  netip.Addr
-	// awaitBaseSrcDelta is set when a group from another address than the old
-	// baseline is adopted, and cleared when a delta from the baseline's address is
-	// accepted. Until then lastSeq and the journal past baseK can be the old
-	// session's, so a later group from the new address is not diffed against them.
-	awaitBaseSrcDelta bool
+	// replacedSrc is the address of the baseline that a group from another address
+	// replaced. While it is set, lastSeq and the journal past baseK can be the old
+	// session's, so a later group is not diffed against them. A delta accepted from
+	// any other address clears it: the baseline's own address, or a mktdata address
+	// that differs from the snapshot address (a channel whose ports are on
+	// different addresses). A delta from the replaced address does not, because a
+	// replaced publisher's last deltas can still leave a reorder buffer.
+	replacedSrc netip.Addr
 }
 
 // restart discards the instrument's reconstruction and its Per-Instrument Seq
@@ -111,12 +114,12 @@ func (in *mbpInstr) restart() {
 	in.book = newMBPBook()
 	in.ready = false
 	in.gapped = false
-	in.lastSeqSet = false
+	in.lastSeq, in.lastSeqSet = 0, false
 	in.sawSnapshotSinceDelta = false
 	in.base, in.baseSet, in.journal = nil, false, nil
 	in.overflow, in.droppedMax = false, 0
 	in.deltaSrc, in.baseSrc = netip.Addr{}, netip.Addr{}
-	in.awaitBaseSrcDelta = false
+	in.replacedSrc = netip.Addr{}
 }
 
 // accept records that the delta in front of the engine, from src, seeded or
@@ -126,8 +129,8 @@ func (in *mbpInstr) accept(src netip.Addr, captureEpoch uint64, dense bool) {
 		in.captureEpoch = captureEpoch
 	}
 	in.deltaSrc = src
-	if src == in.baseSrc {
-		in.awaitBaseSrcDelta = false
+	if in.replacedSrc.IsValid() && src != in.replacedSrc {
+		in.replacedSrc = netip.Addr{}
 	}
 }
 
@@ -472,7 +475,21 @@ func (e *Engine) checkMBPSeq(in *mbpInstr, k mbpInstrKey, got uint32, seq uint64
 	sawSnapshot := in.sawSnapshotSinceDelta
 	in.sawSnapshotSinceDelta = false
 
-	if in.lastSeqSet && e.mbpNewSession(in.deltaSrc, got == in.lastSeq+1) {
+	// The series a delta is compared with belongs to the address of the last
+	// accepted delta, or, when the instrument has had groups and no delta, to the
+	// address of the adopted group: a group that raised lastSeq set no deltaSrc, and
+	// without this a replacement's first delta on such an instrument could not
+	// restart it.
+	prev := in.deltaSrc
+	if !prev.IsValid() {
+		prev = in.baseSrc
+	}
+	if in.lastSeqSet && e.mbpNewSession(prev, got == in.lastSeq+1) {
+		// A new session's first delta only seeds the tracker, so the density rule is
+		// told so rather than left silent.
+		e.unverified("MBP.DELTA.PERINSTR_DENSITY", core.ReasonTransition, core.PortMktData, seq, ch, k.instrID,
+			fmt.Sprintf("Per-Instrument Seq %d from another source IP address than the series at %d: a new publisher session, so the instrument restarts",
+				got, in.lastSeq))
 		in.restart()
 		sawSnapshot = false
 	}
@@ -812,6 +829,7 @@ func (e *Engine) finishMBPSnapshot(m wire.Message, ch uint8, seq uint64) {
 	// a lease move or a new session whose deltas this engine has not yet classified,
 	// so it is not diffed (fromNewAddress) and becomes the baseline.
 	fromNewAddress := false
+	oldBaseSrc := in.baseSrc
 	if in.baseSet && e.mbpNewSession(in.baseSrc, open.lastK >= in.baseK) {
 		in.restart()
 	} else if in.baseSet && in.baseSrc.IsValid() && e.curSrc != in.baseSrc {
@@ -859,14 +877,15 @@ func (e *Engine) finishMBPSnapshot(m wire.Message, ch uint8, seq uint64) {
 		// deltas are still behind this group would be diffed against the old
 		// session's ladder and journal; one comparison of a lease move is the price.
 		e.unverified(oracle, core.ReasonTransition, core.PortSnapshot, seq, ch, open.key.instrID,
-			"group from another source IP address than the adopted baseline: adopted as the baseline, compared once a delta from its address is applied")
-	case in.awaitBaseSrcDelta:
-		// The baseline is this address's, but no delta from it has been applied
-		// since. lastSeq and the journal past the baseline can still be the old
-		// session's, and replaying them against a replacement's group is the false
-		// mismatch the case above exists to avoid.
+			"group from another source IP address than the adopted baseline: adopted as the baseline, compared once a delta is applied")
+	case in.replacedSrc.IsValid():
+		// A group from another address replaced the baseline, and no delta from an
+		// address other than the replaced one has been applied since. lastSeq and the
+		// journal past the baseline can still be the old session's, and replaying
+		// them against a replacement's group is the false mismatch the case above
+		// exists to avoid.
 		e.unverified(oracle, core.ReasonTransition, core.PortSnapshot, seq, ch, open.key.instrID,
-			"no delta from the baseline's source IP address applied since it was adopted: compared once one is")
+			"no delta applied since a group from another source IP address replaced the baseline: compared once one is")
 	case !in.baseSet:
 		// No adopted ladder to replay from yet; this group becomes it.
 		e.unverified(oracle, core.ReasonColdStart, core.PortSnapshot, seq, ch, open.key.instrID,
@@ -903,7 +922,7 @@ func (e *Engine) finishMBPSnapshot(m wire.Message, ch uint8, seq uint64) {
 	in.baseSet = true
 	in.baseSrc = e.curSrc
 	if fromNewAddress {
-		in.awaitBaseSrcDelta = true
+		in.replacedSrc = oldBaseSrc
 	}
 	kept := in.journal[:0]
 	for _, ent := range in.journal {

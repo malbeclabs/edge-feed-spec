@@ -818,18 +818,47 @@ func (e *Engine) classify(item *bufferItem, pt *portTracker) {
 //
 // The mark is keyed by the datagram's source IP address as well, because one path
 // ending its session says nothing about another path on the same Channel ID. A
-// publisher sends its mktdata and its refdata from one address (see forChannel),
-// so the key is the one its refdata instance has.
+// publisher normally sends its mktdata and its refdata from one address (see
+// forChannel), so the key is the one its refdata instance has. When no refdata
+// instance or tracker exists at that address, the publisher sends its refdata from
+// another one, and the mark goes on the whole channel (the zero address), which is
+// what it was before the mark was keyed by instance.
 //
 // Only a mktdata placement counts. Anywhere else the message is already
 // MSG.WRONG_PORT_PLACEMENT, and a misplaced one must not excuse a refdata finding.
 func (e *Engine) observeSessionEnd(f *wire.Frame) {
 	for _, m := range f.Messages {
 		if m.Type == wire.TypeEndOfSession {
-			e.sessionEnd[refdataKey{src: e.curSrc, ch: f.Header.ChannelID}] = struct{}{}
+			ch := f.Header.ChannelID
+			k := refdataKey{src: e.curSrc, ch: ch}
+			if !e.hasRefdataInstance(k) {
+				k = refdataKey{ch: ch}
+			}
+			e.sessionEnd[k] = struct{}{}
 			return
 		}
 	}
+}
+
+// hasRefdataInstance reports whether k has refdata state or a refdata tracker.
+func (e *Engine) hasRefdataInstance(k refdataKey) bool {
+	if e.refdata != nil {
+		if _, ok := e.refdata.channels[k]; ok {
+			return true
+		}
+	}
+	_, ok := e.ports[instanceKey{src: k.src, port: core.PortRefData, ch: k.ch}]
+	return ok
+}
+
+// sessionEnded reports whether the refdata instance k may read an EndOfSession:
+// its own mark, or the channel-wide one.
+func (e *Engine) sessionEnded(k refdataKey) bool {
+	if _, ok := e.sessionEnd[k]; ok {
+		return true
+	}
+	_, ok := e.sessionEnd[refdataKey{ch: k.ch}]
+	return ok
 }
 
 // mktdataObserved reports whether any mktdata frame arrived on this channel — i.e.

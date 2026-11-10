@@ -306,11 +306,18 @@ func (rs *refdataState) channel(k refdataKey) *channelRefdataState {
 //     classification: Flush drains in (channel, address) order, so the order of
 //     classification can put a stopped instance last.
 //
-// It returns nil when the channel has no refdata instance.
+// It returns nil when the channel has no refdata instance, and when the address in
+// front of the engine has a refdata tracker whose first datagram is still buffered.
 func (rs *refdataState) forChannel(ch uint8) *channelRefdataState {
 	if src := rs.e.curSrc; src.IsValid() {
 		if s, ok := rs.channels[refdataKey{src: src, ch: ch}]; ok {
 			return s
+		}
+		// The address has a refdata tracker but no state yet: its first refdata
+		// datagram is still in the reorder buffer. That publisher is collecting its
+		// set, so it is not judged against another instance's set either.
+		if _, ok := rs.e.ports[instanceKey{src: src, port: core.PortRefData, ch: ch}]; ok {
+			return nil
 		}
 	}
 	var best *channelRefdataState
@@ -369,7 +376,7 @@ func (rs *refdataState) drop(k refdataKey) {
 		return
 	}
 	if ev := s.pendingValidZero; ev != nil {
-		if _, ended := rs.e.sessionEnd[k]; ended {
+		if rs.e.sessionEnded(k) {
 			rs.resolveValidZero(k, ev, false)
 		} else {
 			rs.e.unverified("REFDATA.VALID_FLAG_WHILE_SERVING", core.ReasonTruncated, core.PortRefData, ev.frameSeq, k.ch, 0,
@@ -453,7 +460,7 @@ func (rs *refdataState) ready() bool {
 //
 //	ready() = valid AND len(defs) == expected_count
 func channelReady(s *channelRefdataState) bool {
-	return s.valid && uint32(len(s.defs)) == s.expectedCount
+	return s != nil && s.valid && uint32(len(s.defs)) == s.expectedCount
 }
 
 // onResetChannel handles a Reset Count change on ONE channel instance. That
@@ -667,6 +674,12 @@ func (rs *refdataState) onManifestSummary(k refdataKey, valid uint8, seq uint16,
 	// Valid=1 does not clear this path's mark, and this path's mark does not excuse
 	// another path's Valid=0.
 	delete(rs.e.sessionEnd, k)
+	// The channel-wide mark (see observeSessionEnd) is not this instance's alone.
+	// It stays while another instance of the channel holds a verdict, so that
+	// instance's shutdown is still decided on it.
+	if !rs.validZeroPendingOn(ch) {
+		delete(rs.e.sessionEnd, refdataKey{ch: ch})
+	}
 
 	// --- Task 15: REFDATA.MANIFEST_CADENCE ---
 	// Check cadence between successive ManifestSummary messages.
@@ -843,6 +856,17 @@ func (rs *refdataState) onManifestSummary(k refdataKey, valid uint8, seq uint16,
 	}
 }
 
+// validZeroPendingOn reports whether any instance of Channel ID ch holds an
+// undecided REFDATA.VALID_FLAG_WHILE_SERVING verdict.
+func (rs *refdataState) validZeroPendingOn(ch uint8) bool {
+	for k, s := range rs.channels {
+		if k.ch == ch && s.pendingValidZero != nil {
+			return true
+		}
+	}
+	return false
+}
+
 // resolveShutdownVerdicts decides every held Valid=0 verdict at end of run.
 //
 // It must run after Flush: a publisher emits EndOfSession and then stops, so
@@ -875,7 +899,7 @@ func (rs *refdataState) resolveShutdownVerdicts() {
 func (rs *refdataState) resolveValidZero(k refdataKey, ev *validZeroEvent, resumed bool) {
 	const rule = "REFDATA.VALID_FLAG_WHILE_SERVING"
 	ch := k.ch
-	if _, ended := rs.e.sessionEnd[k]; ended {
+	if rs.e.sessionEnded(k) {
 		rs.e.passed(rule, core.PortRefData, ev.frameSeq, ch, 0,
 			"ManifestSummary Valid=0 paired with EndOfSession on mktdata: the shutdown the spec mandates")
 		return

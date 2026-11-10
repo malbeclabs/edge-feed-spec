@@ -594,3 +594,68 @@ func TestRefdataEvictionDoesNotDecideReadinessOverItsBuffer(t *testing.T) {
 			findingsFor(ac, "REFDATA.NEVER_REACHES_READY")[0].Detail)
 	}
 }
+
+// TestRefdataShutdownWithRefdataFromAnotherAddressIsNotAViolation: a publisher sends
+// its mktdata from one address and its refdata from another, and ends its session
+// cleanly. No refdata instance exists at the mktdata address, so the EndOfSession
+// mark goes on the whole channel, and the Valid=0 on the refdata address reads it.
+func TestRefdataShutdownWithRefdataFromAnotherAddressIsNotAViolation(t *testing.T) {
+	srcC := netip.MustParseAddr("10.0.0.3")
+	ac := &allCapture{}
+	e := New(Config{Feed: core.FeedTOB, ReorderWindow: 1}, ac)
+	seqs := map[instanceKey]uint64{}
+	send := func(src netip.Addr, port core.Port, raw []byte) {
+		f, sf := wire.Decode(raw, wire.MagicTOB)
+		k := instanceKey{src: src, port: port, ch: f.Header.ChannelID}
+		seqs[k]++
+		f.Header.Sequence = seqs[k]
+		e.Process(src, f, port, sf)
+	}
+	send(srcC, core.PortMktData, buildHeartbeatFrame(wire.MagicTOB, 0, 0))
+	send(srcA, core.PortRefData, buildManifestFrame(wire.MagicTOB, 1, 1, 2))
+	send(srcA, core.PortRefData, buildInstrDefFrameTOB(100, 1))
+	send(srcA, core.PortRefData, buildInstrDefFrameTOB(200, 1))
+	send(srcC, core.PortMktData, buildEndOfSessionFrame(wire.MagicTOB))
+	send(srcC, core.PortMktData, buildHeartbeatFrame(wire.MagicTOB, 0, 0))
+	send(srcA, core.PortRefData, buildManifestFrame(wire.MagicTOB, 0, 1, 2))
+	send(srcA, core.PortRefData, buildManifestFrame(wire.MagicTOB, 0, 1, 2))
+	e.Flush()
+	e.EndRun()
+
+	if hasViolation(ac, "REFDATA.VALID_FLAG_WHILE_SERVING") {
+		t.Errorf("REFDATA.VALID_FLAG_WHILE_SERVING: a clean shutdown was reported because its refdata came from another address (%s)",
+			findingsFor(ac, "REFDATA.VALID_FLAG_WHILE_SERVING")[0].Detail)
+	}
+	if !hasPass(ac, "REFDATA.VALID_FLAG_WHILE_SERVING") {
+		t.Error("REFDATA.VALID_FLAG_WHILE_SERVING: no pass for the clean shutdown")
+	}
+}
+
+// TestRefdataReplacementIsNotJudgedWhileItsRefdataIsBuffered: the replacement's
+// first refdata datagram is still in its reorder buffer when its quotes are
+// classified. Its address has a refdata tracker but no state, so the quotes are not
+// judged against the old publisher's set: instrument 1 is in the replacement's set
+// and not in the old one.
+func TestRefdataReplacementIsNotJudgedWhileItsRefdataIsBuffered(t *testing.T) {
+	old := refdataPath{src: srcA, ch: incidentChannel, era: 3}
+	ac := &allCapture{}
+	e := New(Config{Feed: core.FeedTOB, ReorderWindow: 8}, ac)
+	old.establish(e, 1, 206, []uint32{500, 501}, 0)
+	e.Flush()
+
+	replacement := refdataPath{src: srcB, ch: incidentChannel, era: 0}
+	replacement.sendManifest(e, 1, 4, 1, 10*nsPerSec)
+	for i := uint64(1); i <= 12; i++ {
+		raw := wb.Frame(wire.MagicTOB).Channel(incidentChannel).Seq(i).SendTS(10*nsPerSec+i).
+			Msg(wire.TypeQuote, 60, quoteBody(1, 0x03, 100, 101, 10, 10, 1, 1)).Bytes()
+		f, sf := wire.Decode(raw, wire.MagicTOB)
+		e.Process(srcB, f, core.PortMktData, sf)
+	}
+
+	if n := countStatus(ac, "TOB.QUOTE.REFDATA_KNOWN", core.Violation); n != 0 {
+		t.Errorf("TOB.QUOTE.REFDATA_KNOWN: %d violation(s); the replacement's quotes were judged against the old publisher's set", n)
+	}
+	if n := countStatus(ac, "TOB.QUOTE.REFDATA_KNOWN", core.NA); n == 0 {
+		t.Error("TOB.QUOTE.REFDATA_KNOWN: no NA for the quotes classified while the replacement's refdata was buffered")
+	}
+}
