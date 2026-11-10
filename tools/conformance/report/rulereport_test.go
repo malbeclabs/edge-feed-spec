@@ -49,8 +49,9 @@ func TestRuleReportPlacesAFindingOnItsInstance(t *testing.T) {
 	if a.Instance == nil || *a.Instance != (ruleReportInstance{SourceAddr: "192.0.2.1", ChannelID: 3, DstPort: 40002}) {
 		t.Errorf("A.RULE instance = %+v; want 192.0.2.1 channel 3 port 40002", a.Instance)
 	}
-	if a.Evidence == nil || *a.Evidence != (ruleReportEvidence{ResetCount: 2, EraIndex: 3, FirstSeq: 900, LastSeq: 900}) {
-		t.Errorf("A.RULE evidence = %+v; want era 2, 900..900", a.Evidence)
+	if ev := a.Evidence; ev == nil || ev.ResetCount != 2 || ev.EraIndex == nil || *ev.EraIndex != 3 ||
+		ev.FirstSeq != 900 || ev.LastSeq != 900 {
+		t.Errorf("A.RULE evidence = %+v; want Reset Count 2, era index 3, 900..900", a.Evidence)
 	}
 	if b := got["B.RULE"]; b.Instance == nil || b.Evidence != nil {
 		t.Errorf("B.RULE: want an instance and no evidence when the era is unknown, got %+v / %+v",
@@ -111,8 +112,9 @@ func TestRuleReportKeepsEachViolationRange(t *testing.T) {
 
 // TestRuleReportBoundsTheRanges checks the bound on violation ranges. A rule that
 // fails on every other datagram must not make the report grow with the capture.
-// Past the bound the last range grows, so every finding stays inside a range and
-// the counts still sum to the number of findings.
+// Past the bound two neighbouring ranges merge, so every finding stays inside a
+// range and the counts still sum to the number of findings. The gaps here are all
+// equal; TestRuleReportMergesTheSmallestGap pins which pair merges.
 func TestRuleReportBoundsTheRanges(t *testing.T) {
 	r := NewRuleReport(core.FeedMBP, rrPorts)
 	const n = 3 * maxRanges
@@ -262,7 +264,10 @@ func checkRuleReportShape(t *testing.T, data []byte, feed string) {
 			if e.Instance == nil {
 				t.Errorf("rule %d has evidence and no instance", i)
 			}
-			if ev.ResetCount == nil || ev.EraIndex == nil || ev.FirstSeq == nil || ev.LastSeq == nil {
+			if ev.EraIndex != nil && *ev.EraIndex == 0 {
+				t.Errorf("rule %d era_index is 0; an index starts at 1 and an unknown one is absent", i)
+			}
+			if ev.ResetCount == nil || ev.FirstSeq == nil || ev.LastSeq == nil {
 				t.Errorf("rule %d evidence is missing a field", i)
 			} else if *ev.FirstSeq > *ev.LastSeq {
 				t.Errorf("rule %d evidence range %d..%d is inverted", i, *ev.FirstSeq, *ev.LastSeq)
@@ -287,9 +292,9 @@ func TestRuleReportKeepsWrappedErasApart(t *testing.T) {
 	if len(entries) != 2 {
 		t.Fatalf("got %d entries, want 2: the two eras share Reset Count 7 and are not one era", len(entries))
 	}
-	if entries[0].Evidence.EraIndex != 8 || entries[1].Evidence.EraIndex != 264 {
+	if *entries[0].Evidence.EraIndex != 8 || *entries[1].Evidence.EraIndex != 264 {
 		t.Errorf("era indexes %d and %d, want 8 and 264",
-			entries[0].Evidence.EraIndex, entries[1].Evidence.EraIndex)
+			*entries[0].Evidence.EraIndex, *entries[1].Evidence.EraIndex)
 	}
 }
 
@@ -377,5 +382,40 @@ func TestRuleReportBoundsPlacedKeysUnderAddressChurn(t *testing.T) {
 	}
 	if total != n || overflow != extra {
 		t.Errorf("counts sum to %d with %d in overflow, want %d with %d", total, overflow, n, extra)
+	}
+}
+
+// TestRuleReportMergesTheSmallestGap pins which ranges merge past the bound. There
+// are 64 single-finding ranges at 0, 10, ..., 630, except that the sixth is at 42,
+// 2 after the fifth. A 65th finding at 1000 is over the bound. The smallest gap is
+// 40 to 42, so those two merge and 1000 stays a range of its own. If the last
+// range grew instead, it would span 630 to 1000, and loss anywhere in it would
+// excuse both violations.
+func TestRuleReportMergesTheSmallestGap(t *testing.T) {
+	r := NewRuleReport(core.FeedMBP, rrPorts)
+	for i := range uint64(maxRanges) {
+		seq := 10 * i
+		if i == 5 {
+			seq = 42
+		}
+		r.Record(placed("A.RULE", core.Violation, core.PortMktData, 0, seq))
+	}
+	r.Record(placed("A.RULE", core.Violation, core.PortMktData, 0, 1000))
+
+	type rng struct {
+		first, last uint64
+		count       int
+	}
+	got := map[rng]bool{}
+	for _, e := range r.sortedEntries() {
+		got[rng{e.Evidence.FirstSeq, e.Evidence.LastSeq, e.Count}] = true
+	}
+	if len(got) != maxRanges {
+		t.Fatalf("got %d ranges, want the bound %d", len(got), maxRanges)
+	}
+	for _, want := range []rng{{40, 42, 2}, {1000, 1000, 1}, {630, 630, 1}} {
+		if !got[want] {
+			t.Errorf("no range %+v; the pair with the smallest gap must merge, and no other", want)
+		}
 	}
 }

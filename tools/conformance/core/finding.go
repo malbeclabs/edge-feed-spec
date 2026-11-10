@@ -230,9 +230,12 @@ type Finding struct {
 	// single sequence series, so it has no era either.
 	ResetCount      uint8
 	ResetCountKnown bool
-	// EraIndex is the run-local ordinal of that era on the channel instance, set
-	// with ResetCount. The Reset Count is a u8 and wraps, so two eras 256 resets
-	// apart have the same value; EraIndex tells them apart. It starts at 1.
+	// EraIndex is the run-local ordinal of that era on the channel instance
+	// (source IP address, Channel ID, destination port): 1 for the instance's
+	// first era, plus 1 each time the instance enters a new Reset Count. The
+	// Reset Count is a u8 and wraps, so two eras 256 resets apart have the same
+	// value; EraIndex tells them apart. 0 means the engine has no count for the
+	// instance (see Engine.noteEra).
 	EraIndex uint64
 	Detail   string // free-form, for logs only — NEVER a metric label (unbounded)
 	// Reason is a bounded, low-cardinality code used for the unverifiable_total

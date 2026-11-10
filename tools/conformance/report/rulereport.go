@@ -76,9 +76,10 @@ type entryKey struct {
 	port        core.Port
 	hasEra      bool
 	resetCount  uint8
-	// eraIndex is the run-local ordinal of the era. The Reset Count is a u8 and
-	// wraps, so two eras 256 resets apart have the same value. The index tells
-	// them apart.
+	// eraIndex is the run-local ordinal of the era on the channel instance (see
+	// core.Finding.EraIndex). The Reset Count is a u8 and wraps, so two eras 256
+	// resets apart have the same value. The index tells them apart. 0 means the
+	// engine has no count for the instance.
 	eraIndex uint64
 	// overflow marks the entry that holds findings past maxPlacedKeys.
 	overflow bool
@@ -213,13 +214,14 @@ type ruleReportInstance struct {
 }
 
 // ruleReportEvidence is the sequence range of the evidence, in one era.
-// era_index is the run-local ordinal of the era: reset_count wraps after 256
-// resets, and era_index does not.
+// era_index is the run-local ordinal of the era on the channel instance:
+// reset_count wraps after 256 resets, and era_index does not. era_index is absent
+// when the engine has no count for the instance.
 type ruleReportEvidence struct {
-	ResetCount uint8  `json:"reset_count"`
-	EraIndex   uint64 `json:"era_index"`
-	FirstSeq   uint64 `json:"first_seq"`
-	LastSeq    uint64 `json:"last_seq"`
+	ResetCount uint8   `json:"reset_count"`
+	EraIndex   *uint64 `json:"era_index,omitempty"`
+	FirstSeq   uint64  `json:"first_seq"`
+	LastSeq    uint64  `json:"last_seq"`
 }
 
 // ruleReportEntry is one entry. instance is absent when the finding judges the
@@ -266,8 +268,11 @@ func (r *RuleReport) sortedEntries() []ruleReportEntry {
 			x := base
 			x.Count = rg.count
 			x.Detail = rg.detail
-			x.Evidence = &ruleReportEvidence{ResetCount: k.resetCount, EraIndex: k.eraIndex,
-				FirstSeq: rg.first, LastSeq: rg.last}
+			x.Evidence = &ruleReportEvidence{ResetCount: k.resetCount, FirstSeq: rg.first, LastSeq: rg.last}
+			if k.eraIndex != 0 {
+				idx := k.eraIndex
+				x.Evidence.EraIndex = &idx
+			}
 			out = append(out, x)
 		}
 	}
@@ -330,7 +335,14 @@ func compareEvidence(a, b *ruleReportEvidence) int {
 	case b == nil:
 		return 1
 	}
-	if c := cmp.Compare(a.EraIndex, b.EraIndex); c != 0 {
+	var ai, bi uint64
+	if a.EraIndex != nil {
+		ai = *a.EraIndex
+	}
+	if b.EraIndex != nil {
+		bi = *b.EraIndex
+	}
+	if c := cmp.Compare(ai, bi); c != 0 {
 		return c
 	}
 	if c := cmp.Compare(a.ResetCount, b.ResetCount); c != 0 {

@@ -61,9 +61,26 @@ cited number.
 
 The Reset Count is a u8 and wraps after 256 resets. Two eras with the same value
 are different eras, and a reader that compares evidence with loss must not join
-them. `EraIndex` is the run-local ordinal of the era on the instance (the
-tracker's `eraPos`, starting at 1). The report keys on it and writes it as
+them. `EraIndex` counts the eras of one channel instance (source IP address,
+Channel ID, destination port): 1 for its first era, plus 1 each time the
+instance enters a new Reset Count. The report keys on it and writes it as
 `era_index` beside `reset_count`.
+
+The tracker's own era ordinal (`eraPos`) is not this count, for two reasons. The
+three ports of one source IP address and Channel ID share it, so a snapshot port
+that sends only in the first and third mktdata eras would say 1 and 3. And a
+tracker that is evicted starts a fresh series, so the ordinal restarts at 1. The
+engine therefore keeps a separate count for each instance (`Engine.noteEra`).
+The count survives eviction: an instance that comes back in the Reset Count it
+held continues that era, and one that comes back in another value starts the
+next era. The engine cannot tell a return to the same era from a return after
+exactly a multiple of 256 resets, and it reads the first. The count covers at
+most 16,384 instances. Past that, a new instance has no count, and its evidence
+has no `era_index`, so the report never writes a number that does not count the
+instance's eras.
+
+This meaning is part of format 1. Format 1 has not been released, so no format
+number changes. A later change of this meaning needs `report_format` 2.
 
 A finding about the channel has no era. Each path of the channel has its own
 sequence series, so no single era applies.
@@ -82,7 +99,9 @@ one key.
 - **Any other outcome keeps one range**, from the lowest to the highest sequence
   number. A consumer does not test a pass against loss.
 - **Each range is one entry, with its own `count` and `detail`.** The detail is
-  the message of the earliest finding in that range. The sum of the counts for a
+  the message of the earliest finding in that range. The engine emits its
+  end-of-run findings in Channel ID and Instrument ID order and not in map order,
+  so one input gives one report. The sum of the counts for a
   rule and outcome is the count in the JSON report. A test checks this.
 - **Placed keys are bounded.** A live subscription can see an unbounded number
   of source IP addresses and eras, and each one makes new keys. The engine

@@ -26,9 +26,12 @@ package engine
 //	                                  mark it as awaiting (first-value check reset).
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"hash/maphash"
+	"maps"
+	"slices"
 
 	"github.com/malbeclabs/edge-feed-spec/tools/conformance/core"
 	"github.com/malbeclabs/edge-feed-spec/tools/conformance/wire"
@@ -92,6 +95,19 @@ type snapTracker struct {
 type instrTrackerKey struct {
 	channelID    uint8
 	instrumentID uint32
+}
+
+// sortedTrackerKeys returns the keys of m in (Channel ID, Instrument ID) order.
+// A loop that emits several findings from a map must not follow map order: the
+// rule report keeps the detail of the first finding of an entry, so map order
+// makes one capture give a different report on each run.
+func sortedTrackerKeys[V any](m map[instrTrackerKey]V) []instrTrackerKey {
+	return slices.SortedFunc(maps.Keys(m), func(a, b instrTrackerKey) int {
+		if c := cmp.Compare(a.channelID, b.channelID); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.instrumentID, b.instrumentID)
+	})
 }
 
 // instrTracker holds per-(channel, instrument) sequencing state.
@@ -576,12 +592,13 @@ func (e *Engine) checkBatchAtomicityConsistency(ch uint8) {
 		return
 	}
 	gated := e.gateDetector(ch)
-	for key, bk := range e.mbo.book.books {
+	for _, key := range sortedTrackerKeys(e.mbo.book.books) {
 		if key.channelID != ch {
 			continue
 		}
-		for orderID, lo := range bk.live {
-			if lo.remaining == 0 {
+		bk := e.mbo.book.books[key]
+		for _, orderID := range slices.Sorted(maps.Keys(bk.live)) {
+			if lo := bk.live[orderID]; lo.remaining == 0 {
 				e.Emit("BATCH.ATOMICITY_CONSISTENCY", statusFor(gated), core.PortMktData, 0, ch, key.instrumentID,
 					fmt.Sprintf("instrument %d: live order %d has remaining=0 at BatchBoundary (orphan)",
 						key.instrumentID, orderID))
@@ -1249,7 +1266,8 @@ func (e *Engine) checkResetSnapshotFollows() {
 	// Violation or Unverifiable — the subscriber simply has not observed the
 	// snapshot port (cold start or not part of the capture).
 	snapBound := e.snapPortBound()
-	for key, dt := range e.mbo.trackers {
+	for _, key := range sortedTrackerKeys(e.mbo.trackers) {
+		dt := e.mbo.trackers[key]
 		if !dt.awaitingRecovery {
 			continue
 		}
@@ -1318,7 +1336,7 @@ func (e *Engine) checkRoundRobinCoversManifest() {
 				fmt.Sprintf("channel %d: reference data never reached ready, so the manifest set is unknown", ch))
 			continue
 		}
-		for instrID := range cs.defs {
+		for _, instrID := range slices.Sorted(maps.Keys(cs.defs)) {
 			if !enoughCycles {
 				e.unverified("SNAP.ROUND_ROBIN_COVERS_MANIFEST", core.ReasonInsufficientWindow,
 					core.PortSnapshot, 0, ch, instrID,
