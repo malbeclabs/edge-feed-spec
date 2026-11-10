@@ -98,13 +98,17 @@ type mbpInstr struct {
 	deltaSrc netip.Addr
 	baseSrc  netip.Addr
 	// replacedSrc is the address of the baseline that a group from another address
-	// replaced. While it is set, lastSeq and the journal past baseK can be the old
-	// session's, so a later group is not diffed against them. A delta accepted from
-	// any other address clears it: the baseline's own address, or a mktdata address
-	// that differs from the snapshot address (a channel whose ports are on
-	// different addresses). A delta from the replaced address does not, because a
-	// replaced publisher's last deltas can still leave a reorder buffer.
-	replacedSrc netip.Addr
+	// replaced, and replacedDeltaSrc the address of the last accepted delta at that
+	// moment. While replacedSrc is set, lastSeq and the journal past baseK can be
+	// the old session's, so a group that disagrees with them is unverifiable, not a
+	// violation. The wait ends on a group that agrees with them, or on a delta
+	// accepted from an address that is neither of the two: those are the old
+	// publisher's addresses, and its last deltas can still leave a reorder buffer
+	// after the new group. On a channel whose ports are on different addresses,
+	// the deltas keep coming from replacedDeltaSrc after the snapshot address moves,
+	// so there the wait ends on the first group that agrees.
+	replacedSrc      netip.Addr
+	replacedDeltaSrc netip.Addr
 }
 
 // restart discards the instrument's reconstruction and its Per-Instrument Seq
@@ -119,7 +123,7 @@ func (in *mbpInstr) restart() {
 	in.base, in.baseSet, in.journal = nil, false, nil
 	in.overflow, in.droppedMax = false, 0
 	in.deltaSrc, in.baseSrc = netip.Addr{}, netip.Addr{}
-	in.replacedSrc = netip.Addr{}
+	in.replacedSrc, in.replacedDeltaSrc = netip.Addr{}, netip.Addr{}
 }
 
 // accept records that the delta in front of the engine, from src, seeded or
@@ -129,8 +133,8 @@ func (in *mbpInstr) accept(src netip.Addr, captureEpoch uint64, dense bool) {
 		in.captureEpoch = captureEpoch
 	}
 	in.deltaSrc = src
-	if in.replacedSrc.IsValid() && src != in.replacedSrc {
-		in.replacedSrc = netip.Addr{}
+	if in.replacedSrc.IsValid() && src != in.replacedSrc && src != in.replacedDeltaSrc {
+		in.replacedSrc, in.replacedDeltaSrc = netip.Addr{}, netip.Addr{}
 	}
 }
 
@@ -877,15 +881,7 @@ func (e *Engine) finishMBPSnapshot(m wire.Message, ch uint8, seq uint64) {
 		// deltas are still behind this group would be diffed against the old
 		// session's ladder and journal; one comparison of a lease move is the price.
 		e.unverified(oracle, core.ReasonTransition, core.PortSnapshot, seq, ch, open.key.instrID,
-			"group from another source IP address than the adopted baseline: adopted as the baseline, compared once a delta is applied")
-	case in.replacedSrc.IsValid():
-		// A group from another address replaced the baseline, and no delta from an
-		// address other than the replaced one has been applied since. lastSeq and the
-		// journal past the baseline can still be the old session's, and replaying
-		// them against a replacement's group is the false mismatch the case above
-		// exists to avoid.
-		e.unverified(oracle, core.ReasonTransition, core.PortSnapshot, seq, ch, open.key.instrID,
-			"no delta applied since a group from another source IP address replaced the baseline: compared once one is")
+			"group from another source IP address than the adopted baseline: adopted as the baseline, compared from the next group")
 	case !in.baseSet:
 		// No adopted ladder to replay from yet; this group becomes it.
 		e.unverified(oracle, core.ReasonColdStart, core.PortSnapshot, seq, ch, open.key.instrID,
@@ -905,11 +901,22 @@ func (e *Engine) finishMBPSnapshot(m wire.Message, ch uint8, seq uint64) {
 			fmt.Sprintf("group's Last Instrument Seq %d not yet applied from the delta port (at %d)",
 				open.lastK, in.lastSeq))
 	default:
-		if d := diffMBPLevels(in.stateAsOf(open.lastK), open.levels); len(d) > 0 {
+		d := diffMBPLevels(in.stateAsOf(open.lastK), open.levels)
+		switch {
+		case len(d) > 0 && in.replacedSrc.IsValid():
+			// A group from another address replaced the baseline, and no delta has
+			// shown which session the tracker and the journal past the baseline belong
+			// to. They can be the old session's, so a mismatch is not the publisher's.
+			e.unverified(oracle, core.ReasonTransition, core.PortSnapshot, seq, ch, open.key.instrID,
+				fmt.Sprintf("at Last Instrument Seq %d the ladder differs in %d level(s), but a group from another source IP address replaced the baseline and the deltas since may be the old session's",
+					open.lastK, len(d)))
+		case len(d) > 0:
 			e.Emit(oracle, core.Violation, core.PortSnapshot, seq, ch, open.key.instrID,
 				fmt.Sprintf("at Last Instrument Seq %d the delta-reconstructed ladder differs from the snapshot in %d level(s): %s",
 					open.lastK, len(d), describeMBPDiff(d)))
-		} else {
+		default:
+			// A match settles the wait: the deltas reconstruct this address's ladder.
+			in.replacedSrc, in.replacedDeltaSrc = netip.Addr{}, netip.Addr{}
 			e.passed(oracle, core.PortSnapshot, seq, ch, open.key.instrID,
 				fmt.Sprintf("delta-reconstructed ladder matches the snapshot at Last Instrument Seq %d (%d level(s))",
 					open.lastK, len(open.levels)))
@@ -922,7 +929,7 @@ func (e *Engine) finishMBPSnapshot(m wire.Message, ch uint8, seq uint64) {
 	in.baseSet = true
 	in.baseSrc = e.curSrc
 	if fromNewAddress {
-		in.replacedSrc = oldBaseSrc
+		in.replacedSrc, in.replacedDeltaSrc = oldBaseSrc, in.deltaSrc
 	}
 	kept := in.journal[:0]
 	for _, ent := range in.journal {

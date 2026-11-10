@@ -345,3 +345,52 @@ func TestMBPSnapshotAddressMovesOnSplitPorts(t *testing.T) {
 		t.Errorf("%s: %d violation(s) and %d unverifiable, want 0 and 2 (the first group, and the first group after the move)", oracle, viol, unv)
 	}
 }
+
+// TestMBPReplacementOfASplitPortPublisher: the old publisher sends deltas from one
+// address and groups from another. The replacement's first group is adopted, then
+// one more in-series delta from the old mktdata address leaves a reorder buffer, and
+// then the replacement's second group arrives. That delta is from an address the
+// replacement replaced, so it does not end the wait, and the second group is not a
+// violation against the old journal. The replacement's later groups compare.
+func TestMBPReplacementOfASplitPortPublisher(t *testing.T) {
+	oldDelta, oldSnap := netip.MustParseAddr("10.0.0.1"), netip.MustParseAddr("10.0.0.3")
+	old := newMBPSession(oldDelta, 3, 1000)
+	var steps []mbpAddrStep
+	k := uint32(101)
+	for c := uint32(1); c <= 3; c++ {
+		old.src = oldDelta
+		steps = append(steps, old.deltas(k, 2)...)
+		k += 2
+		old.src = oldSnap
+		steps = append(steps, old.group(k-1, c, false)...)
+	}
+	old.src = oldDelta
+	steps = append(steps, old.deltas(107, 14)...)
+
+	replacement := newMBPSession(srcB, 3, 9000)
+	replacement.levels = [][2]int64{{9110, 10}}
+	steps = append(steps, replacement.group(110, 1, false)...)
+	steps = append(steps, old.deltas(121, 1)...)
+	replacement.levels = [][2]int64{{9110, 10}, {9111, 10}, {9112, 10}, {9113, 10}, {9114, 10}, {9115, 10}}
+	steps = append(steps, replacement.group(115, 2, false)...)
+	replacement.levels = [][2]int64{{9110, 10}}
+	steps = append(steps, replacement.deltas(111, 5)...)
+	steps = append(steps, replacement.cycles(116, 3, 3, false)...)
+	fs := runMBPAddrSteps(t, steps)
+
+	const oracle = "MBP.SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT"
+	for _, rule := range []string{oracle, "MBP.DELTA.PERINSTR_DENSITY"} {
+		if viol, _ := countByStatus(t, fs, rule); viol != 0 {
+			t.Errorf("%s: %d violation(s) against a replacement publisher that is conformant on its own", rule, viol)
+		}
+	}
+	passes := 0
+	for _, f := range fs {
+		if f.RuleID == oracle && f.Status == core.Pass {
+			passes++
+		}
+	}
+	if passes == 0 {
+		t.Errorf("%s: no pass for the replacement's later groups", oracle)
+	}
+}
