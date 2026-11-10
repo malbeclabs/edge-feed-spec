@@ -40,7 +40,7 @@ change the number. Changing the meaning of a field does.
 The engine already decides which findings name a publisher
 (`core.StateKind.InstanceScoped`). A finding about the channel has an empty
 `source_addr` in the metrics. The rule report follows the same rule. It names an
-instance only when the finding names a source address and the port role has a
+instance only when the finding names a source IP address and the port role has a
 configured port.
 
 An entry with no instance still carries `channel_id` and `port_role`. The report
@@ -49,15 +49,21 @@ entry and count it. It must not choose a publisher that was near.
 
 ## Decision 3: the era comes from the instance's tracker
 
-`core.Finding` gets `ResetCount` and `ResetCountKnown`. The engine reads the era
-from the tracker of the instance that the finding names, when it emits the
-finding.
+`core.Finding` gets `ResetCount`, `ResetCountKnown` and `EraIndex`. The engine
+reads the era from the tracker of the instance that the finding names, when it
+emits the finding.
 
-The datagram in front of the engine is not the right source.
+The engine does not read the era from the datagram in front of it.
 `FRAME.MKTDATA_SEQ_START` is emitted after the era advances, and it cites the
 sequence number of the new era. Old-era items are classified before the advance,
 and they cite old-era numbers. In both cases the tracker holds the era of the
 cited number.
+
+The Reset Count is a u8 and wraps after 256 resets. Two eras with the same value
+are different eras, and a reader that compares evidence with loss must not join
+them. `EraIndex` is the run-local ordinal of the era on the instance (the
+tracker's `eraPos`, starting at 1). The report keys on it and writes it as
+`era_index` beside `reset_count`.
 
 A finding about the channel has no era. Each path of the channel has its own
 sequence series, so no single era applies.
@@ -69,12 +75,22 @@ one key.
 
 - **A `violation` or `suspected` key keeps contiguous ranges, up to 64.** One
   range for all violations would be wrong. A hole between two distant violations
-  would then excuse both. Past the bound, the last range grows. Every finding
-  stays inside a range, and the file stays bounded.
+  would then excuse both. Ranges that touch or overlap merge into one, with the
+  sum of their counts. Past the bound, the two neighbouring ranges with the
+  smallest gap merge. Every finding stays inside a range, a merge spans the
+  smallest gap it can, and the file stays bounded.
 - **Any other outcome keeps one range**, from the lowest to the highest sequence
   number. A consumer does not test a pass against loss.
-- **Each range is one entry, with its own `count`.** The sum of the counts for a
+- **Each range is one entry, with its own `count` and `detail`.** The detail is
+  the message of the earliest finding in that range. The sum of the counts for a
   rule and outcome is the count in the JSON report. A test checks this.
+- **Placed keys are bounded.** A live subscription can see an unbounded number
+  of source IP addresses and eras, and each one makes new keys. The engine
+  evicts its own trackers at a bound, but the report must keep what it recorded.
+  It keeps at most 16,384 keys that name an instance. Past that bound a finding
+  goes into an overflow entry with no instance, and the report counts it in
+  `unplaced_findings`. The counts stay exact, and the report says how much
+  placement it lost.
 
 So one (rule, instance) can have several entries: passes, violations in two
 ranges, unverifiable checks for two reasons. Reducing them to one verdict is the

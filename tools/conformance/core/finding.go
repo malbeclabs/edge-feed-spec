@@ -230,7 +230,11 @@ type Finding struct {
 	// single sequence series, so it has no era either.
 	ResetCount      uint8
 	ResetCountKnown bool
-	Detail          string // free-form, for logs only — NEVER a metric label (unbounded)
+	// EraIndex is the run-local ordinal of that era on the channel instance, set
+	// with ResetCount. The Reset Count is a u8 and wraps, so two eras 256 resets
+	// apart have the same value; EraIndex tells them apart. It starts at 1.
+	EraIndex uint64
+	Detail   string // free-form, for logs only — NEVER a metric label (unbounded)
 	// Reason is a bounded, low-cardinality code used for the unverifiable_total
 	// metric's `reason` label — one of the Reason* constants above. Empty is
 	// treated as ReasonUnspecified.

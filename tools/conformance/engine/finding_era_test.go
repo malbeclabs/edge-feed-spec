@@ -33,11 +33,16 @@ func TestFindingCarriesTheEraOfItsSequence(t *testing.T) {
 	}
 	f := got[0]
 	if f.SourceAddr != srcA {
-		t.Fatalf("finding names source %v, want %v", f.SourceAddr, srcA)
+		t.Fatalf("finding names source IP address %v, want %v", f.SourceAddr, srcA)
 	}
 	if !f.ResetCountKnown || f.ResetCount != 5 || f.Seq != 10 {
 		t.Errorf("finding says era (%d, known=%v) seq %d; want era 5 seq 10: the sequence "+
 			"number is in the new era", f.ResetCount, f.ResetCountKnown, f.Seq)
+	}
+	// The era index counts the eras of the channel instance: 4 was the first, 5 is
+	// the second.
+	if f.EraIndex != 2 {
+		t.Errorf("finding says era index %d, want 2", f.EraIndex)
 	}
 }
 
@@ -57,7 +62,7 @@ func TestChannelFindingCarriesNoEra(t *testing.T) {
 		t.Fatalf("got %d findings, want 1", len(got))
 	}
 	if got[0].SourceAddr.IsValid() || got[0].ResetCountKnown {
-		t.Errorf("channel finding carries source %v and era known=%v; want neither",
+		t.Errorf("channel finding carries source IP address %v and era known=%v; want neither",
 			got[0].SourceAddr, got[0].ResetCountKnown)
 	}
 

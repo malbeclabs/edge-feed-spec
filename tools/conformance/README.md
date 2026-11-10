@@ -337,13 +337,14 @@ The format is declared. `report_format` is `1`. A reader refuses a number it doe
   "commit": "9357d67d8453",
   "read_error": "",
   "capture_drops": 0,
+  "unplaced_findings": 0,
   "rules": [
     {
       "rule_id": "FRAME.LENGTH_CONSISTENCY",
       "outcome": "violation",
       "severity": "must",
-      "instance": { "source": "192.0.2.1", "channel_id": 0, "dst_port": 51000 },
-      "evidence": { "reset_count": 2, "first_seq": 4514, "last_seq": 4601 },
+      "instance": { "source_addr": "192.0.2.1", "channel_id": 0, "dst_port": 51000 },
+      "evidence": { "reset_count": 2, "era_index": 1, "first_seq": 4514, "last_seq": 4601 },
       "channel_id": 0,
       "port_role": "snapshot",
       "count": 3,
@@ -354,10 +355,12 @@ The format is declared. `report_format` is `1`. A reader refuses a number it doe
 ```
 
 - **One entry for each (rule, outcome, severity, reason, channel instance, era).** `outcome` is one of `pass`, `violation`, `suspected`, `unverifiable` or `na`. `reason` is present on `unverifiable` only, with the value of the `unverifiable_total{reason}` label.
-- **`instance` is the channel instance**: source IP address, `Channel ID` and destination port. It is absent when the rule judges the channel and not one path of it (`source_addr` is empty in the metrics for the same reason), or when the port role has no port flag. `channel_id` and `port_role` are always present, so an entry with no instance still has a place.
-- **`evidence` is the sequence range, in the era of `reset_count`.** It is absent when `instance` is absent, or when the engine has no era for the instance. A `violation` or `suspected` entry has one entry for each contiguous range, up to 64 ranges for one key. Past that bound the last range grows, so every finding is still inside a range. Any other outcome has one range, from the lowest to the highest sequence number.
+- **`instance` is the channel instance**: `source_addr` (the source IP address, with the same name as the `source_addr` metric label), `Channel ID` and destination port. It is absent when the rule judges the channel and not one path of it (`source_addr` is empty in the metrics for the same reason), or when the port role has no port flag. `channel_id` and `port_role` are always present, so an entry with no instance still has a place.
+- **`evidence` is the sequence range, in one era.** `reset_count` is the Reset Count of the era. `era_index` is the run-local ordinal of the era on the instance, starting at 1. The Reset Count wraps after 256 resets and `era_index` does not, so a reader keys on `era_index`. `evidence` is absent when `instance` is absent, or when the engine has no era for the instance.
+- **Ranges.** A `violation` or `suspected` key has one entry for each contiguous range. Ranges that touch or overlap merge into one. One key keeps up to 64 ranges. Past that bound, the two neighbouring ranges with the smallest gap merge, so every finding is still inside a range. Any other outcome has one range, from the lowest to the highest sequence number.
+- **A bound on placed keys.** A live subscription can see an unbounded number of source IP addresses and eras. The report keeps at most 16,384 keys that name an instance. Past that bound a finding goes into an entry with `"overflow": true`, no `instance` and no `evidence`, and the report counts it in `unplaced_findings`. The counts stay exact. Only the placement is lost.
 - **`count` is the number of findings in the entry.** The counts of all entries for one rule sum to the counts in the JSON report.
-- **`detail` is the message of the first finding in the entry.**
+- **`detail` is the message of the earliest finding in the entry's own range.**
 
 `testdata/rule_report_mbp.golden.json` is the rule report of the committed market-by-price capture. A reader in another repository can test against it.
 
