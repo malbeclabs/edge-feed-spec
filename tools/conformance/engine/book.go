@@ -49,7 +49,7 @@ import "errors"
 
 // The per-instrument limits of the idWindow sets. A full window costs about 68
 // bytes for each ID of its limit (measured: the map, and a queue array of up to
-// twice the limit), so one instrument at all three limits uses about 14 MiB.
+// twice the limit), so one instrument at all three limits uses about 11 MiB.
 // These are variables, not constants, so that tests can make a window evict
 // after a few IDs.
 //
@@ -58,7 +58,8 @@ import "errors"
 // defect of this type (a second cancel, an execute after a cancel) usually
 // occurs within a few messages of the removal. It is the window that fills on
 // every feed, because every order leaves the book, so it sets the memory of a
-// validator on a feed with many instruments. Measured on a 10-minute capture of
+// validator on a feed with many instruments, together with maxExecTradeIDs on a
+// feed that groups executions. Measured on a 10-minute capture of
 // a busy feed: 346 instruments, 5.4 million removals, and the busiest instrument
 // at 131,072 removals after 6 minutes. At a limit of 131,072 (8.5 MiB each) the
 // removed windows of those instruments reach 2.9 GiB; at 16,384 (1.1 MiB each)
@@ -70,12 +71,17 @@ import "errors"
 // its execute or cancel Unverifiable. The window fills only on a feed that
 // sends hidden orders.
 //
-// maxExecTradeIDs can be smaller: a Trade arrives next to its OrderExecute
-// messages.
+// maxExecTradeIDs is the same as maxRemovedIDs. It fills on every feed that
+// groups executions into trades (a non-zero Trade ID on OrderExecute), because
+// each execute adds its Trade ID, so on such a feed it costs as much as the
+// removed window: 1.1 MiB per instrument at 16,384. A Trade arrives next to its
+// OrderExecute messages, so a limit at or below maxRemovedIDs costs
+// TRADE.EXEC_GROUPING no coverage. At the earlier 65,536 it cost 4.25 MiB per
+// instrument.
 var (
 	maxRemovedIDs   = 1 << 14
 	maxHiddenIDs    = 1 << 17
-	maxExecTradeIDs = 1 << 16
+	maxExecTradeIDs = 1 << 14
 )
 
 // Typed errors returned by the book mutation methods.
