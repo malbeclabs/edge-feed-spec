@@ -188,9 +188,22 @@ func (e *Engine) emit(ruleID string, st core.Status, port core.Port, seq uint64,
 	if meta.State.InstanceScoped() {
 		src = e.curSrc
 	}
+	// The era of seq comes from the tracker of the instance the finding names, at
+	// the moment it is emitted. The tracker, and not the datagram in front of the
+	// engine, is the right source: Process classifies the old era's buffered items
+	// before it advances the era, and it emits FRAME.MKTDATA_SEQ_START after the
+	// advance. In both cases the tracker holds the era that seq belongs to.
+	var era uint8
+	var eraKnown bool
+	if src.IsValid() {
+		if pt, ok := e.ports[instanceKey{src: src, port: port, ch: ch}]; ok && pt.eraInitialized {
+			era, eraKnown = pt.era, true
+		}
+	}
 	e.rep.Record(core.Finding{RuleID: ruleID, Severity: sev, Status: st, Feed: e.cfg.Feed,
-		Port: port, SourceAddr: src, Seq: seq, ChannelID: ch, InstrumentID: inst,
-		NoInstrumentID: noInst, Detail: detail, Reason: rsn, At: e.now()})
+		Port: port, SourceAddr: src, Seq: seq, ResetCount: era, ResetCountKnown: eraKnown,
+		ChannelID: ch, InstrumentID: inst, NoInstrumentID: noInst, Detail: detail, Reason: rsn,
+		At: e.now()})
 }
 
 // maxChannelInstances bounds the tracker map. The source address is part of the

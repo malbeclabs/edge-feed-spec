@@ -207,6 +207,15 @@ func Run(opts RunOpts) int {
 	} else {
 		rep = report.Multi{agg, logSink}
 	}
+	var ruleRep *report.RuleReport
+	if opts.RuleReport != "" {
+		ruleRep = report.NewRuleReport(opts.Cfg.Feed, map[core.Port]uint16{
+			core.PortMktData:  uint16(opts.MktDataPort),
+			core.PortRefData:  uint16(opts.RefDataPort),
+			core.PortSnapshot: uint16(opts.SnapshotPort),
+		})
+		rep = append(rep.(report.Multi), ruleRep)
+	}
 
 	// --- source ---
 	src, err := buildSource(opts)
@@ -293,6 +302,15 @@ func Run(opts RunOpts) int {
 			ReadErr: readErr, CaptureDrops: captureDrops}
 		if err := report.JSONReport(agg, opts.JSONReport, meta); err != nil {
 			fmt.Fprintf(os.Stderr, "dz-conformance: json report: %v\n", err)
+			reportErr = err
+		}
+	}
+
+	if ruleRep != nil {
+		meta := report.Meta{Version: opts.Version, Commit: opts.Commit, Strict: opts.Cfg.Strict,
+			ReadErr: readErr, CaptureDrops: captureDrops}
+		if err := report.WriteRuleReport(ruleRep, opts.RuleReport, meta); err != nil {
+			fmt.Fprintf(os.Stderr, "dz-conformance: rule report: %v\n", err)
 			reportErr = err
 		}
 	}

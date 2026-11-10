@@ -52,6 +52,7 @@ func main() {
 
 	// Output
 	jsonReport := fs.String("json-report", "", "write JSON findings report to this path")
+	ruleReport := fs.String("rule-report", "", "write the rule report to this path: one entry per rule outcome and channel instance, with the sequence range of its evidence")
 	verbose := fs.Bool("v", false, "verbose logging (surface Unverifiable findings at INFO)")
 	logThrottle := fs.Duration("log-throttle", time.Second, "min interval between identical (rule,status) log lines for long-running use; 0 disables (metrics always count every finding)")
 	showVersion := fs.Bool("version", false, "print version and exit")
@@ -105,6 +106,7 @@ func main() {
 		MetricsAddr:    *metricsAddr,
 		SourceRegistry: *sourceRegistry,
 		JSONReport:     *jsonReport,
+		RuleReport:     *ruleReport,
 		Verbose:        *verbose,
 		LogThrottle:    *logThrottle,
 		Version:        version,
@@ -128,7 +130,10 @@ type RunOpts struct {
 	// SourceRegistry is the path to a source-registry JSON override; empty uses the embedded default.
 	SourceRegistry string
 	JSONReport     string
-	Verbose        bool
+	// RuleReport is the path of the placed rule report; empty writes none. See
+	// report.RuleReport for how it differs from JSONReport.
+	RuleReport string
+	Verbose    bool
 	// LogThrottle is the minimum interval between identical (rule,status) log
 	// lines; 0 disables throttling. Does not affect metrics or exit code.
 	LogThrottle time.Duration

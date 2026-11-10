@@ -264,6 +264,7 @@ With `--pcap`, the tool replays the capture in order and exits when the file is 
 | `--expect-heartbeat` | `0` (off) | Expected heartbeat interval; enables `HEARTBEAT.CADENCE` |
 | `--expect-snapshot-cycle` | `0` (off) | Expected snapshot cycle duration (accepted for forward compatibility; wired in Phase 3) |
 | `--json-report` | | Write a JSON findings report to this path |
+| `--rule-report` | | Write the [rule report](#rule-report) to this path: one entry for each rule outcome on each channel instance, with the sequence range of its evidence |
 | `-v` | `false` | Verbose logging (lowers the stderr threshold to INFO, surfacing `Unverifiable` findings; default is WARN) |
 | `--log-throttle` | `1s` | Minimum wall-clock interval between identical `(rule, status)` log lines. `0` disables throttling. Affects log lines only — metrics and the exit code always count every finding. |
 | `--version` | | Print `<version>+<commit>` and exit (e.g. `v0.2.0+85fd9b6d40cf`, `dev+none` unstamped) |
@@ -321,6 +322,44 @@ Pass `--json-report path` to write a machine-readable summary at the end of the 
 `capture_drops` does **not** move the exit code — it says how much of a clean result to believe. It is the datagram count the input failed to record: pcapng `epb_dropcount` summed, plus any packet that reached the reader with fewer bytes than its own headers declare. `0` on a live socket means only that the input has nowhere to say it, and on a legacy pcap that it has nowhere to admit a drop. See [Loss the capture admits to](#loss-the-capture-admits-to).
 
 The remaining exit-2 paths — bad flags, an unbound `--metrics-addr`, no ports configured, an unreadable `--source-registry`, or a failure writing the report itself — abort before or during the write, so they leave no parseable report to misread.
+
+### Rule report
+
+Pass `--rule-report path` to write the rule report at the end of the run. The JSON report says how often each rule held. The rule report says where each outcome occurred. A consumer that keeps one row for each rule and channel instance needs the second answer. It must compare each violation with the loss on that instance, so it must know the instance and the sequence range of the evidence.
+
+The format is declared. `report_format` is `1`. A reader refuses a number it does not know, and ignores a field it does not know. Adding a field does not change the number.
+
+```json
+{
+  "report_format": 1,
+  "feed": "mbp",
+  "version": "v0.4.1",
+  "commit": "9357d67d8453",
+  "read_error": "",
+  "capture_drops": 0,
+  "rules": [
+    {
+      "rule_id": "FRAME.LENGTH_CONSISTENCY",
+      "outcome": "violation",
+      "severity": "must",
+      "instance": { "source": "192.0.2.1", "channel_id": 0, "dst_port": 51000 },
+      "evidence": { "reset_count": 2, "first_seq": 4514, "last_seq": 4601 },
+      "channel_id": 0,
+      "port_role": "snapshot",
+      "count": 3,
+      "detail": "..."
+    }
+  ]
+}
+```
+
+- **One entry for each (rule, outcome, severity, reason, channel instance, era).** `outcome` is one of `pass`, `violation`, `suspected`, `unverifiable` or `na`. `reason` is present on `unverifiable` only, with the value of the `unverifiable_total{reason}` label.
+- **`instance` is the channel instance**: source IP address, `Channel ID` and destination port. It is absent when the rule judges the channel and not one path of it (`source_addr` is empty in the metrics for the same reason), or when the port role has no port flag. `channel_id` and `port_role` are always present, so an entry with no instance still has a place.
+- **`evidence` is the sequence range, in the era of `reset_count`.** It is absent when `instance` is absent, or when the engine has no era for the instance. A `violation` or `suspected` entry has one entry for each contiguous range, up to 64 ranges for one key. Past that bound the last range grows, so every finding is still inside a range. Any other outcome has one range, from the lowest to the highest sequence number.
+- **`count` is the number of findings in the entry.** The counts of all entries for one rule sum to the counts in the JSON report.
+- **`detail` is the message of the first finding in the entry.**
+
+`testdata/rule_report_mbp.golden.json` is the rule report of the committed market-by-price capture. A reader in another repository can test against it.
 
 ### Prometheus metrics
 

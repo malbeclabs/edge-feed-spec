@@ -222,7 +222,15 @@ type Finding struct {
 	// "unknown"; false is the common case, so the zero value is right.
 	NoInstrumentID bool
 	Seq            uint64
-	Detail         string // free-form, for logs only — NEVER a metric label (unbounded)
+	// ResetCount is the Reset Count of the era that Seq is in, and ResetCountKnown
+	// says whether the engine knew it. A sequence number has no meaning without
+	// its era: the series restarts at every Reset Count change. The engine knows
+	// the era only for a finding that names a channel instance (SourceAddr is
+	// set) whose tracker has seen a datagram. A finding about the channel has no
+	// single sequence series, so it has no era either.
+	ResetCount      uint8
+	ResetCountKnown bool
+	Detail          string // free-form, for logs only — NEVER a metric label (unbounded)
 	// Reason is a bounded, low-cardinality code used for the unverifiable_total
 	// metric's `reason` label — one of the Reason* constants above. Empty is
 	// treated as ReasonUnspecified.
