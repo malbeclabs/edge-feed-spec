@@ -1,6 +1,9 @@
 package engine
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
 func TestMBPBookAppliesByQuantityAlone(t *testing.T) {
 	b := newMBPBook()
@@ -119,5 +122,29 @@ func TestDiffMBPLevelsReportsBothDirections(t *testing.T) {
 	got := diffMBPLevels(book, snap)
 	if len(got) != 3 {
 		t.Fatalf("diffs = %d, want 3: %+v", len(got), got)
+	}
+}
+
+// TestDiffMBPLevelsIsInOrder checks that the level diff is sorted by side and
+// price. The MBP.SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT detail lists the first
+// levels of the diff, so a diff in map order gave a four-level mismatch a
+// different detail on each run.
+func TestDiffMBPLevelsIsInOrder(t *testing.T) {
+	book := map[mbpLevelKey]uint64{
+		{mbpClearSideAsk, 103}: 1,
+		{mbpClearSideBid, 99}:  1,
+		{mbpClearSideAsk, 101}: 1,
+		{mbpClearSideBid, 97}:  1,
+	}
+	snap := map[mbpLevelKey]uint64{}
+	want := []mbpLevelKey{{mbpClearSideBid, 97}, {mbpClearSideBid, 99}, {mbpClearSideAsk, 101}, {mbpClearSideAsk, 103}}
+	for run := 0; run < 50; run++ {
+		var got []mbpLevelKey
+		for _, d := range diffMBPLevels(book, snap) {
+			got = append(got, d.key)
+		}
+		if !slices.Equal(got, want) {
+			t.Fatalf("run %d: diff keys %v, want %v", run, got, want)
+		}
 	}
 }

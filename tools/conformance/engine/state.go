@@ -4,6 +4,7 @@ import (
 	"container/heap"
 	"hash/maphash"
 	"net/netip"
+	"sync/atomic"
 
 	"github.com/malbeclabs/edge-feed-spec/tools/conformance/core"
 	"github.com/malbeclabs/edge-feed-spec/tools/conformance/wire"
@@ -37,9 +38,17 @@ type eraOrder struct {
 	// the market-by-price reset bookkeeping has seen; see Engine.mbpObserveEra.
 	mbpSeen    uint64
 	mbpSeenSet bool
+	// id tells this order apart from the one a tracker gets when it is evicted
+	// and comes back, whose ordinals restart; see Engine.noteEra.
+	id uint64
 }
 
-func newEraOrder() *eraOrder { return &eraOrder{pos: make(map[uint8]uint64)} }
+// eraOrderIDs numbers the eraOrders. Only equality of two ids is read.
+var eraOrderIDs atomic.Uint64
+
+func newEraOrder() *eraOrder {
+	return &eraOrder{pos: make(map[uint8]uint64), id: eraOrderIDs.Add(1)}
+}
 
 // enter returns the ordinal of the era a port enters when it starts to accept
 // Reset Count era. from is the ordinal of the era the port leaves, 0 for a port

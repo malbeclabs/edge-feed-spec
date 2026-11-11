@@ -85,10 +85,12 @@ type Engine struct {
 	eraCounts map[instanceKey]*eraCount
 }
 
-// eraCount is the era count of one channel instance: the Reset Count of the era
-// it last saw, and the ordinal of that era.
+// eraCount is the era count of one channel instance: the era it last saw, by
+// Reset Count and by the tracker's own ordinal, and the count of that era.
 type eraCount struct {
 	resetCount uint8
+	orderID    uint64 // the eraOrder that pos is an ordinal of
+	pos        uint64
 	index      uint64
 }
 
@@ -1226,18 +1228,22 @@ func (e *Engine) decideNeverReachesReady(k refdataKey, s *channelRefdataState, d
 
 // noteEra counts the era that the tracker of one channel instance holds, and
 // returns its ordinal: 1 for the first era the instance sees, plus 1 each time the
-// instance holds a Reset Count other than the one it held before. It returns 0
-// when the tracker has no era yet, or when eraCounts is full and the instance is
-// new to it.
+// instance enters another era. It returns 0 when the tracker has no era yet, or
+// when eraCounts is full and the instance is new to it.
 //
 // The engine calls it after each datagram of the instance and at each finding.
 // Every era the tracker enters is therefore counted while the tracker holds it.
 //
-// The count survives tracker eviction. A tracker that comes back in the Reset
-// Count it held before eviction continues that era; one that comes back in
-// another Reset Count starts the next era. The engine cannot tell a return to the
-// same era from a return after exactly a multiple of 256 resets, and it reads the
-// first, which is the only one a returning publisher makes in practice.
+// While the tracker lives, a move of its eraPos is a new era. That also counts an
+// era that starts at the Reset Count value of the one before it: a port that was
+// silent while the channel left the value and came back to it, or through a
+// multiple of 256 resets. The tracker tells those apart (enqueue), and the count
+// follows it.
+//
+// The count survives tracker eviction. A tracker that comes back has a new
+// eraOrder, whose ordinals restart, so the count reads the Reset Count instead:
+// a tracker that comes back in the Reset Count it held before eviction continues
+// that era; one that comes back in another Reset Count starts the next era.
 func (e *Engine) noteEra(key instanceKey, pt *portTracker) uint64 {
 	if !pt.eraInitialized {
 		return 0
@@ -1247,13 +1253,15 @@ func (e *Engine) noteEra(key instanceKey, pt *portTracker) uint64 {
 		if len(e.eraCounts) >= maxEraCounts {
 			return 0
 		}
-		c = &eraCount{resetCount: pt.era, index: 1}
+		c = &eraCount{index: 1}
 		e.eraCounts[key] = c
-		return c.index
-	}
-	if c.resetCount != pt.era {
-		c.resetCount = pt.era
+	} else if c.orderID == pt.order.id {
+		if c.pos != pt.eraPos {
+			c.index++
+		}
+	} else if c.resetCount != pt.era {
 		c.index++
 	}
+	c.resetCount, c.orderID, c.pos = pt.era, pt.order.id, pt.eraPos
 	return c.index
 }

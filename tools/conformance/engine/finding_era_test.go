@@ -177,3 +177,37 @@ func TestEraIndexSurvivesTrackerEviction(t *testing.T) {
 		t.Errorf("era indexes %v, want %v", got, want)
 	}
 }
+
+// TestEraIndexCountsAnEraThatReusesItsValue checks that a new era at the Reset
+// Count value of the one before it gets its own era index. The snapshot port
+// sends in Reset Count 4, then is silent while mktdata enters 5, 6 and then 4
+// again. (Straight from 5 back to 4 would be a late datagram of the era mktdata
+// left.) When the snapshot port sends again in 4, it is in a new era of the
+// channel, so its findings carry 1 and then 2. A count of the changes of value says 1 twice,
+// and merges the two eras' sequence ranges in one report entry.
+func TestEraIndexCountsAnEraThatReusesItsValue(t *testing.T) {
+	const ch = uint8(1)
+	e, ac := newMBOEngineW1()
+	send := func(port core.Port, era uint8) {
+		f, sf := wire.Decode(buildResetCountFrame(ch, era, 0), wire.MagicMBO)
+		e.Process(srcA, f, port, sf)
+		e.Emit("FRAME.SEQ_RESET_GAP", core.Pass, port, 0, ch, 0, "probe")
+	}
+	send(core.PortMktData, 4)
+	send(core.PortSnapshot, 4)
+	send(core.PortMktData, 5)
+	send(core.PortMktData, 6)
+	send(core.PortMktData, 4)
+	send(core.PortSnapshot, 4)
+
+	got := map[core.Port][]uint64{}
+	for _, f := range findingsFor(ac, "FRAME.SEQ_RESET_GAP") {
+		got[f.Port] = append(got[f.Port], f.EraIndex)
+	}
+	want := map[core.Port][]uint64{core.PortMktData: {1, 2, 3, 4}, core.PortSnapshot: {1, 2}}
+	for port, w := range want {
+		if !slices.Equal(got[port], w) {
+			t.Errorf("%v era indexes %v, want %v", port, got[port], w)
+		}
+	}
+}
