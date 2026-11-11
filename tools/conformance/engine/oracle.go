@@ -171,7 +171,10 @@ func (e *Engine) runOracleForGroup(ch uint8, snap *openSnapshot, snapPortSeq uin
 	}
 
 	// --- Diff the two books ---
-	deltaBook := e.mbo.book.book(ch, instrID).Orders() // snapshot copy
+	var deltaBook map[uint64]liveOrder
+	if bk := e.mbo.book.books[key]; bk != nil {
+		deltaBook = bk.live
+	}
 	diffs := diffBooks(snap.orders, deltaBook)
 
 	if len(diffs) == 0 {
@@ -236,8 +239,10 @@ func (e *Engine) runOracleForGroup(ch uint8, snap *openSnapshot, snapPortSeq uin
 }
 
 // diffBooks compares the snapshot book (from the completed group) against the
-// delta book (from instrBook.Orders()). Returns a slice of oracleDiff describing
-// every order-level discrepancy.
+// delta book's live map. Returns a slice of oracleDiff describing every
+// order-level discrepancy. The engine calls this single-threaded and diffBooks
+// never mutates deltaOrders, so reading bk.live directly avoids cloning the
+// live map on every snapshot cycle.
 //
 // Hidden orders (OrderFlags bit 2 in the snapshot OR hiddenIDs in the delta
 // book) are skipped entirely to avoid false positives.
@@ -252,7 +257,7 @@ func (e *Engine) runOracleForGroup(ch uint8, snap *openSnapshot, snapPortSeq uin
 //	false-positive risk. By spec, hidden orders occupy ID slots exclusively;
 //	REF.DUPLICATE_LIVE_ORDERADD enforcement makes visible+hidden coexistence at
 //	the same ID a separately detected violation. The false-negative is accepted.
-func diffBooks(snapOrders map[uint64]snapOrderRecord, deltaOrders map[uint64]restingOrder) []oracleDiff {
+func diffBooks(snapOrders map[uint64]snapOrderRecord, deltaOrders map[uint64]liveOrder) []oracleDiff {
 	var diffs []oracleDiff
 
 	// Check every order in the snapshot against the delta book.
