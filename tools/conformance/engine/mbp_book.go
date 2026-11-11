@@ -1,5 +1,10 @@
 package engine
 
+import (
+	"cmp"
+	"slices"
+)
+
 // A price-keyed book, reconstructed independently from the delta stream so it can
 // be diffed against the periodic snapshot stream.
 //
@@ -134,5 +139,13 @@ func diffMBPLevels(book, snap map[mbpLevelKey]uint64) []mbpLevelDiff {
 			out = append(out, mbpLevelDiff{key: k, fromBook: 0, fromSnap: sv})
 		}
 	}
+	// By side, then price: the violation detail lists the first levels, so map
+	// order would make one capture give a different report on each run.
+	slices.SortFunc(out, func(a, b mbpLevelDiff) int {
+		if c := cmp.Compare(a.key.side, b.key.side); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.key.price, b.key.price)
+	})
 	return out
 }

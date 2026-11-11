@@ -76,7 +76,28 @@ type Engine struct {
 	// rather than captureLossEpoch: they run inside classify, where the engine's
 	// own counter may already have moved on for frames still in the buffer.
 	curCaptureEpoch uint64
+	// eraCounts numbers the eras of each channel instance, for Finding.EraIndex.
+	// It is apart from the trackers on purpose: a tracker that is evicted and
+	// comes back starts a fresh series, and its era ordinal (eraPos) restarts and
+	// is shared with the other ports of the source IP address and Channel ID. A
+	// reader that counts the eras of one instance needs a count that does
+	// neither. Bounded by maxEraCounts; see noteEra.
+	eraCounts map[instanceKey]*eraCount
 }
+
+// eraCount is the era count of one channel instance: the era it last saw, by
+// Reset Count and by the tracker's own ordinal, and the count of that era.
+type eraCount struct {
+	resetCount uint8
+	orderID    uint64 // the eraOrder that pos is an ordinal of
+	pos        uint64
+	index      uint64
+}
+
+// maxEraCounts bounds eraCounts. Past it, an instance the engine has not counted
+// yet gets no era index, and its findings say so (EraIndex 0) rather than carry
+// a number that does not count its eras.
+const maxEraCounts = 16384
 
 // New constructs an Engine with the given config and reporter.
 func New(cfg Config, rep report.Reporter) *Engine {
@@ -89,6 +110,7 @@ func New(cfg Config, rep report.Reporter) *Engine {
 		now:        time.Now,
 		ports:      make(map[instanceKey]*portTracker),
 		sessionEnd: make(map[refdataKey]struct{}),
+		eraCounts:  make(map[instanceKey]*eraCount),
 	}
 }
 
@@ -188,9 +210,25 @@ func (e *Engine) emit(ruleID string, st core.Status, port core.Port, seq uint64,
 	if meta.State.InstanceScoped() {
 		src = e.curSrc
 	}
+	// The engine reads the era of seq from the tracker of the instance the finding
+	// names, at the moment it is emitted. It does not read the era from the
+	// datagram in front of the engine: Process classifies the old era's buffered
+	// items before it advances the era, and it emits FRAME.MKTDATA_SEQ_START after
+	// the advance. In both cases the tracker holds the era that seq belongs to.
+	var era uint8
+	var eraIndex uint64
+	var eraKnown bool
+	if src.IsValid() {
+		key := instanceKey{src: src, port: port, ch: ch}
+		if pt, ok := e.ports[key]; ok && pt.eraInitialized {
+			era, eraKnown = pt.era, true
+			eraIndex = e.noteEra(key, pt)
+		}
+	}
 	e.rep.Record(core.Finding{RuleID: ruleID, Severity: sev, Status: st, Feed: e.cfg.Feed,
-		Port: port, SourceAddr: src, Seq: seq, ChannelID: ch, InstrumentID: inst,
-		NoInstrumentID: noInst, Detail: detail, Reason: rsn, At: e.now()})
+		Port: port, SourceAddr: src, Seq: seq, ResetCount: era, ResetCountKnown: eraKnown, EraIndex: eraIndex,
+		ChannelID: ch, InstrumentID: inst, NoInstrumentID: noInst, Detail: detail, Reason: rsn,
+		At: e.now()})
 }
 
 // maxChannelInstances bounds the tracker map. The source address is part of the
@@ -584,6 +622,10 @@ func (e *Engine) Process(src netip.Addr, f *wire.Frame, port core.Port, sf []wir
 	}
 
 	pt := e.instanceTrack(src, port, f.Header.ChannelID)
+	// Count the era the tracker holds once this datagram is handled, so that an
+	// era with no finding still counts. emit counts it too, before the advance
+	// that a later datagram makes.
+	defer e.noteEra(instanceKey{src: src, port: port, ch: f.Header.ChannelID}, pt)
 	if !pt.lastArrivalSendTSSet || f.Header.SendTS > pt.lastArrivalSendTS {
 		pt.lastArrivalSendTS = f.Header.SendTS
 		pt.lastArrivalSendTSSet = true
@@ -1182,4 +1224,44 @@ func (e *Engine) decideNeverReachesReady(k refdataKey, s *channelRefdataState, d
 	e.Emit("REFDATA.NEVER_REACHES_READY", st, core.PortRefData, datagramSeq, ch, 0,
 		fmt.Sprintf("channel %d: %v elapsed on the refdata port (> window %v, serving span %v) but never reached ready state",
 			ch, closedBy, window, span), reason)
+}
+
+// noteEra counts the era that the tracker of one channel instance holds, and
+// returns its ordinal: 1 for the first era the instance sees, plus 1 each time the
+// instance enters another era. It returns 0 when the tracker has no era yet, or
+// when eraCounts is full and the instance is new to it.
+//
+// The engine calls it after each datagram of the instance and at each finding.
+// Every era the tracker enters is therefore counted while the tracker holds it.
+//
+// While the tracker lives, a move of its eraPos is a new era. That also counts an
+// era that starts at the Reset Count value of the one before it: a port that was
+// silent while the channel left the value and came back to it, or through a
+// multiple of 256 resets. The tracker tells those apart (enqueue), and the count
+// follows it.
+//
+// The count survives tracker eviction. A tracker that comes back has a new
+// eraOrder, whose ordinals restart, so the count reads the Reset Count instead:
+// a tracker that comes back in the Reset Count it held before eviction continues
+// that era; one that comes back in another Reset Count starts the next era.
+func (e *Engine) noteEra(key instanceKey, pt *portTracker) uint64 {
+	if !pt.eraInitialized {
+		return 0
+	}
+	c := e.eraCounts[key]
+	if c == nil {
+		if len(e.eraCounts) >= maxEraCounts {
+			return 0
+		}
+		c = &eraCount{index: 1}
+		e.eraCounts[key] = c
+	} else if c.orderID == pt.order.id {
+		if c.pos != pt.eraPos {
+			c.index++
+		}
+	} else if c.resetCount != pt.era {
+		c.index++
+	}
+	c.resetCount, c.orderID, c.pos = pt.era, pt.order.id, pt.eraPos
+	return c.index
 }
