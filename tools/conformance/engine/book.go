@@ -59,12 +59,26 @@ import "errors"
 // occurs within a few messages of the removal. It is the window that fills on
 // every feed, because every order leaves the book, so it sets the memory of a
 // validator on a feed with many instruments, together with maxExecTradeIDs on a
-// feed that groups executions. Measured on a 10-minute capture of
+// feed that sends Trade IDs, which is the normal case. Measured on a 10-minute capture of
 // a busy feed: 346 instruments, 5.4 million removals, and the busiest instrument
 // at 131,072 removals after 6 minutes. At a limit of 131,072 (8.5 MiB each) the
 // removed windows of those instruments reach 2.9 GiB; at 16,384 (1.1 MiB each)
 // they reach 370 MiB, and the busiest instrument keeps about 45 seconds of
 // removals.
+//
+// The same limit sets how long REF.CANCEL_DANGLING_ORDER and
+// REF.EXEC_DANGLING_ORDER can decide. A cancel or an execute for an order whose
+// add never arrived is a violation only while its ID is above every ID that the
+// removed window evicted. Once evictions pass that ID, the message gets
+// Unverifiable with reason=overflow, because the ID may be a removed order that
+// the window evicted. On the busiest instrument of that capture this happens
+// about 45 seconds after the missing add (about 6 minutes at 131,072); on an
+// average instrument about 10.5 minutes after it (about 84 at 131,072). The
+// evicted range only grows until the next Reset Count, so for the rest of the
+// era every dangling ID below the highest evicted ID is Unverifiable. That is
+// the cost of this limit: these rules decide a dangling order soon after its
+// add, and lose the rest to overflow, which unverifiable_total{reason="overflow"}
+// counts. A larger limit buys minutes of that window at 8 times the memory.
 //
 // maxHiddenIDs is larger. A hidden order rests in the book, so a hidden order
 // that is older than 131,072 newer hidden orders on the same instrument makes
