@@ -47,26 +47,55 @@ package engine
 
 import "errors"
 
-// The per-instrument limits of the idWindow sets. Each entry costs about 55
-// bytes (map entry and ring entry), so one instrument at all three limits uses
-// about 17 MiB. These are variables, not constants, so that tests can make a
-// window evict after a few IDs.
+// The per-instrument limits of the idWindow sets. A full window costs about 68
+// bytes for each ID of its limit (measured: the map, and a queue array of up to
+// twice the limit), so one instrument at all three limits uses about 11 MiB.
+// These are variables, not constants, so that tests can make a window evict
+// after a few IDs.
 //
 // maxRemovedIDs decides how long REF.OPERATION_AFTER_REMOVAL can see an order
-// after it leaves the book: 131,072 removals on that instrument. A publisher
+// after it leaves the book: 16,384 removals on that instrument. A publisher
 // defect of this type (a second cancel, an execute after a cancel) usually
-// occurs within a few messages of the removal.
+// occurs within a few messages of the removal. It is the window that fills on
+// every feed, because every order leaves the book, so it sets the memory of a
+// validator on a feed with many instruments, together with maxExecTradeIDs on a
+// feed that sends Trade IDs, which is the normal case. Measured on a 10-minute capture of
+// a busy feed: 346 instruments, 5.4 million removals, and the busiest instrument
+// at 131,072 removals after 6 minutes. At a limit of 131,072 (8.5 MiB each) the
+// removed windows of those instruments reach 2.9 GiB; at 16,384 (1.1 MiB each)
+// they reach 370 MiB, and the busiest instrument keeps about 45 seconds of
+// removals.
 //
-// maxHiddenIDs is the same size. A hidden order rests in the book, so a hidden
-// order that is older than 131,072 newer hidden orders on the same instrument
-// makes its execute or cancel Unverifiable.
+// The same limit sets how long REF.CANCEL_DANGLING_ORDER and
+// REF.EXEC_DANGLING_ORDER can decide. A cancel or an execute for an order whose
+// add never arrived is a violation only while its ID is above every ID that the
+// removed window evicted. Once evictions pass that ID, the message gets
+// Unverifiable with reason=overflow, because the ID may be a removed order that
+// the window evicted. On the busiest instrument of that capture this happens
+// about 45 seconds after the missing add (about 6 minutes at 131,072); on an
+// average instrument about 10.5 minutes after it (about 84 at 131,072). The
+// evicted range only grows until the next Reset Count, so for the rest of the
+// era every dangling ID below the highest evicted ID is Unverifiable. That is
+// the cost of this limit: these rules decide a dangling order soon after its
+// add, and lose the rest to overflow, which unverifiable_total{reason="overflow"}
+// counts. A larger limit buys minutes of that window at 8 times the memory.
 //
-// maxExecTradeIDs can be smaller: a Trade arrives next to its OrderExecute
-// messages.
+// maxHiddenIDs is larger. A hidden order rests in the book, so a hidden order
+// that is older than 131,072 newer hidden orders on the same instrument makes
+// its execute or cancel Unverifiable. The window fills only on a feed that
+// sends hidden orders.
+//
+// maxExecTradeIDs is the same as maxRemovedIDs. It fills on every feed that
+// groups executions into trades (a non-zero Trade ID on OrderExecute), because
+// each execute adds its Trade ID, so on such a feed it costs as much as the
+// removed window: 1.1 MiB per instrument at 16,384. A Trade arrives next to its
+// OrderExecute messages, so a limit at or below maxRemovedIDs costs
+// TRADE.EXEC_GROUPING no coverage. At the earlier 65,536 it cost 4.25 MiB per
+// instrument.
 var (
-	maxRemovedIDs   = 1 << 17
+	maxRemovedIDs   = 1 << 14
 	maxHiddenIDs    = 1 << 17
-	maxExecTradeIDs = 1 << 16
+	maxExecTradeIDs = 1 << 14
 )
 
 // Typed errors returned by the book mutation methods.

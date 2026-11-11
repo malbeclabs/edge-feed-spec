@@ -18,10 +18,10 @@ type idWindow struct {
 	// members maps each ID to the insertion number of its newest queue entry. An
 	// older queue entry for the same ID is stale and eviction skips it.
 	members map[uint64]uint64
-	// queue holds the entries in insertion order, oldest at head. A re-add or a
-	// remove leaves a stale entry behind, so the queue can hold more entries than
-	// members. compact drops the stale ones before the queue passes twice the
-	// limit.
+	// queue holds the entries in insertion order, oldest at head. The entries
+	// before head are evicted. A re-add or a remove leaves a stale entry behind, so
+	// the queue can hold more entries than members. compact drops the evicted and
+	// the stale entries before the queue passes twice the limit.
 	queue []idEntry
 	head  int
 	next  uint64
@@ -64,13 +64,24 @@ func (w *idWindow) add(id uint64) {
 	w.compact()
 }
 
-// compact drops the stale entries once the queue holds more than twice the
-// limit, so its size stays bounded and the cost of add stays constant on average.
+// compact drops the evicted and the stale entries once the queue holds more than
+// twice the limit, so its size stays bounded and the cost of add stays constant on
+// average.
+//
+// The test is on len(w.queue), not on len(w.queue)-w.head. Eviction moves head
+// forward but does not release the entries before it, and append keeps them when
+// it copies the queue to a larger array. A window that only gets new IDs (the
+// removed window: each order leaves the book once) has no stale entries, so
+// len(w.queue)-w.head stays at the limit. With that test, compact never ran and
+// the queue kept every entry that the window ever added: 16 bytes for each
+// removed order, for the full length of a Reset Count era.
 func (w *idWindow) compact() {
-	if len(w.queue)-w.head <= 2*w.limit {
+	if len(w.queue) <= 2*w.limit {
 		return
 	}
-	kept := make([]idEntry, 0, len(w.members))
+	// The capacity holds the queue until the next compact, so append does not
+	// copy it to a larger array before then.
+	kept := make([]idEntry, 0, 2*w.limit+1)
 	for _, e := range w.queue[w.head:] {
 		if cur, ok := w.members[e.id]; ok && cur == e.n {
 			kept = append(kept, e)

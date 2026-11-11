@@ -5,12 +5,18 @@ import "testing"
 // TestIDWindowStaysBounded: the regression for an MBO book that grew for the
 // full length of an era. A window never holds more than its limit, whatever
 // the number of adds.
+//
+// The queue check is on len and cap, not on len(w.queue)-w.head. Eviction moves
+// head forward, and the entries before head stay in the array until compact
+// drops them. An earlier check on len(w.queue)-w.head passed while the array
+// kept every ID that the window ever added.
 func TestIDWindowStaysBounded(t *testing.T) {
 	w := newIDWindow(8)
 	for id := uint64(1); id <= 10_000; id++ {
 		w.add(id)
-		if w.size() > 8 || len(w.queue)-w.head > 16 {
-			t.Fatalf("after %d adds: %d members, %d queue entries, want at most 8 and 16", id, w.size(), len(w.queue)-w.head)
+		if w.size() > 8 || len(w.queue) > 16 || cap(w.queue) > 32 {
+			t.Fatalf("after %d adds: %d members, queue len %d cap %d, want at most 8, 16 and 32",
+				id, w.size(), len(w.queue), cap(w.queue))
 		}
 	}
 	for id := uint64(9_993); id <= 10_000; id++ {
@@ -102,8 +108,8 @@ func TestIDWindowStaleEntriesStayBounded(t *testing.T) {
 		if i%7 == 0 {
 			w.remove(uint64(i % 3))
 		}
-		if q := len(w.queue) - w.head; q > 8 {
-			t.Fatalf("after %d operations: %d queue entries, want at most 8", i+1, q)
+		if len(w.queue) > 8 || cap(w.queue) > 16 {
+			t.Fatalf("after %d operations: queue len %d cap %d, want at most 8 and 16", i+1, len(w.queue), cap(w.queue))
 		}
 	}
 	if w.evicted {
