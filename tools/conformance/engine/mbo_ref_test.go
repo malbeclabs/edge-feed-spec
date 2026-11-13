@@ -192,6 +192,45 @@ func reachedReadyMBO(e *Engine, ch uint8, instrID uint32, priceBound uint8, star
 	return seq
 }
 
+// emptySnapshotGroups builds one snapshot-port datagram that holds a complete
+// snapshot group for each instrument: an empty book at Anchor Seq 0, Snapshot ID 0
+// and Last Instrument Seq 0. It is the state at the start of an era for an
+// instrument with no resting orders.
+func emptySnapshotGroups(ch uint8, instrIDs ...uint32) []byte {
+	fr := wb.Frame(wire.MagicMBO).Channel(ch)
+	for _, id := range instrIDs {
+		fr = fr.Msg(wire.TypeSnapshotBegin, 36, func(b *wb.Body) {
+			b.U32(id) // Instrument ID
+			b.U64(0)  // Anchor Seq
+			b.U32(0)  // Total Orders
+			b.U32(0)  // Snapshot ID
+			b.U32(0)  // Last Instrument Seq
+			b.Pad(8)
+		}).Msg(wire.TypeSnapshotEnd, 20, func(b *wb.Body) {
+			b.U32(id) // Instrument ID
+			b.U64(0)  // Anchor Seq
+			b.U32(0)  // Snapshot ID
+		})
+	}
+	return fr.Bytes()
+}
+
+// seedEmptyBooks gives publisher A's instruments a trusted, empty book, the way a
+// subscriber gets one: from a complete snapshot group (seedBookFromSnapshot). A
+// first delta at Per-Instrument Seq 1 does not make a book trusted. The datagram
+// takes the next Sequence Number of A's snapshot port on the channel, which is 0
+// on a new engine, so a test's own snapshot datagrams can start at 1.
+func seedEmptyBooks(e *Engine, ch uint8, instrIDs ...uint32) {
+	var seq uint64
+	if pt, ok := e.ports[instanceKey{src: srcA, port: core.PortSnapshot, ch: ch}]; ok && pt.lastSeq != nil {
+		seq = *pt.lastSeq + 1
+	}
+	f, sf := wire.Decode(emptySnapshotGroups(ch, instrIDs...), wire.MagicMBO)
+	f.Header.Sequence = seq
+	e.Process(srcA, f, core.PortSnapshot, sf)
+	e.Flush()
+}
+
 // runMktdataSeq feeds a raw frame to the engine on the mktdata port with the given seq.
 func runMktdataSeq(e *Engine, raw []byte, seq uint64) {
 	f, sf := wire.Decode(raw, wire.MagicMBO)
@@ -206,6 +245,7 @@ func runMktdataSeq(e *Engine, raw []byte, seq uint64) {
 func seedGaplessHistory(e *Engine, ch uint8, instrID uint32, n uint32, startMktSeq uint64) uint64 {
 	// Bootstrap refdata so gateConsumer condition 1 (ready) is true.
 	reachedReadyMBO(e, ch, instrID, 0 /*priceBound=0*/, 1)
+	seedEmptyBooks(e, ch, instrID)
 
 	seq := startMktSeq
 	for i := uint32(1); i <= n; i++ {

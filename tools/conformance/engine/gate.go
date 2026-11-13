@@ -140,10 +140,14 @@ type instrTracker struct {
 	recoveryK    uint32
 	recoveryKSet bool
 	// bookTrusted is true when the order-id set for this instrument is considered
-	// complete and reliable: we have been tracking continuously without gaps since
-	// the beginning of the era (perSeq started at 1) or since a recovery snapshot.
-	// A per-instrument gap (DELTA.PERINSTR_DENSITY) clears this flag because missing
-	// deltas could have carried OrderAdd messages that would populate the live set.
+	// complete and reliable: a complete snapshot group seeded the book
+	// (seedBookFromSnapshot), and every delta since then continued the
+	// per-instrument series. Only a snapshot sets it. A first delta at
+	// Per-Instrument Seq 1 does not: it is the first delta of the era, and the book
+	// at the start of an era can hold resting orders that only a snapshot announces
+	// (market-by-order/spec.md, Cold Start). A per-instrument gap
+	// (DELTA.PERINSTR_DENSITY) clears this flag because missing deltas could have
+	// carried OrderAdd messages that would populate the live set.
 	// gateConsumer requires bookTrusted=true to elevate referential anomalies to Violation.
 	bookTrusted bool
 	// bookCorruptedByDup is true if a duplicate/late delta (perSeq <= lastInstrSeq)
@@ -444,9 +448,9 @@ func (e *Engine) snapPortBound() bool {
 // following hold:
 //  1. The instrument's refdata is ready() and the instrument is known to the channel
 //     (so we know the instrument exists and have its metadata).
-//  2. The per-instrument history for (ch, instrID) is trusted: we have been tracking
-//     continuously without per-instrument gaps since seq=1 or since a recovery
-//     snapshot (bookTrusted=true). A prior gap could have carried a missing OrderAdd.
+//  2. The per-instrument history for (ch, instrID) is trusted: a complete snapshot
+//     seeded the book, and every delta since then continued the series
+//     (bookTrusted=true). A prior gap could have carried a missing OrderAdd.
 //  3. The incoming perInstrSeq == lastInstrSeq+1 (no gap immediately before this msg).
 //  4. The instance's mktdata series is gapless (instanceGapless): a frame gap could
 //     have carried the missing delta.
@@ -735,11 +739,12 @@ func (e *Engine) applyDeltaSeq(ch uint8, instrID uint32, perSeq uint32, frameSeq
 						instrID, perSeq))
 			}
 			// When perSeq == recoveryK+1 the recovery sequence is correct and seq
-			// continuity is established. We intentionally do NOT set bookTrusted here:
-			// we don't process SnapshotOrder messages, so the live order-id set is
-			// empty, and setting bookTrusted would cause false REF.* violations for
-			// orders that existed in the snapshot. bookTrusted is set true only when
-			// we begin a fresh per-instrument sequence from seq=1.
+			// continuity is established. The recovery snapshot seeded the book at
+			// recoveryK (seedBookFromSnapshot), so any other first value means the
+			// seeded book is missing deltas.
+			if perSeq != t.recoveryK+1 {
+				t.bookTrusted = false
+			}
 			// Clear seenReset now that the first post-recovery delta has been consumed,
 			// so future unauthorized restarts to 1 are not suppressed by this flag.
 			t.seenReset = false
@@ -766,12 +771,13 @@ func (e *Engine) applyDeltaSeq(ch uint8, instrID uint32, perSeq uint32, frameSeq
 						fmt.Sprintf("instrument %d: first per-instrument seq after reset is %d (expected 1)",
 							instrID, perSeq))
 				}
-				// bookTrusted remains false: history is incomplete.
-			} else {
-				// perSeq == 1: this is a proper start (era-begin or post-reset with seq=1).
-				// The book is trusted from this point.
-				t.bookTrusted = true
+				// History is incomplete. A book that a snapshot seeded at K = 0 is
+				// missing the deltas before this one.
+				t.bookTrusted = false
 			}
+			// perSeq == 1 is a proper start, but it does not make the book trusted:
+			// the book at the start of the era can hold resting orders, and only a
+			// snapshot announces them (bookTrusted).
 			// Clear seenReset after the first post-reset delta so that future
 			// unauthorized restarts to 1 are not suppressed by stale seenReset.
 			t.seenReset = false
@@ -1185,8 +1191,81 @@ func (e *Engine) handleSnapEnd(m wire.Message, ch uint8, snapPortSeq uint64) {
 	// the oracle sees correct tracker state. Pass the full snapshot record.
 	e.runOracleForGroup(ch, open, snapPortSeq)
 
+	// Seed an untrusted book from the group. After the oracle, so that the oracle
+	// never compares a book with the snapshot it was seeded from.
+	e.seedBookFromSnapshot(ch, open)
+
 	// Close the group.
 	delete(e.mbo.openSnaps, ch)
+}
+
+// seedBookFromSnapshot builds the book of an instrument from a complete snapshot
+// group and makes it trusted, as market-by-order/spec.md, Cold Start steps 5 and
+// 6, prescribes. This is the only way a book becomes trusted.
+//
+// It acts only on a book that is not trusted. A trusted book is compared with the
+// snapshot by the oracle instead, and replacing it would hide what the oracle
+// reports.
+//
+// The group must be complete and clean: no structural violation (which includes a
+// Total Orders mismatch), no snapshot-port gap during the group, and no capture
+// loss since it opened. Otherwise the snapshot book can be missing orders.
+//
+// The book is as of the group's Last Instrument Seq K. The engine applies deltas
+// as they arrive and does not buffer them, so it seeds only where the delta
+// history lines up with K:
+//
+//   - The tracker is at K. Every delta up to K was applied, and none after it.
+//   - The tracker has no delta, and K is 0. No delta of the era came before the
+//     snapshot. The first delta must then be 1.
+//   - The tracker has no delta, and the group is the recovery snapshot of an
+//     InstrumentReset (recoveryKSet). RESET.NO_DANGLING_DELTAS_AT_OR_BELOW_ANCHOR
+//     grades the first delta against K, and applyDeltaSeq clears the trust if it
+//     is not K+1.
+//   - The tracker has no delta, and the instance's mktdata series is classified
+//     through the group's Anchor Seq. Every delta up to K came before this
+//     subscriber joined. The tracker moves to K, so the next delta must be K+1.
+//
+// When the tracker is past K, the deltas after K are already in the book, and the
+// book stays untrusted until a later group lines up.
+func (e *Engine) seedBookFromSnapshot(ch uint8, snap *openSnapshot) {
+	ok, moveToK := e.seedPlan(ch, snap)
+	if !ok {
+		return
+	}
+	dt := e.mbo.tracker(ch, snap.instrID)
+	if moveToK {
+		k := snap.lastInstrSeqK
+		dt.lastInstrSeq = &k
+	}
+	e.mbo.book.book(ch, snap.instrID).seed(snap.orders)
+	dt.bookTrusted = true
+	dt.bookCorruptedByDup = false
+}
+
+// seedPlan reports whether a closed snapshot group seeds the book of its
+// instrument (ok), and whether the seed moves the tracker to the group's K
+// (moveToK). seedBookFromSnapshot gives the conditions. The oracle reads it too,
+// to tell the group that seeds a book from a group that cannot.
+func (e *Engine) seedPlan(ch uint8, snap *openSnapshot) (ok, moveToK bool) {
+	if snap.structuralViolation || snap.dirty || e.captureLossSince(snap.captureEpoch) {
+		return false, false
+	}
+	dt := e.mbo.tracker(ch, snap.instrID)
+	if dt.bookTrusted {
+		return false, false
+	}
+	k := snap.lastInstrSeqK
+	switch {
+	case dt.lastInstrSeq != nil:
+		return *dt.lastInstrSeq == k, false
+	case k == 0 || dt.recoveryKSet:
+		// The first delta grades the seed: see applyDeltaSeq.
+		return true, false
+	case e.mbo.highestMktdataSeqSet && snap.anchorSeq <= e.mbo.highestMktdataSeq && !e.mktdataPending(ch):
+		return true, true
+	}
+	return false, false
 }
 
 // onSnapGroupComplete is called when a snapshot group is successfully closed

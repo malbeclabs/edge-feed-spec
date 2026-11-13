@@ -134,8 +134,8 @@ func describe(fs []core.Finding) string {
 }
 
 // twoReadyPubs returns an engine and publishers A and B, each with its own
-// reference data, and each with a trusted book: two orders added from
-// Per-Instrument Seq 1. A holds orders 1 and 3. B holds orders 2 and 4.
+// reference data, and each with a trusted book: an empty snapshot at Last
+// Instrument Seq 0, then two orders added from Per-Instrument Seq 1. A holds orders 1 and 3. B holds orders 2 and 4.
 // The two publishers' datagrams alternate, as they do on one socket.
 func twoReadyPubs(t *testing.T, eraA, eraB uint8) (*Engine, *allCapture, *mboPub, *mboPub) {
 	t.Helper()
@@ -143,6 +143,9 @@ func twoReadyPubs(t *testing.T, eraA, eraB uint8) (*Engine, *allCapture, *mboPub
 	a, b := newMBOPub(srcA, eraA), newMBOPub(srcB, eraB)
 	a.ready(e)
 	b.ready(e)
+	a.send(e, core.PortSnapshot, emptySnapshotGroups(instCh, instInstr))
+	b.send(e, core.PortSnapshot, emptySnapshotGroups(instCh, instInstr))
+	e.Flush()
 	a.add(e, 1, 1)
 	b.add(e, 1, 2)
 	a.add(e, 2, 3)

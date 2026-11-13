@@ -124,6 +124,15 @@ func (e *Engine) runOracleForGroup(ch uint8, snap *openSnapshot, snapPortSeq uin
 	}
 	dt := e.mbo.tracker(ch, instrID)
 	if !dt.bookTrusted {
+		// This group seeds the book (seedBookFromSnapshot runs after the oracle). A
+		// comparison with the book it seeds always matches, so it is not made. This
+		// is an instrument adopting its first snapshot baseline: cold_start, the
+		// routine reason, and not untrusted.
+		if ok, _ := e.seedPlan(ch, snap); ok {
+			e.unverifiable(key, snapPortSeq, core.ReasonColdStart,
+				fmt.Sprintf("instrument %d: this snapshot group seeds the book, so there is no book to compare it with", instrID))
+			return
+		}
 		// Cold start and a prior gap both land here and the tracker does not record
 		// which, so the reason says what is actually known — the history is not
 		// established — rather than guessing at a cause.
