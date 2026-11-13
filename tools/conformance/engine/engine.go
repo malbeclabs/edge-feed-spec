@@ -54,8 +54,16 @@ type Engine struct {
 	// refdata holds the reference-data set-state machine (Task 14 + 15).
 	// Lazily initialized on the first PortRefData frame.
 	refdata *refdataState
-	// mbo holds per-instrument MBO sequencing state (Task 18+).
-	// Lazily initialized on the first MBO mktdata frame.
+	// mbos holds the market-by-order state of each channel instance, keyed like the
+	// refdata state: (source IP address, Channel ID). Each instance mints its own
+	// Per-Instrument Seq, Snapshot ID, Anchor Seq and Reset Count, and its order
+	// flow is its own, so a subscriber MUST NOT apply two instances' messages to one
+	// state (market-by-order/spec.md, "Redundant Channel Instances"). selectMBO
+	// creates an entry on the first MBO frame of the instance.
+	mbos map[refdataKey]*mboState
+	// mbo is the state of the instance in front of the engine. It is per-datagram
+	// context, like curSrc: selectMBO sets it for each MBO frame, and the end-of-run
+	// checks set it for each instance they visit (eachMBOInstance).
 	mbo *mboState
 	// Market-by-price consumer state; lazily initialised by ensureMBP.
 	mbp *mbpState
@@ -306,6 +314,14 @@ func (e *Engine) evictOldestInstance() {
 		e.rep.TransportLoss(oldest.port)
 	}
 	delete(e.ports, oldest)
+	// The MBO state of the instance spans its three ports, so it goes with the last
+	// of them. The cap then bounds it too.
+	for _, p := range []core.Port{core.PortMktData, core.PortRefData, core.PortSnapshot} {
+		if _, ok := e.ports[instanceKey{src: oldest.src, port: p, ch: oldest.ch}]; ok {
+			return
+		}
+	}
+	delete(e.mbos, refdataKey{src: oldest.src, ch: oldest.ch})
 }
 
 // instancesOn lists the instances observed on a port, ordered by channel then
@@ -330,10 +346,11 @@ func (e *Engine) instancesOn(port core.Port) []instanceKey {
 // verifiability window.
 //
 // The OR across instances is deliberate and is the counterpart of what is NOT
-// rescoped: per-instrument and book state stay keyed by channel, so the state a
-// gated rule judges is fed by every instance of that channel and any one of them
-// losing datagrams can explain an anomaly in it. (The reference-data state is keyed
-// by instance, and its rules read their own instance's window.)
+// rescoped: the market-by-price per-instrument and book state stay keyed by
+// channel, so the state a gated rule judges is fed by every instance of that
+// channel and any one of them losing datagrams can explain an anomaly in it. (The
+// reference-data and market-by-order state is keyed by instance, and those rules
+// read their own instance's window: see refdataDirty and instanceGapless.)
 // Gating per instance there would report a Violation the loss could account for.
 // HEARTBEAT.CADENCE is the exception and gates on its own instance's window,
 // because its baseline is per instance too.
@@ -455,19 +472,17 @@ func (e *Engine) captureDirtyOn(port core.Port, ch uint8) bool {
 	return false
 }
 
-// mktdataPending reports whether any mktdata reorder buffer on this channel still
-// holds unclassified frames. Cross-port snapshot checks that compare a snapshot against
-// mktdata-derived state (SNAP.ANCHOR_IS_MKTDATA_SEQ, SNAP.LAST_INSTRUMENT_SEQ_
-// CONSISTENT_WITH_DELTAS) must downgrade to Unverifiable when this is true, even
-// on a gapless channel: a still-buffered mktdata frame could carry the anchor seq
-// or the deltas up to K, so the current mktdata state is not yet as-of-anchor (F3).
+// mktdataPending reports whether the mktdata reorder buffer of the channel instance in
+// front of the engine still holds unclassified frames. Cross-port snapshot checks that
+// compare a snapshot against mktdata-derived state (SNAP.ANCHOR_IS_MKTDATA_SEQ,
+// SNAP.LAST_INSTRUMENT_SEQ_CONSISTENT_WITH_DELTAS) must downgrade to Unverifiable when
+// this is true, even on a gapless channel: a still-buffered mktdata frame could carry
+// the anchor seq or the deltas up to K, so the current mktdata state is not yet
+// as-of-anchor (F3). Only the instance's own buffer can: the anchor and K of a
+// snapshot are values of the instance that sent it.
 func (e *Engine) mktdataPending(ch uint8) bool {
-	for k, pt := range e.ports {
-		if k.port == core.PortMktData && k.ch == ch && pt.buf.Len() > 0 {
-			return true
-		}
-	}
-	return false
+	pt, ok := e.ports[instanceKey{src: e.curSrc, port: core.PortMktData, ch: ch}]
+	return ok && pt.buf.Len() > 0
 }
 
 // classifyDrained hands a drained batch to the classifier one item at a time, keeping
@@ -556,13 +571,15 @@ func readyDeadlineTS(firstSendTS uint64, window time.Duration) uint64 {
 	return firstSendTS + w
 }
 
-// snapPortDirty reports whether the channel's snapshot verifiability window is
-// tainted (a snapshot-seq gap or transport corruption occurred this era). Used
-// by the SNAP.TOTAL_ORDERS_COUNT_MATCH under-count gate so a truncated snapshot
-// frame — whose header may not decode a channel — still downgrades the
-// under-count to Unverifiable rather than a false publisher Violation (F2).
+// snapPortDirty reports whether the snapshot verifiability window of the channel
+// instance in front of the engine is tainted (a snapshot-seq gap or transport
+// corruption occurred this era). Used by the SNAP.TOTAL_ORDERS_COUNT_MATCH
+// under-count gate so a truncated snapshot frame — whose header may not decode a
+// channel — still downgrades the under-count to Unverifiable rather than a false
+// publisher Violation (F2). markCorrupt taints every instance on the port for such
+// a frame, so the instance's own window sees it.
 func (e *Engine) snapPortDirty(ch uint8) bool {
-	return e.dirtyOn(core.PortSnapshot, ch)
+	return !e.instanceGapless(core.PortSnapshot, ch)
 }
 
 // markCorrupt records one transport corruption finding on a port. ch is the
@@ -584,12 +601,18 @@ func (e *Engine) markCorrupt(port core.Port, ruleID string, ch *uint8) {
 	// currently-open snapshot group for this channel (if any). A truncated
 	// snapshot frame can drop trailing SnapshotOrders without leaving a
 	// snapshot-seq gap, so without this the under-count would falsely
-	// classify as a publisher Violation rather than Unverifiable (F2). Without
-	// a Channel ID, every open group.
-	if port == core.PortSnapshot && e.mbo != nil {
-		for c, open := range e.mbo.openSnaps {
-			if open != nil && (ch == nil || c == *ch) {
-				open.dirty = true
+	// classify as a publisher Violation rather than Unverifiable (F2). Every
+	// instance of the channel, and without a Channel ID every open group: the
+	// taint above is port-wide for the same reason.
+	if port == core.PortSnapshot {
+		for k, s := range e.mbos {
+			if ch != nil && k.ch != *ch {
+				continue
+			}
+			for _, open := range s.openSnaps {
+				if open != nil {
+					open.dirty = true
+				}
 			}
 		}
 	}
@@ -654,29 +677,35 @@ func (e *Engine) Process(src netip.Addr, f *wire.Frame, port core.Port, sf []wir
 		if res.afterStragglers {
 			pt.taint()
 		}
-		// Reset Count is channel-wide. The FIRST port (mktdata, refdata, OR snapshot)
-		// to observe the era advance wipes all per-instrument MBO state, idempotently
-		// (onResetCountForEra is a no-op for ports that advance into the same era
-		// later). This keeps the three independent ports consistent: new-era frames
-		// on ANY port are never checked against stale old-era trackers. Handling only
-		// the mktdata-leads case (the prior approach) left a false-positive window
-		// when the snapshot port observed the reset first (F4).
+		// Reset Count is shared by the three ports of one channel instance. The FIRST
+		// port (mktdata, refdata, OR snapshot) to observe the era advance wipes the
+		// instance's per-instrument MBO state, idempotently (onResetCountForEra is a
+		// no-op for ports that advance into the same era later). This keeps the three
+		// independent ports consistent: new-era frames on ANY port are never checked
+		// against stale old-era trackers. Handling only the mktdata-leads case (the
+		// prior approach) left a false-positive window when the snapshot port observed
+		// the reset first (F4). The other instances of the channel keep their state:
+		// one publisher's restart says nothing about the others (market-by-order/spec.md,
+		// "Redundant Channel Instances").
 		// MBP handles the reset from classify instead (see mbpObserveEra): it must
 		// also see the era a port *seeds* without advancing, which never reaches here.
 		if e.cfg.Feed == core.FeedMBO {
-			e.ensureMBO()
-			wiped := e.mbo.onResetCountForEra(res.newEra)
+			wiped := e.selectMBO(f.Header.ChannelID).onResetCountForEra(res.newEra)
 			// If a NON-snapshot port led the reset and actually wiped MBO state, any
 			// old-era snapshot group was just dropped and old-era SnapshotOrder/End
-			// frames may still be in flight on the snapshot port. Taint the snapshot
-			// port so orphan-grouping checks (which gate on gateDetectorSnap) treat
-			// those stragglers as Unverifiable rather than a false BEGIN_ORDER_END
+			// frames may still be in flight on the snapshot port. Taint the instance's
+			// snapshot port so orphan-grouping checks (which gate on instanceGapless)
+			// treat those stragglers as Unverifiable rather than a false BEGIN_ORDER_END
 			// Violation, until the snapshot port observes its own era advance (which
 			// clears dirtyWindow). When the snapshot port itself leads the reset it has
 			// already advanced its own era, so the `port != PortSnapshot` guard avoids
 			// re-tainting it (which would wrongly mark its clean new-era groups). (F4)
+			// Only this instance's snapshot port: no other instance reset, and no other
+			// instance's datagrams are stragglers of this era.
 			if wiped && port != core.PortSnapshot {
-				e.taintOn(core.PortSnapshot, f.Header.ChannelID)
+				if sp, ok := e.ports[instanceKey{src: src, port: core.PortSnapshot, ch: f.Header.ChannelID}]; ok {
+					sp.taint()
+				}
 			}
 			// FRAME.MKTDATA_SEQ_START: on a Reset Count change, the mktdata-port
 			// Sequence Number must restart at 0 (this is a mktdata-port rule only).
