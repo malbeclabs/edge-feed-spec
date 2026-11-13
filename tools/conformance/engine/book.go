@@ -45,7 +45,11 @@ package engine
 //     subsequent execute/cancel messages for the same ID.
 //   - Trade with TradeID == 0: exempt from EXEC_GROUPING.
 
-import "errors"
+import (
+	"errors"
+	"maps"
+	"slices"
+)
 
 // The per-instrument limits of the idWindow sets. A full window costs about 68
 // bytes for each ID of its limit (measured: the map, and a queue array of up to
@@ -186,6 +190,20 @@ func (bk *instrBook) applyOrderAddFull(orderID uint64, sourceID uint16, side uin
 	}
 	bk.removed.remove(orderID)
 	return nil
+}
+
+// seed replaces the live set with the orders of a complete snapshot group, as a
+// subscriber builds its book in market-by-order/spec.md, Cold Start step 5. A
+// snapshot carries no Source ID, so a seeded order has Source ID 0, which
+// FIELD.SOURCE_ID_CONSISTENCY reads as unknown. The removed, hidden and Trade ID
+// windows stay: they record what the deltas did, and the snapshot does not
+// contradict that.
+func (bk *instrBook) seed(orders map[uint64]snapOrderRecord) {
+	clear(bk.live)
+	for _, id := range slices.Sorted(maps.Keys(orders)) {
+		o := orders[id]
+		_ = bk.applyOrderAddFull(id, 0, o.side, o.price, o.qty, o.orderFlags, o.enterTS)
+	}
 }
 
 // applyOrderExecute decrements the resting order's remaining qty by execQty and
