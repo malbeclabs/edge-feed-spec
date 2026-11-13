@@ -33,7 +33,6 @@ package engine
 import (
 	"cmp"
 	"fmt"
-	"maps"
 	"net/netip"
 	"slices"
 	"time"
@@ -255,19 +254,18 @@ type refdataKey struct {
 	ch  uint8
 }
 
+// compareRefdataKeys orders keys by Channel ID, then by source address.
+func compareRefdataKeys(a, b refdataKey) int {
+	if c := cmp.Compare(a.ch, b.ch); c != 0 {
+		return c
+	}
+	return a.src.Compare(b.src)
+}
+
 // refdataState is the engine-level holder of per-instance refdata state.
 type refdataState struct {
 	e        *Engine
 	channels map[refdataKey]*channelRefdataState
-	// bumped is the definition set last passed to mboState.onManifestBump for each
-	// Channel ID, and the instance that passed it; see notifyMBO.
-	bumped map[uint8]bumpedSet
-}
-
-// bumpedSet is one set passed to mboState.onManifestBump, and its instance.
-type bumpedSet struct {
-	k   refdataKey
-	ids map[uint32]struct{}
 }
 
 // newRefdataState creates a refdataState bound to the given engine.
@@ -275,7 +273,6 @@ func newRefdataState(e *Engine) *refdataState {
 	return &refdataState{
 		e:        e,
 		channels: make(map[refdataKey]*channelRefdataState),
-		bumped:   make(map[uint8]bumpedSet),
 	}
 }
 
@@ -344,12 +341,7 @@ func (rs *refdataState) keys() []refdataKey {
 	for k := range rs.channels {
 		keys = append(keys, k)
 	}
-	slices.SortFunc(keys, func(a, b refdataKey) int {
-		if c := cmp.Compare(a.ch, b.ch); c != 0 {
-			return c
-		}
-		return a.src.Compare(b.src)
-	})
+	slices.SortFunc(keys, compareRefdataKeys)
 	return keys
 }
 
@@ -389,25 +381,19 @@ func (rs *refdataState) drop(k refdataKey) {
 	delete(rs.e.sessionEnd, k)
 }
 
-// notifyMBO passes a newly frozen definition set to the MBO per-instrument state,
-// which prunes the trackers of instruments that left the set and discards the
-// channel's open snapshot group.
+// notifyMBO passes a newly frozen definition set to the MBO per-instrument state of
+// the same instance, which prunes the trackers of instruments that left the set and
+// discards the instance's open snapshot group.
 //
-// **Not for another instance's equal set.** Each instance freezes its own set. Two
-// paths that serve one channel freeze the same set, and the second freeze is not a
-// change to the channel's set: passing it on would discard the open snapshot group
-// of the first path, and the rest of that group would read as
-// SNAP.BEGIN_ORDER_END_GROUPING violations. One instance re-freezing its set still
-// passes it on, as before.
+// **Only the instance's own MBO state.** Each instance freezes its own set, and the
+// MBO state is keyed on the instance too. Another path that freezes a set of the
+// same channel does not touch this instance's state: passing it on would discard
+// this instance's open snapshot group, and the rest of that group would read as
+// SNAP.BEGIN_ORDER_END_GROUPING violations.
 func (rs *refdataState) notifyMBO(k refdataKey, set map[uint32]struct{}) {
-	if rs.e.mbo == nil {
-		return
+	if s := rs.e.mbos[k]; s != nil {
+		s.onManifestBump(k.ch, set)
 	}
-	if prev, ok := rs.bumped[k.ch]; ok && prev.k != k && maps.Equal(prev.ids, set) {
-		return
-	}
-	rs.bumped[k.ch] = bumpedSet{k: k, ids: set}
-	rs.e.mbo.onManifestBump(k.ch, set)
 }
 
 // channelKnown returns two booleans: (ready, known).

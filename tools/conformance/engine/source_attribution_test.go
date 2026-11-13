@@ -215,6 +215,10 @@ func TestResetStartViolationNamesTheResettingPublisher(t *testing.T) {
 // In each case A and B share one Channel ID, and each path is correct on its
 // own. The violation comes from the merge, and B's datagram completes it. The
 // finding must name no publisher, because B did not cause it.
+//
+// The market-by-price state is the counter the engine still keys on the channel.
+// The market-by-order state is keyed on the instance, so two correct
+// market-by-order paths produce no finding to attribute (mbo_instance_test.go).
 func TestChannelKeyedCounterNamesNoPublisher(t *testing.T) {
 	type step struct {
 		src  netip.Addr
@@ -222,7 +226,6 @@ func TestChannelKeyedCounterNamesNoPublisher(t *testing.T) {
 		seq  uint64
 		raw  []byte
 	}
-	const instrID = uint32(20)
 	for _, tc := range []struct {
 		ruleID string
 		feed   core.Feed
@@ -230,21 +233,12 @@ func TestChannelKeyedCounterNamesNoPublisher(t *testing.T) {
 		steps  []step
 	}{
 		{
-			// The last Batch ID is keyed on the channel. A sends 10 and B sends 5.
-			ruleID: "BATCH.ID_MONOTONIC", feed: core.FeedMBO, magic: wire.MagicMBO,
+			// The market-by-price per-instrument sequence is keyed on the channel and
+			// the instrument. A sends seq 1. B sends seq 3, the next of its own series.
+			ruleID: "MBP.DELTA.PERINSTR_DENSITY", feed: core.FeedMBP, magic: wire.MagicMBP,
 			steps: []step{
-				{srcA, core.PortMktData, 1, buildBatchBoundaryFrame(chArmA, 10)},
-				{srcB, core.PortMktData, 1, buildBatchBoundaryFrame(chArmA, 5)},
-			},
-		},
-		{
-			// The per-instrument sequence is keyed on the channel and the instrument.
-			// A sends seq 1 and seq 2. B sends a different copy of seq 2.
-			ruleID: "DELTA.PERINSTR_DUP_DIVERGENT", feed: core.FeedMBO, magic: wire.MagicMBO,
-			steps: []step{
-				{srcA, core.PortMktData, 1, buildOrderAddFrameWithPayload(chArmA, instrID, 1, 100)},
-				{srcA, core.PortMktData, 2, buildOrderAddFrameWithPayload(chArmA, instrID, 2, 200)},
-				{srcB, core.PortMktData, 1, buildOrderAddFrameWithPayload(chArmA, instrID, 2, 999)},
+				{srcA, core.PortMktData, 1, newTape().delta(1, mbpClearSideBid, mbpActionNew, 100, 5).steps[0].raw},
+				{srcB, core.PortMktData, 1, newTape().delta(3, mbpClearSideBid, mbpActionChange, 100, 6).steps[0].raw},
 			},
 		},
 	} {

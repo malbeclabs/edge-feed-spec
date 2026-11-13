@@ -14,12 +14,19 @@ package engine
 //
 // State layout:
 //
-//	instrTrackerKey  (channelID, instrumentID) → instrTracker
+//	Engine.mbos      (source address, channelID) → mboState, one per channel instance
+//	instrTrackerKey  (channelID, instrumentID) → instrTracker, inside one mboState
 //	instrTracker     { lastInstrSeq *uint32, status }
+//
+// One mboState per channel instance, never per channel: two publishers that serve
+// one channel each mint their own Per-Instrument Seq, Snapshot ID, Anchor Seq and
+// Reset Count, and each has its own order flow (market-by-order/spec.md,
+// "Redundant Channel Instances"). The instance's gate is its own window too; see
+// instanceGapless.
 //
 // Era-boundary semantics:
 //
-//	onResetCount()                  — wipe ALL per-instrument trackers.
+//	onResetCount()                  — wipe ALL per-instrument trackers of the instance.
 //	onManifestBump(ch, survivors)   — drop trackers for removed instruments on
 //	                                  channel ch; retain survivors' trackers.
 //	onInstrumentReset(ch, instrID)  — reset only that instrument's tracker and
@@ -31,6 +38,7 @@ import (
 	"fmt"
 	"hash/maphash"
 	"maps"
+	"net/netip"
 	"slices"
 
 	"github.com/malbeclabs/edge-feed-spec/tools/conformance/core"
@@ -206,21 +214,22 @@ type oracleSuspect struct {
 	count     int    // number of consecutive cycles with this exact signature
 }
 
-// mboState holds all per-instrument tracker state for an engine run.
-// It is lazily initialized by checkMBO.
+// mboState holds all per-instrument tracker state of one channel instance.
+// selectMBO creates it on the instance's first MBO frame.
 type mboState struct {
 	trackers map[instrTrackerKey]*instrTracker
 	// snapTrackers holds per-(channel, instrument) snapshot counters.
 	snapTrackers map[instrTrackerKey]*snapTracker
-	// openSnaps holds at most one in-progress snapshot group per channel.
-	// Keyed by channelID; nil value means no open group on that channel.
+	// openSnaps holds at most one in-progress snapshot group per channel instance.
+	// Keyed by channelID, which is the instance's own; nil value means no open group.
 	openSnaps map[uint8]*openSnapshot
 	// lastBatchID tracks the most recent BatchBoundary Batch ID for (channel).
 	// Key is channelID; value is last seen Batch ID and whether it was set.
 	lastBatchID    map[uint8]uint32
 	lastBatchIDSet map[uint8]bool
-	// highestMktdataSeq is the highest mktdata-port frame Sequence observed.
-	// Used for SNAP.ANCHOR_IS_MKTDATA_SEQ.
+	// highestMktdataSeq is the highest mktdata-port frame Sequence the instance
+	// sent. Used for SNAP.ANCHOR_IS_MKTDATA_SEQ: an Anchor Seq is a value of the
+	// mktdata series of the instance that sent the snapshot.
 	highestMktdataSeq    uint64
 	highestMktdataSeqSet bool
 	// book holds the per-instrument live order-id set (Task 20).
@@ -232,8 +241,8 @@ type mboState struct {
 	// oracleSuspects holds per-(channel, instrument) oracle suspect state (Task 26).
 	oracleSuspects map[instrTrackerKey]*oracleSuspect
 	// resetEra/resetEraSet track the Reset Count era that onResetCountForEra last
-	// wiped state for, so a channel-wide reset observed on ANY port wipes exactly
-	// once even though all three ports advance their era independently (F4).
+	// wiped state for, so a reset of the instance observed on ANY of its ports wipes
+	// exactly once even though all three ports advance their era independently (F4).
 	resetEra    uint8
 	resetEraSet bool
 }
@@ -374,24 +383,42 @@ func (s *mboState) onInstrumentReset(ch uint8, instrID uint32, newAnchorSeq uint
 // --- Engine integration ---
 
 // gateDetector returns true when the channel's mktdata frame-seq series was
-// contiguous across the relevant window (no forward gaps observed). When it
-// returns false, a per-instrument anomaly should be reported as Unverifiable
-// rather than Violation, because the missing frames could have carried the
-// missing deltas.
+// contiguous across the relevant window (no forward gaps observed), on every
+// instance of the channel. It is the gate of state keyed on the channel; see
+// Engine.dirtyOn for why any instance of the channel gates it.
 //
 // We consult the dirtyWindow flag of the channel's mktdata instances. The flag is
 // set in engine.go classify() whenever a forward gap is declared (res.gapBefore)
 // and cleared on era advance (advanceEra), so it reflects only gaps within the
-// current era. See Engine.dirtyOn for why any instance of the channel gates it.
+// current era.
 func (e *Engine) gateDetector(ch uint8) bool {
 	return !e.dirtyOn(core.PortMktData, ch)
 }
 
 // gateDetectorSnap returns true when the channel's snapshot frame-seq series was
-// contiguous (no forward gaps). Snapshot-counter rules are gated on snapshot-port
-// seq contiguity.
+// contiguous (no forward gaps), on every instance of the channel. The
+// market-by-price snapshot rules gate on it.
 func (e *Engine) gateDetectorSnap(ch uint8) bool {
 	return !e.dirtyOn(core.PortSnapshot, ch)
+}
+
+// instanceGapless returns true when the frame-seq series of the channel instance in
+// front of the engine (Engine.curSrc, port, ch) was contiguous in the current era.
+// When it returns false, an anomaly in the instance's state is reported as
+// Unverifiable rather than Violation, because the missing frames could have carried
+// what explains it.
+//
+// It is the gate of the market-by-order rules. Their state is keyed on the instance,
+// so only the instance's own loss can explain an anomaly in it: a datagram that
+// another publisher of the channel lost cannot remove an OrderAdd from this
+// publisher's book. Gating on the channel would let one lossy publisher turn every
+// other publisher's findings into Unverifiable for the rest of its era.
+//
+// A transport finding taints every instance on its port (taintPortWide), so a
+// datagram whose Channel ID is not readable still reaches this gate.
+func (e *Engine) instanceGapless(port core.Port, ch uint8) bool {
+	pt, ok := e.ports[instanceKey{src: e.curSrc, port: port, ch: ch}]
+	return !ok || !pt.dirtyWindow
 }
 
 // snapPortBound returns true when at least one snapshot-port frame has been
@@ -421,8 +448,8 @@ func (e *Engine) snapPortBound() bool {
 //     continuously without per-instrument gaps since seq=1 or since a recovery
 //     snapshot (bookTrusted=true). A prior gap could have carried a missing OrderAdd.
 //  3. The incoming perInstrSeq == lastInstrSeq+1 (no gap immediately before this msg).
-//  4. The mktdata channel is gapless (gateDetector): a frame gap could have carried
-//     the missing delta.
+//  4. The instance's mktdata series is gapless (instanceGapless): a frame gap could
+//     have carried the missing delta.
 //
 // If any condition is false, the anomaly is Unverifiable, never Violation.
 func (e *Engine) gateConsumer(ch uint8, instrID uint32, perInstrSeq uint32) bool {
@@ -449,14 +476,37 @@ func (e *Engine) gateConsumer(ch uint8, instrID uint32, perInstrSeq uint32) bool
 		return false
 	}
 	// Condition 4: mktdata channel gapless.
-	return e.gateDetector(ch)
+	return e.instanceGapless(core.PortMktData, ch)
 }
 
-// ensureMBO lazily initialises e.mbo.
-func (e *Engine) ensureMBO() {
-	if e.mbo == nil {
-		e.mbo = newMBOState()
+// selectMBO points e.mbo at the state of the channel instance in front of the
+// engine, (Engine.curSrc, ch), and returns it. It creates the state on the
+// instance's first MBO frame.
+func (e *Engine) selectMBO(ch uint8) *mboState {
+	if e.mbos == nil {
+		e.mbos = make(map[refdataKey]*mboState)
 	}
+	k := refdataKey{src: e.curSrc, ch: ch}
+	s, ok := e.mbos[k]
+	if !ok {
+		s = newMBOState()
+		e.mbos[k] = s
+	}
+	e.mbo = s
+	return s
+}
+
+// eachMBOInstance calls fn once for each market-by-order channel instance, in
+// (Channel ID, source address) order, with that instance in front of the engine:
+// curSrc is its address and e.mbo is its state. The end-of-run checks use it,
+// because no datagram is in front of them. It clears both before it returns.
+func (e *Engine) eachMBOInstance(fn func(k refdataKey, s *mboState)) {
+	keys := slices.SortedFunc(maps.Keys(e.mbos), compareRefdataKeys)
+	for _, k := range keys {
+		e.curSrc, e.mbo = k.src, e.mbos[k]
+		fn(k, e.mbo)
+	}
+	e.curSrc, e.mbo = netip.Addr{}, nil
 }
 
 // checkMBO is the per-feed MBO validator, invoked from Engine.classify for
@@ -490,7 +540,7 @@ func (e *Engine) ensureMBO() {
 //
 // InstrumentReset (0x14) messages call onInstrumentReset to wipe the tracker.
 func (e *Engine) checkMBO(f *wire.Frame, ch uint8) {
-	e.ensureMBO()
+	e.selectMBO(ch)
 	frameSeq := f.Header.Sequence
 
 	// Track the highest mktdata-port frame Sequence for SNAP.ANCHOR_IS_MKTDATA_SEQ.
@@ -526,7 +576,7 @@ func (e *Engine) checkMBO(f *wire.Frame, ch uint8) {
 			// Trade body has no per-instrument seq (Body[8:16] = SourceTimestamp).
 			// Gate on mktdata channel gapless + refdata ready + bookTrusted.
 			gatedTrade := false
-			if e.gateDetector(ch) && e.refdata != nil {
+			if e.instanceGapless(core.PortMktData, ch) && e.refdata != nil {
 				if _, ok := e.refdata.defInfoFor(ch, instrID); ok {
 					t := e.mbo.tracker(ch, instrID)
 					gatedTrade = t.bookTrusted
@@ -562,7 +612,7 @@ func (e *Engine) checkBatchIDMonotonic(ch uint8, frameSeq uint64, m wire.Message
 		last := e.mbo.lastBatchID[ch]
 		if batchID < last {
 			st := core.Violation
-			if !e.gateDetector(ch) {
+			if !e.instanceGapless(core.PortMktData, ch) {
 				st = core.Unverifiable
 			}
 			e.Emit("BATCH.ID_MONOTONIC", st, core.PortMktData, frameSeq, ch, 0,
@@ -618,7 +668,7 @@ func (e *Engine) checkBatchAtomicityConsistency(ch uint8) {
 		}
 		return cmp.Compare(a.orderID, b.orderID)
 	})
-	gated := e.gateDetector(ch)
+	gated := e.instanceGapless(core.PortMktData, ch)
 	for _, o := range orphans {
 		e.Emit("BATCH.ATOMICITY_CONSISTENCY", statusFor(gated), core.PortMktData, 0, ch, o.instrID,
 			fmt.Sprintf("instrument %d: live order %d has remaining=0 at BatchBoundary (orphan)",
@@ -632,7 +682,7 @@ func (e *Engine) checkBatchAtomicityConsistency(ch uint8) {
 // findings as appropriate. frameSeq is the mktdata frame's Sequence Number.
 func (e *Engine) applyDeltaSeq(ch uint8, instrID uint32, perSeq uint32, frameSeq uint64, m wire.Message) {
 	t := e.mbo.tracker(ch, instrID)
-	gapless := e.gateDetector(ch)
+	gapless := e.instanceGapless(core.PortMktData, ch)
 	h := perDeltaPayloadHash(m)
 
 	// Task 22: RESET.SNAPSHOT_FOLLOWS — premature delta resumption.
@@ -647,7 +697,7 @@ func (e *Engine) applyDeltaSeq(ch uint8, instrID uint32, perSeq uint32, frameSeq
 		if !e.snapPortBound() {
 			st = core.NA
 		} else {
-			gaplessSnap := e.gateDetectorSnap(ch)
+			gaplessSnap := e.instanceGapless(core.PortSnapshot, ch)
 			st = core.Violation
 			if !gapless || !gaplessSnap {
 				st = core.Unverifiable
@@ -844,7 +894,7 @@ func (e *Engine) applyDeltaSeq(ch uint8, instrID uint32, perSeq uint32, frameSeq
 //   - SNAP.EMPTY_BOOK_WELL_FORMED
 //   - SNAP.ORDER_PRICE_BOUND
 func (e *Engine) checkMBOSnapshot(f *wire.Frame, ch uint8, snapPortSeq uint64) {
-	e.ensureMBO()
+	e.selectMBO(ch)
 
 	// Detect intra-group snapshot-port seq gaps by comparing snapPortSeq with
 	// the group's lastSnapPortSeq. This is more precise than the era-wide
@@ -891,8 +941,8 @@ func (e *Engine) handleSnapBegin(m wire.Message, ch uint8, snapPortSeq uint64) {
 	lastInstrSeq := snapshotBeginLastInstrumentSeq(m)
 	totalOrders := snapshotBeginTotalOrders(m)
 
-	gapless := e.gateDetectorSnap(ch)
-	gaplessMkt := e.gateDetector(ch)
+	gapless := e.instanceGapless(core.PortSnapshot, ch)
+	gaplessMkt := e.instanceGapless(core.PortMktData, ch)
 
 	// SNAP.ANCHOR_IS_MKTDATA_SEQ: anchor must be drawn from the mktdata
 	// series (≤ the highest mktdata seq observed), never exceed it.
@@ -962,7 +1012,7 @@ func (e *Engine) handleSnapOrder(m wire.Message, ch uint8, snapPortSeq uint64) {
 	// SNAP.BEGIN_ORDER_END_GROUPING: order arrived without a preceding Begin.
 	if open == nil {
 		st := core.Violation
-		if !e.gateDetectorSnap(ch) {
+		if !e.instanceGapless(core.PortSnapshot, ch) {
 			st = core.Unverifiable
 		}
 		e.Emit("SNAP.BEGIN_ORDER_END_GROUPING", st, core.PortSnapshot, snapPortSeq, ch, 0,
@@ -1071,7 +1121,7 @@ func (e *Engine) handleSnapEnd(m wire.Message, ch uint8, snapPortSeq uint64) {
 	// SNAP.BEGIN_ORDER_END_GROUPING: End arrived without a preceding Begin.
 	if open == nil {
 		st := core.Violation
-		if !e.gateDetectorSnap(ch) {
+		if !e.instanceGapless(core.PortSnapshot, ch) {
 			st = core.Unverifiable
 		}
 		e.Emit("SNAP.BEGIN_ORDER_END_GROUPING", st, core.PortSnapshot, snapPortSeq, ch, endInstrID,
@@ -1158,7 +1208,7 @@ func (e *Engine) onSnapGroupComplete(ch uint8, instrID uint32, anchorSeq uint64,
 	// Gate: requires BOTH the snapshot port to be gapless (dirty==false) AND the
 	// mktdata port to be gapless (gateDetector). If either has a gap → Unverifiable.
 	if dt.awaitingRecovery {
-		gapless := !dirty && e.gateDetector(ch)
+		gapless := !dirty && e.instanceGapless(core.PortMktData, ch)
 		// RESET.SNAPSHOT_FOLLOWS passes here, and here is the only place it can: a
 		// recovery snapshot arrived after the reset, which is the whole requirement —
 		// whether its anchor is right is the *other* rule's business, so this passes
@@ -1245,10 +1295,15 @@ func (e *Engine) onSnapGroupComplete(ch uint8, instrID uint32, anchorSeq uint64,
 // snapshot port had a gap during the group, it is Unverifiable (loss could have
 // carried the missing SnapshotEnd); otherwise it is a Violation.
 func (e *Engine) flushOpenSnaps() {
-	if e.mbo == nil {
-		return
-	}
-	for ch, open := range e.mbo.openSnaps {
+	e.eachMBOInstance(func(_ refdataKey, s *mboState) {
+		e.flushInstanceOpenSnaps(s)
+	})
+}
+
+// flushInstanceOpenSnaps is flushOpenSnaps for the instance in front of the engine.
+func (e *Engine) flushInstanceOpenSnaps(s *mboState) {
+	for _, ch := range slices.Sorted(maps.Keys(s.openSnaps)) {
+		open := s.openSnaps[ch]
 		if open == nil {
 			continue
 		}
@@ -1266,7 +1321,7 @@ func (e *Engine) flushOpenSnaps() {
 			fmt.Sprintf("instrument %d: SnapshotBegin (snapshot id %d) never followed by SnapshotEnd (end of stream)",
 				open.instrID, open.snapshotID))
 	}
-	clear(e.mbo.openSnaps)
+	clear(s.openSnaps)
 }
 
 // checkResetSnapshotFollows emits RESET.SNAPSHOT_FOLLOWS for any instrument that
@@ -1277,16 +1332,21 @@ func (e *Engine) flushOpenSnaps() {
 // Unverifiable — the missing recovery snapshot could have been in the gap.
 // Both the mktdata port and snapshot port must be gapless for Violation.
 func (e *Engine) checkResetSnapshotFollows() {
-	if e.mbo == nil {
-		return
-	}
+	e.eachMBOInstance(func(_ refdataKey, s *mboState) {
+		e.checkInstanceResetSnapshotFollows(s)
+	})
+}
+
+// checkInstanceResetSnapshotFollows is checkResetSnapshotFollows for the instance
+// in front of the engine.
+func (e *Engine) checkInstanceResetSnapshotFollows(s *mboState) {
 	// F5: if the snapshot port has never been seen (unbound), we cannot determine
 	// whether a recovery snapshot was emitted. Downgrade to NA rather than firing
 	// Violation or Unverifiable — the subscriber simply has not observed the
 	// snapshot port (cold start or not part of the capture).
 	snapBound := e.snapPortBound()
-	for _, key := range sortedTrackerKeys(e.mbo.trackers) {
-		dt := e.mbo.trackers[key]
+	for _, key := range sortedTrackerKeys(s.trackers) {
+		dt := s.trackers[key]
 		if !dt.awaitingRecovery {
 			continue
 		}
@@ -1295,7 +1355,7 @@ func (e *Engine) checkResetSnapshotFollows() {
 			st = core.NA
 		} else {
 			st = core.Violation
-			if !e.gateDetector(key.channelID) || !e.gateDetectorSnap(key.channelID) {
+			if !e.instanceGapless(core.PortMktData, key.channelID) || !e.instanceGapless(core.PortSnapshot, key.channelID) {
 				st = core.Unverifiable
 			}
 		}
@@ -1311,9 +1371,9 @@ func (e *Engine) checkResetSnapshotFollows() {
 // cycles. Called from Engine.EndRun.
 //
 // A "cycle" is gauged by maxSnapCycle: the highest snapCount observed across all
-// instruments. When maxSnapCycle ≥ 2, other instruments have been snapshotted at
-// least twice, so the snapshot port has been active long enough that a missing
-// instrument is a publisher fault.
+// instruments of the instance. When maxSnapCycle ≥ 2, other instruments have been
+// snapshotted at least twice, so the snapshot port has been active long enough that
+// a missing instrument is a publisher fault.
 //
 // Gate: if the snapshot port has a dirty window, downgrade to Unverifiable.
 // Conservative: only fires when refdata is ready and the instrument is in the
@@ -1324,62 +1384,71 @@ func (e *Engine) checkResetSnapshotFollows() {
 // shorter than two cycles, a channel whose refdata never converged) are far more
 // common than full coverage and used to be indistinguishable from it. See
 // engine/denominator.go.
+//
+// The rule judges each channel instance, on its own snapshot cycle and its own
+// definition set: each publisher of a channel runs its own round robin. Only the
+// channels that have reference data are judged, as before.
 func (e *Engine) checkRoundRobinCoversManifest() {
-	if e.mbo == nil || e.refdata == nil {
-		// No manifest and no snapshot state: there is no instrument set to iterate, so
-		// there are no opportunities to account for — not one skipped opportunity.
+	if e.refdata == nil {
+		// No manifest: there is no instrument set to iterate, so there are no
+		// opportunities to account for — not one skipped opportunity.
 		return
 	}
+	withRefdata := make(map[uint8]bool)
+	for _, k := range e.refdata.keys() {
+		withRefdata[k.ch] = true
+	}
+	e.eachMBOInstance(func(k refdataKey, s *mboState) {
+		if withRefdata[k.ch] {
+			e.checkInstanceRoundRobin(k.ch, s)
+		}
+	})
+}
+
+// checkInstanceRoundRobin is checkRoundRobinCoversManifest for the instance in
+// front of the engine.
+func (e *Engine) checkInstanceRoundRobin(ch uint8, s *mboState) {
 	// Fewer than 2 clean cycles observed — conservative, this rule does not judge. The
 	// instruments are still enumerated below and reported, because a capture too short
 	// to hold two cycles must not read as one where every instrument was covered.
-	enoughCycles := e.mbo.maxSnapCycle >= 2
-	// Iterate over all ready channels and check each instrument in the manifest.
-	// One channel can have more than one refdata instance; the rule judges the
-	// channel once, on the set forChannel chooses (EndRun has no datagram in front
-	// of it, so that is the instance that sent refdata most recently).
-	var chans []uint8
-	for _, k := range e.refdata.keys() {
-		if len(chans) == 0 || chans[len(chans)-1] != k.ch {
-			chans = append(chans, k.ch)
-		}
+	enoughCycles := s.maxSnapCycle >= 2
+	// The definition set is the one forChannel chooses for the instance in front of
+	// the engine: its own, or, if its address sent no refdata, the set of the
+	// instance that sent refdata most recently.
+	cs := e.refdata.forChannel(ch)
+	if !channelReady(cs) {
+		// The manifest for this channel never completed, so its instrument set is
+		// not knowable. Reported once for the instance rather than silently: a
+		// channel whose refdata never converged is exactly the case where this
+		// rule's silence would read as coverage.
+		e.unverified("SNAP.ROUND_ROBIN_COVERS_MANIFEST", core.ReasonColdStart, core.PortSnapshot, 0, ch, 0,
+			fmt.Sprintf("channel %d: reference data never reached ready, so the manifest set is unknown", ch))
+		return
 	}
-	for _, ch := range chans {
-		cs := e.refdata.forChannel(ch)
-		if !channelReady(cs) {
-			// The manifest for this channel never completed, so its instrument set is
-			// not knowable. Reported once for the channel rather than silently: a
-			// channel whose refdata never converged is exactly the case where this
-			// rule's silence would read as coverage.
-			e.unverified("SNAP.ROUND_ROBIN_COVERS_MANIFEST", core.ReasonColdStart, core.PortSnapshot, 0, ch, 0,
-				fmt.Sprintf("channel %d: reference data never reached ready, so the manifest set is unknown", ch))
+	for _, instrID := range slices.Sorted(maps.Keys(cs.defs)) {
+		if !enoughCycles {
+			e.unverified("SNAP.ROUND_ROBIN_COVERS_MANIFEST", core.ReasonInsufficientWindow,
+				core.PortSnapshot, 0, ch, instrID,
+				fmt.Sprintf("only %d snapshot cycle(s) observed; 2 are needed before a missing instrument is attributable",
+					s.maxSnapCycle))
 			continue
 		}
-		for _, instrID := range slices.Sorted(maps.Keys(cs.defs)) {
-			if !enoughCycles {
-				e.unverified("SNAP.ROUND_ROBIN_COVERS_MANIFEST", core.ReasonInsufficientWindow,
-					core.PortSnapshot, 0, ch, instrID,
-					fmt.Sprintf("only %d snapshot cycle(s) observed; 2 are needed before a missing instrument is attributable",
-						e.mbo.maxSnapCycle))
-				continue
-			}
-			st := e.mbo.snapTrackers[instrTrackerKey{ch, instrID}]
-			if st != nil && st.snapCount > 0 {
-				// This instrument was snapshotted at least once — OK.
-				e.passed("SNAP.ROUND_ROBIN_COVERS_MANIFEST", core.PortSnapshot, 0, ch, instrID,
-					fmt.Sprintf("instrument %d snapshotted %d time(s) across %d cycle(s)",
-						instrID, st.snapCount, e.mbo.maxSnapCycle))
-				continue
-			}
-			// Instrument is in the manifest but has never been snapshotted.
-			status, reason := core.Violation, ""
-			if !e.gateDetectorSnap(ch) {
-				status, reason = core.Unverifiable, core.ReasonLoss
-			}
-			e.Emit("SNAP.ROUND_ROBIN_COVERS_MANIFEST", status, core.PortSnapshot, 0, ch, instrID,
-				fmt.Sprintf("instrument %d: in manifest but never snapshotted after %d cycle(s)",
-					instrID, e.mbo.maxSnapCycle), reason)
+		st := s.snapTrackers[instrTrackerKey{ch, instrID}]
+		if st != nil && st.snapCount > 0 {
+			// This instrument was snapshotted at least once — OK.
+			e.passed("SNAP.ROUND_ROBIN_COVERS_MANIFEST", core.PortSnapshot, 0, ch, instrID,
+				fmt.Sprintf("instrument %d snapshotted %d time(s) across %d cycle(s)",
+					instrID, st.snapCount, s.maxSnapCycle))
+			continue
 		}
+		// Instrument is in the manifest but has never been snapshotted.
+		status, reason := core.Violation, ""
+		if !e.instanceGapless(core.PortSnapshot, ch) {
+			status, reason = core.Unverifiable, core.ReasonLoss
+		}
+		e.Emit("SNAP.ROUND_ROBIN_COVERS_MANIFEST", status, core.PortSnapshot, 0, ch, instrID,
+			fmt.Sprintf("instrument %d: in manifest but never snapshotted after %d cycle(s)",
+				instrID, s.maxSnapCycle), reason)
 	}
 }
 
@@ -1387,7 +1456,7 @@ func (e *Engine) checkRoundRobinCoversManifest() {
 // SNAP rules for a single SnapshotBegin message.
 func (e *Engine) snapTrack(ch uint8, instrID uint32, anchorSeq uint64, snapID uint32, lastInstrSeqK uint32, snapPortSeq uint64, gapless bool) {
 	st := e.mbo.snapTrack(ch, instrID)
-	gaplessMkt := e.gateDetector(ch)
+	gaplessMkt := e.instanceGapless(core.PortMktData, ch)
 
 	// SNAP.ANCHOR_MONOTONIC_PER_INSTRUMENT: successive snapshots for the same
 	// instrument must have non-decreasing Anchor Seq.
