@@ -479,3 +479,56 @@ func TestMBORoundRobinCountsASplitPublisherOnce(t *testing.T) {
 			pass, viol, unver, describe(ac.findings))
 	}
 }
+
+// TestMBOSplitAddressRecoverySnapshotIsNotAViolation (from review): a publisher
+// sends mktdata from A and snapshots from S. The market-by-order state is keyed on
+// the source address, so A and S are two instances, and the recovery snapshot for
+// A's InstrumentReset arrives in S. A has no snapshot port of its own, so its
+// RESET.SNAPSHOT_FOLLOWS is NA and not a violation. When A sends the snapshots
+// too, the recovery snapshot reaches A and the rule passes.
+func TestMBOSplitAddressRecoverySnapshotIsNotAViolation(t *testing.T) {
+	for _, split := range []bool{true, false} {
+		name := "one address"
+		if split {
+			name = "split addresses"
+		}
+		t.Run(name, func(t *testing.T) {
+			e, ac := newMBOEngineW1()
+			a := newMBOPub(srcA, 3)
+			s := a
+			if split {
+				s = newMBOPub(srcB, 3)
+			}
+			a.ready(e)
+			a.add(e, 1, 1)
+			s.begin(e, 0, 10, 1)
+			s.order(e, 10, 1)
+			s.end(e, 0, 10)
+			e.Flush()
+			a.send(e, core.PortMktData, buildInstrumentResetFrame(instCh, instInstr, 1))
+			e.Flush()
+			s.begin(e, 1, 11, 0)
+			s.order(e, 11, 7)
+			s.end(e, 1, 11)
+			e.Flush()
+			e.EndRun()
+
+			if v := violations(ac, "RESET.SNAPSHOT_FOLLOWS"); len(v) != 0 {
+				t.Fatalf("got %d RESET.SNAPSHOT_FOLLOWS violations, want 0%s", len(v), describe(v))
+			}
+			want := core.Pass
+			if split {
+				want = core.NA
+			}
+			found := false
+			for _, f := range findingsFor(ac, "RESET.SNAPSHOT_FOLLOWS") {
+				if f.Status == want {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("no RESET.SNAPSHOT_FOLLOWS finding with status %v%s", want, describe(findingsFor(ac, "RESET.SNAPSHOT_FOLLOWS")))
+			}
+		})
+	}
+}
