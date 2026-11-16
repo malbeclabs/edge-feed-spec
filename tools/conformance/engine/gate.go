@@ -266,6 +266,14 @@ type mboState struct {
 	wipedEraOrderID uint64
 	wipedEraPos     uint64
 	wipedEraSet     bool
+	// straggler is the state that the stragglers of one earlier era share
+	// (Engine.selectMBOForDatagram), and stragglerPos the ordinal of that era. One
+	// state for the whole era, so an old-era snapshot group that arrives in three
+	// datagrams is graded as one group. closeStraggler decides its open verdicts
+	// and discards it: at a wipe for a new era, for a straggler of another era, and
+	// at end of run.
+	straggler    *mboState
+	stragglerPos uint64
 	// resetEra/resetEraSet track the Reset Count era that onResetCountForEra last
 	// wiped state for, so a reset of the instance observed on ANY of its ports wipes
 	// exactly once even though all three ports advance their era independently (F4).
@@ -539,15 +547,51 @@ func (e *Engine) mboStraggler(s *mboState) bool {
 }
 
 // selectMBOForDatagram is selectMBO for the datagram that classify is handling.
-// A straggler (mboStraggler) gets a new, empty state that is used for this
-// datagram only, so its rules still report an outcome, against no history, and
-// the instance's state is not changed.
+// A straggler (mboStraggler) is graded against the straggler state of its era,
+// which starts empty when the first straggler of that era arrives. Its rules still
+// report an outcome, the datagrams of one old-era group find each other, and the
+// instance's state is not changed. The history before the wipe is gone, so a
+// straggler delta is graded as at cold start.
 func (e *Engine) selectMBOForDatagram(ch uint8) *mboState {
 	s := e.selectMBO(ch)
 	if e.mboStraggler(s) {
-		e.mbo = newMBOState()
+		if s.straggler == nil || s.stragglerPos != e.curEraPos {
+			e.closeStraggler(s)
+			s.straggler, s.stragglerPos = newMBOState(), e.curEraPos
+		}
+		e.mbo = s.straggler
 	}
 	return e.mbo
+}
+
+// closeStraggler decides the open verdicts of the instance's straggler state and
+// discards it. A Reset Count change ends every group and every recovery that its
+// era had in flight, so a group that an old era left open, or an InstrumentReset
+// whose recovery snapshot it never sent, is not a publisher fault: each is
+// Unverifiable, reason transition. The caller has the instance's address in curSrc.
+func (e *Engine) closeStraggler(s *mboState) {
+	st := s.straggler
+	if st == nil {
+		return
+	}
+	prev := e.mbo
+	e.mbo = st
+	for _, ch := range slices.Sorted(maps.Keys(st.openSnaps)) {
+		if open := st.openSnaps[ch]; open != nil {
+			e.unverified("SNAP.BEGIN_ORDER_END_GROUPING", core.ReasonTransition, core.PortSnapshot, 0, ch, open.instrID,
+				fmt.Sprintf("instrument %d: snapshot id %d was open in an era that a Reset Count change ended",
+					open.instrID, open.snapshotID))
+		}
+	}
+	for _, key := range sortedTrackerKeys(st.trackers) {
+		if dt := st.trackers[key]; dt.awaitingRecovery {
+			e.unverified("RESET.SNAPSHOT_FOLLOWS", core.ReasonTransition, core.PortMktData, 0, key.channelID, key.instrumentID,
+				fmt.Sprintf("instrument %d: a Reset Count change ended the era before a recovery snapshot for its InstrumentReset (anchor seq %d)",
+					key.instrumentID, dt.awaitingRecoveryAnchor))
+		}
+	}
+	e.mbo = prev
+	s.straggler = nil
 }
 
 // eachMBOInstance calls fn once for each market-by-order channel instance, in
@@ -1083,6 +1127,10 @@ func (e *Engine) handleSnapOrder(m wire.Message, ch uint8, snapPortSeq uint64) {
 		}
 		e.Emit("SNAP.BEGIN_ORDER_END_GROUPING", st, core.PortSnapshot, snapPortSeq, ch, 0,
 			fmt.Sprintf("SnapshotOrder (snapshot id %d) received without a preceding SnapshotBegin", snapID))
+		// The order names no instrument, and only the SnapshotBegin does, so there is
+		// no Price Bound to check it against. The grouping finding names the defect.
+		e.unverified("SNAP.ORDER_PRICE_BOUND", core.ReasonSuperseded, core.PortSnapshot, snapPortSeq, ch, 0,
+			fmt.Sprintf("SnapshotOrder (snapshot id %d) has no SnapshotBegin, so its instrument and Price Bound are unknown", snapID))
 		return
 	}
 
@@ -1445,6 +1493,7 @@ func (e *Engine) onSnapGroupComplete(ch uint8, instrID uint32, anchorSeq uint64,
 func (e *Engine) flushOpenSnaps() {
 	e.eachMBOInstance(func(_ refdataKey, s *mboState) {
 		e.flushInstanceOpenSnaps(s)
+		e.closeStraggler(s)
 	})
 }
 

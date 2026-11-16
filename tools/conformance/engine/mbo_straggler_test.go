@@ -63,7 +63,55 @@ func TestOldEraSnapshotBeginDoesNotOpenANewEraGroup(t *testing.T) {
 	a.group(e, 0, 1, 0)
 	a.group(e, 0, 2, 0)
 	e.Flush()
+	e.EndRun()
 	if v := violations(ac, "SNAP.BEGIN_ORDER_END_GROUPING"); len(v) != 0 {
 		t.Errorf("got %d SNAP.BEGIN_ORDER_END_GROUPING violations, want 0: an old-era SnapshotBegin opened a group in the new era%s", len(v), describe(v))
+	}
+	// The old era's group never ended, because the publisher restarted. A Reset
+	// Count change ends a group, so this is an outcome, and not a fault.
+	found := false
+	for _, f := range findingsFor(ac, "SNAP.BEGIN_ORDER_END_GROUPING") {
+		if f.Status == core.Unverifiable && f.Reason == core.ReasonTransition {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("the old era's open group got no Unverifiable transition outcome%s", describe(findingsFor(ac, "SNAP.BEGIN_ORDER_END_GROUPING")))
+	}
+}
+
+// TestOldEraGroupOnALateSnapshotPortStaysWhole (from review): the refdata port
+// enters the new era and wipes the state before the snapshot port sends anything.
+// The snapshot port then sends a whole group of the old era, in three datagrams.
+// They are stragglers, and they are graded together: the group's SnapshotOrder
+// and SnapshotEnd find its SnapshotBegin, so there is no grouping violation, and
+// the order gets its price-bound outcome.
+func TestOldEraGroupOnALateSnapshotPortStaysWhole(t *testing.T) {
+	e, ac, a := readyPub(t) // era 3 on the refdata port, no snapshot datagram yet
+	a.restart(4)
+	a.ready(e) // the refdata port enters era 4 and wipes the state
+	e.Flush()
+	old := newMBOPub(srcA, 3) // the snapshot port, still in era 3
+	old.group(e, 0, 7, 0, 11)
+	e.Flush()
+	if v := violations(ac, "SNAP."); len(v) != 0 {
+		t.Errorf("got %d SNAP.* violations, want 0: the old-era group was split across datagrams%s", len(v), describe(v))
+	}
+	if len(findingsFor(ac, "SNAP.ORDER_PRICE_BOUND")) == 0 {
+		t.Errorf("SNAP.ORDER_PRICE_BOUND has no outcome for the old-era order%s", describe(ac.findings))
+	}
+}
+
+// TestOrphanSnapshotOrderHasAPriceBoundOutcome (from review): a SnapshotOrder with
+// no SnapshotBegin names no instrument, so no Price Bound applies. The grouping
+// finding names the defect, and SNAP.ORDER_PRICE_BOUND still reports the
+// opportunity, as Unverifiable, reason superseded.
+func TestOrphanSnapshotOrderHasAPriceBoundOutcome(t *testing.T) {
+	e, ac, a := readyPub(t)
+	a.order(e, 7, 11) // no SnapshotBegin
+	e.Flush()
+	got := findingsFor(ac, "SNAP.ORDER_PRICE_BOUND")
+	if len(got) != 1 || got[0].Status != core.Unverifiable || got[0].Reason != core.ReasonSuperseded {
+		t.Errorf("SNAP.ORDER_PRICE_BOUND: got %v, want one Unverifiable, reason superseded", got)
 	}
 }

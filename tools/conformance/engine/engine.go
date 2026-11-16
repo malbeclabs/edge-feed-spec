@@ -344,22 +344,29 @@ func (e *Engine) dropMBO(k refdataKey) {
 		return
 	}
 	prevSrc, prevMBO := e.curSrc, e.mbo
-	e.curSrc, e.mbo = k.src, s
-	for _, ch := range slices.Sorted(maps.Keys(s.openSnaps)) {
-		if open := s.openSnaps[ch]; open != nil {
-			e.unverified("SNAP.BEGIN_ORDER_END_GROUPING", core.ReasonTruncated, core.PortSnapshot, 0, ch, open.instrID,
-				fmt.Sprintf("instrument %d: snapshot id %d was still open when the tracker map evicted the instance",
-					open.instrID, open.snapshotID))
+	e.curSrc = k.src
+	// The instance's state and, if it has one, the state of its stragglers.
+	for _, st := range []*mboState{s, s.straggler} {
+		if st == nil {
+			continue
+		}
+		e.mbo = st
+		for _, ch := range slices.Sorted(maps.Keys(st.openSnaps)) {
+			if open := st.openSnaps[ch]; open != nil {
+				e.unverified("SNAP.BEGIN_ORDER_END_GROUPING", core.ReasonTruncated, core.PortSnapshot, 0, ch, open.instrID,
+					fmt.Sprintf("instrument %d: snapshot id %d was still open when the tracker map evicted the instance",
+						open.instrID, open.snapshotID))
+			}
+		}
+		for _, key := range sortedTrackerKeys(st.trackers) {
+			if dt := st.trackers[key]; dt.awaitingRecovery {
+				e.unverified("RESET.SNAPSHOT_FOLLOWS", core.ReasonTruncated, core.PortMktData, 0, key.channelID, key.instrumentID,
+					fmt.Sprintf("instrument %d: the tracker map evicted the instance before a recovery snapshot for the InstrumentReset (anchor seq %d)",
+						key.instrumentID, dt.awaitingRecoveryAnchor))
+			}
 		}
 	}
-	for _, key := range sortedTrackerKeys(s.trackers) {
-		if dt := s.trackers[key]; dt.awaitingRecovery {
-			e.unverified("RESET.SNAPSHOT_FOLLOWS", core.ReasonTruncated, core.PortMktData, 0, key.channelID, key.instrumentID,
-				fmt.Sprintf("instrument %d: the tracker map evicted the instance before a recovery snapshot for the InstrumentReset (anchor seq %d)",
-					key.instrumentID, dt.awaitingRecoveryAnchor))
-		}
-	}
-	if prevMBO == s {
+	if prevMBO == s || (prevMBO != nil && prevMBO == s.straggler) {
 		prevMBO = nil
 	}
 	e.curSrc, e.mbo = prevSrc, prevMBO
@@ -738,6 +745,7 @@ func (e *Engine) Process(src netip.Addr, f *wire.Frame, port core.Port, sf []wir
 				// The era that the state now belongs to. A datagram of an earlier era
 				// that another port still drains is a straggler (mboStraggler).
 				s.wipedEraOrderID, s.wipedEraPos, s.wipedEraSet = pt.order.id, pt.eraPos, true
+				e.closeStraggler(s)
 			}
 			// If a NON-snapshot port led the reset and actually wiped MBO state, any
 			// old-era snapshot group was just dropped and old-era SnapshotOrder/End
