@@ -391,7 +391,7 @@ Cardinality is bounded: `rule_id` is a fixed enum (from `core/registry.go`), `po
 
 ### The `source_addr` label
 
-A validator subscribes to a group, so it receives every path of a channel merged. `source_addr` on `violations_total`, `unverifiable_total` and `checks_total` tells the paths apart. It has three kinds of value:
+A validator subscribes to a group, so it receives every path of a channel merged. `source_addr` on `violations_total`, `unverifiable_total` and `checks_total`, and on the transport metrics `transport_loss_total`, `missing_seqs_total` and `datagrams_total`, tells the paths apart. It has three kinds of value:
 
 | Value | Meaning |
 |-------|---------|
@@ -403,7 +403,7 @@ A validator subscribes to a group, so it receives every path of a channel merged
 
 **An empty value is a statement, not an unknown.** Do not resolve it to a publisher. To read the verdicts of a channel, select `source_addr=""`. To read the verdicts of one path, select its address. To get the total of a rule, sum over the label.
 
-**The label is bounded.** Nothing authorises a source address, and a `CounterVec` keeps each label value until the process stops. The first 32 addresses that a finding names each get a label value (`maxSourceAddrLabels` in `report/prom.go`). Each later address gets `other`. Those findings are still counted, so the limit costs attribution and never coverage. A redundant feed has two publishers, so a series with `source_addr="other"` means that addresses change often or that a sender floods the group. A restart of the process clears the set.
+**The label is bounded.** Nothing authorises a source address, and a `CounterVec` keeps each label value until the process stops. The first 32 addresses that a finding or a transport metric names each get a label value (`maxSourceAddrLabels` in `report/prom.go`), from one set that all these metrics share. A sender that only sends heartbeats takes a value too, through `datagrams_total`. Each later address gets `other`. Those findings and datagrams are still counted, so the limit costs attribution and never coverage. A redundant feed has two publishers, so a series with `source_addr="other"` means that addresses change often or that a sender floods the group. A restart of the process clears the set.
 
 **Alerts.** `ConformanceMustViolation` and `ConformanceCoverageLoss` sum over `source_addr` before they test a rule, so the label does not change when they fire. The alert does not carry the label. To find the publisher, query the counter by `rule_id` and read `source_addr`.
 

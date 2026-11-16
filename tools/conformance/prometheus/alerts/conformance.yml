@@ -134,10 +134,11 @@ groups:
           summary: "Transport loss on port {{ $labels.port }} from {{ $labels.source_addr }}"
           description: >
             Sequence-gap loss detected on multicast port {{ $labels.port }}, in the
-            series of the publisher at {{ $labels.source_addr }}. Loss on one publisher
-            of a group is a fault on its path; loss on every publisher of the group
-            points at the publisher side. missing_seqs_total and datagrams_total give
-            the loss ratio of each publisher.
+            series of the publisher at {{ $labels.source_addr }}. Loss from one
+            publisher of a group is a fault on that publisher's path. Loss from every
+            publisher of the group points at the recorder side, which they share: its
+            last hop and its capture. missing_seqs_total and datagrams_total give the
+            loss ratio of each publisher.
 
       # Warn: conformance tool not reachable (scrape target down).
       # Uses the synthetic `up` metric Prometheus sets per scrape — more

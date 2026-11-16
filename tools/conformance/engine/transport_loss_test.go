@@ -69,3 +69,22 @@ func TestDiscardedDatagramIsLossButNotMissing(t *testing.T) {
 		t.Errorf("loss event %+v, want A with 0 missing", got)
 	}
 }
+
+// TestDatagramBehindTheSeriesIsNotCounted: only a datagram that moves the series
+// forward counts in datagrams_total. A late datagram behind the series is not one
+// more datagram of it. A sends 0, 2 and 3, so 1 is missing, then 1 arrives after
+// the reorder window moved past it.
+func TestDatagramBehindTheSeriesIsNotCounted(t *testing.T) {
+	cap := &captureAll{}
+	eng := New(Config{Feed: core.FeedTOB, ReorderWindow: 1}, cap)
+	for _, seq := range []uint64{0, 2, 3, 1} {
+		eng.Process(srcA, makeHB(wire.MagicTOB, lossCh, seq, 0, (seq+1)*nsPerSec), core.PortMktData, nil)
+	}
+	eng.Flush()
+	if cap.accepted[srcA] != 3 {
+		t.Errorf("accepted %d datagrams, want 3 (0, 2 and 3): the late datagram 1 is behind the series", cap.accepted[srcA])
+	}
+	if len(cap.losses) != 1 || cap.losses[0].missing != 1 {
+		t.Errorf("losses %+v, want one gap with 1 missing", cap.losses)
+	}
+}
