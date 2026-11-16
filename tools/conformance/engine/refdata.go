@@ -255,19 +255,18 @@ type refdataKey struct {
 	ch  uint8
 }
 
+// compareRefdataKeys orders keys by Channel ID, then by source address.
+func compareRefdataKeys(a, b refdataKey) int {
+	if c := cmp.Compare(a.ch, b.ch); c != 0 {
+		return c
+	}
+	return a.src.Compare(b.src)
+}
+
 // refdataState is the engine-level holder of per-instance refdata state.
 type refdataState struct {
 	e        *Engine
 	channels map[refdataKey]*channelRefdataState
-	// bumped is the definition set last passed to mboState.onManifestBump for each
-	// Channel ID, and the instance that passed it; see notifyMBO.
-	bumped map[uint8]bumpedSet
-}
-
-// bumpedSet is one set passed to mboState.onManifestBump, and its instance.
-type bumpedSet struct {
-	k   refdataKey
-	ids map[uint32]struct{}
 }
 
 // newRefdataState creates a refdataState bound to the given engine.
@@ -275,7 +274,6 @@ func newRefdataState(e *Engine) *refdataState {
 	return &refdataState{
 		e:        e,
 		channels: make(map[refdataKey]*channelRefdataState),
-		bumped:   make(map[uint8]bumpedSet),
 	}
 }
 
@@ -344,12 +342,7 @@ func (rs *refdataState) keys() []refdataKey {
 	for k := range rs.channels {
 		keys = append(keys, k)
 	}
-	slices.SortFunc(keys, func(a, b refdataKey) int {
-		if c := cmp.Compare(a.ch, b.ch); c != 0 {
-			return c
-		}
-		return a.src.Compare(b.src)
-	})
+	slices.SortFunc(keys, compareRefdataKeys)
 	return keys
 }
 
@@ -389,25 +382,45 @@ func (rs *refdataState) drop(k refdataKey) {
 	delete(rs.e.sessionEnd, k)
 }
 
-// notifyMBO passes a newly frozen definition set to the MBO per-instrument state,
-// which prunes the trackers of instruments that left the set and discards the
-// channel's open snapshot group.
+// notifyMBO passes a newly frozen definition set to the MBO per-instrument states
+// that read it, which prune the trackers of instruments that left the set and
+// discard their open snapshot group.
 //
-// **Not for another instance's equal set.** Each instance freezes its own set. Two
-// paths that serve one channel freeze the same set, and the second freeze is not a
-// change to the channel's set: passing it on would discard the open snapshot group
-// of the first path, and the rest of that group would read as
-// SNAP.BEGIN_ORDER_END_GROUPING violations. One instance re-freezing its set still
-// passes it on, as before.
+//   - The MBO state of the same instance always reads it.
+//   - An MBO state at an address with no refdata instance of its own reads the set
+//     of another instance through forChannel: the one whose refdata arrived most
+//     recently, which is this one while it freezes. It gets the set only when the
+//     set differs from the one it reads (fallbackSet: the set it read when it was
+//     created, then the last set it got). Two paths that serve one channel freeze
+//     the same set, and the second freeze is not a change: passing it on would
+//     discard the open snapshot group, and the rest of that group would read as
+//     SNAP.BEGIN_ORDER_END_GROUPING violations.
+//   - An MBO state at an address with its own refdata instance reads only that, so
+//     another instance's set does not touch it.
 func (rs *refdataState) notifyMBO(k refdataKey, set map[uint32]struct{}) {
-	if rs.e.mbo == nil {
-		return
+	for mk, s := range rs.e.mbos {
+		if mk.ch != k.ch {
+			continue
+		}
+		if mk != k {
+			if rs.hasInstance(mk) || maps.Equal(s.fallbackSet, set) {
+				continue
+			}
+			s.fallbackSet = set
+		}
+		s.onManifestBump(k.ch, set)
 	}
-	if prev, ok := rs.bumped[k.ch]; ok && prev.k != k && maps.Equal(prev.ids, set) {
-		return
+}
+
+// hasInstance reports whether the address of k has a refdata instance of its own
+// on the channel: a refdata state, or a refdata tracker whose first datagram is
+// still buffered. forChannel reads the same two.
+func (rs *refdataState) hasInstance(k refdataKey) bool {
+	if _, ok := rs.channels[k]; ok {
+		return true
 	}
-	rs.bumped[k.ch] = bumpedSet{k: k, ids: set}
-	rs.e.mbo.onManifestBump(k.ch, set)
+	_, ok := rs.e.ports[instanceKey{src: k.src, port: core.PortRefData, ch: k.ch}]
+	return ok
 }
 
 // channelKnown returns two booleans: (ready, known).

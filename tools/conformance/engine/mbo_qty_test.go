@@ -352,7 +352,8 @@ func TestBatchAtomicityConsistency(t *testing.T) {
 		clearFindings(ac)
 
 		// Ensure the book exists for this instrument.
-		e.ensureMBO()
+		e.curSrc = srcA
+		e.selectMBO(ch)
 		bk := e.mbo.book.book(ch, instrID)
 		// Directly inject a zero-remaining live order (impossible via normal applies).
 		bk.live[orderID] = liveOrder{
@@ -377,7 +378,8 @@ func TestBatchAtomicityConsistency(t *testing.T) {
 		seq := seedGaplessHistory(e, ch, instrID, 3, 1)
 		clearFindings(ac)
 
-		e.ensureMBO()
+		e.curSrc = srcA
+		e.selectMBO(ch)
 		bk := e.mbo.book.book(ch, instrID)
 		bk.live[orderID] = liveOrder{side: 0, remaining: 0}
 
@@ -407,7 +409,8 @@ func TestBatchAtomicityConsistency(t *testing.T) {
 		reachedReadyMBO(e, ch, instrID, 0, 1)
 
 		// Inject orphan.
-		e.ensureMBO()
+		e.curSrc = srcA
+		e.selectMBO(ch)
 		bk := e.mbo.book.book(ch, instrID)
 		bk.live[orderID] = liveOrder{side: 1, remaining: 0}
 

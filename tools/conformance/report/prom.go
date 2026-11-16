@@ -55,7 +55,7 @@ func NewProm(reg *prometheus.Registry, version, commit string, feed core.Feed) *
 	p.violations = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: promNamespace,
 		Name:      "violations_total",
-		Help:      "Total confirmed conformance violations by feed, rule, severity, and publisher source address. `source_addr` names the publisher whose datagrams the rule judged; it is EMPTY for a rule decided over state every path of the channel fills (the book, the snapshot groups, the reference data, the counters keyed on the channel), where no single publisher is the subject. An empty value is a statement, not an unknown. The value `other` holds every publisher past the first 32 addresses.",
+		Help:      "Total confirmed conformance violations by feed, rule, severity, and publisher source address. `source_addr` names the publisher whose datagrams the rule judged; it is EMPTY for a rule whose catalog entry judges the channel and not one channel instance, where no single publisher is the subject. An empty value is a statement, not an unknown. The value `other` holds every publisher past the first 32 addresses.",
 	}, []string{"feed", "rule_id", "severity", "source_addr"})
 
 	p.unverifiable = prometheus.NewCounterVec(prometheus.CounterOpts{

@@ -76,20 +76,23 @@ const (
 //     Count as the two things an instance owns. Two publishers that serve one
 //     channel each advance their own. MBP.DELTA.ABSOLUTE_APPLY is also of this
 //     kind: it reads the fields of one message and no state between messages.
-//   - StateCounters is state that engine.mbo and engine.mbp key on the channel,
-//     or on the channel and the instrument: the per-instrument sequence, the
-//     Batch ID and the snapshot anchors. Two publishers that serve one channel
-//     advance the same counter. The datagram in front of the engine can thus
-//     complete a verdict that its peer started. The Manifest Seq is in this kind
-//     too, but engine.refdata keys it on the instance (source IP address and
-//     Channel ID); its rules stay here, and so report no source IP address, until
-//     the catalog moves them.
+//   - StateCounters is state that engine.mbp keys on the channel, or on the
+//     channel and the instrument: the per-instrument sequence and the snapshot
+//     anchors. Two publishers that serve one channel advance the same counter.
+//     The datagram in front of the engine can thus complete a verdict that its
+//     peer started. The market-by-order counters (the per-instrument sequence,
+//     the Batch ID and the snapshot anchors) and the Manifest Seq are in this
+//     kind too, but engine.mbos and engine.refdata key them on the instance
+//     (source IP address and Channel ID); their rules stay here, and so report no
+//     source IP address, until the catalog moves them.
 //   - StateOrderIDSet, StateFullBook, StateSnapshotGroup and StateRefdata are
-//     reconstructed from every path. They have the same keys as StateCounters.
+//     reconstructed state. They have the same keys as StateCounters: the
+//     market-by-price state from every path of the channel, the market-by-order
+//     and reference-data state from one instance.
 //
 // A rule moves to StateInstanceCounters only when all the state that it reads is
-// on the portTracker. The README section "Deeper state is keyed by channel, not
-// by instance" records the boundary.
+// on the portTracker. The README section "Known limitations" records the
+// boundary.
 func (k StateKind) InstanceScoped() bool {
 	return k == StateNone || k == StateInstanceCounters
 }
