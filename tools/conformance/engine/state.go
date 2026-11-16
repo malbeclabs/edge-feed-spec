@@ -273,6 +273,11 @@ type observeResult struct {
 	isDup          bool // same (era,seq), identical bytes → silent drop
 	isDivergentDup bool // same (era,seq), different bytes → FRAME.SEQ_DUP_DIVERGENT
 	gapBefore      bool // true if seq jumped forward by more than 1 without a reset
+	// missing is the count of Sequence Numbers that the gap skipped (0 without one).
+	missing uint64
+	// advanced is true when the datagram moved the series forward: it is the
+	// first one, or its seq is above the last one.
+	advanced bool
 }
 
 // recordHash stores h under key in payloadHashes and evicts the oldest entry
@@ -316,6 +321,7 @@ func (t *portTracker) observe(seq uint64, sendTS uint64, raw []byte, era uint8) 
 
 	// Update seq/ts tracking.
 	var gap bool
+	var missing uint64
 	if t.lastSeq != nil {
 		last := *t.lastSeq
 		// seq-last form (rather than last+1) avoids a u64 overflow when last is
@@ -323,6 +329,7 @@ func (t *portTracker) observe(seq uint64, sendTS uint64, raw []byte, era uint8) 
 		// total. A forward jump of more than 1 is a gap.
 		if seq > last && seq-last > 1 {
 			gap = true
+			missing = seq - last - 1
 		}
 		// seq <= last → backward motion; handled by caller (FRAME.SEQ_RESET_GAP).
 	}
@@ -343,7 +350,7 @@ func (t *portTracker) observe(seq uint64, sendTS uint64, raw []byte, era uint8) 
 		t.lastSendTS = &cp
 	}
 
-	return observeResult{gapBefore: gap}
+	return observeResult{gapBefore: gap, missing: missing, advanced: seqAdvanced}
 }
 
 // advanceEra resets per-era state when a newer Reset Count is seen. It does NOT

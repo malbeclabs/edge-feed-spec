@@ -26,10 +26,21 @@ func TestPromCounts(t *testing.T) {
 		t.Fatalf("violations_total: want 1, got %v", got)
 	}
 
-	// TransportLoss bumps transport_loss_total{port=mktdata}
-	p.TransportLoss(core.PortMktData)
-	if got := testutil.ToFloat64(p.transportLoss.WithLabelValues("mktdata")); got != 1 {
-		t.Fatalf("transport_loss_total: want 1, got %v", got)
+	// TransportLoss bumps transport_loss_total{port=mktdata,source_addr} once per
+	// event and missing_seqs_total by the Sequence Numbers the gap skipped.
+	src := netip.MustParseAddr("10.0.0.1")
+	p.TransportLoss(core.PortMktData, src, 3)
+	p.TransportLoss(core.PortMktData, src, 0) // a discarded datagram: not missing
+	if got := testutil.ToFloat64(p.transportLoss.WithLabelValues("mktdata", "10.0.0.1")); got != 2 {
+		t.Fatalf("transport_loss_total: want 2, got %v", got)
+	}
+	if got := testutil.ToFloat64(p.missingSeqs.WithLabelValues("mktdata", "10.0.0.1")); got != 3 {
+		t.Fatalf("missing_seqs_total: want 3, got %v", got)
+	}
+	// Accepted bumps datagrams_total for the same address.
+	p.Accepted(core.PortMktData, src)
+	if got := testutil.ToFloat64(p.datagrams.WithLabelValues("mktdata", "10.0.0.1")); got != 1 {
+		t.Fatalf("datagrams_total: want 1, got %v", got)
 	}
 }
 

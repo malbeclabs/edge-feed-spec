@@ -131,10 +131,13 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "Transport loss on port {{ $labels.port }}"
+          summary: "Transport loss on port {{ $labels.port }} from {{ $labels.source_addr }}"
           description: >
-            Sequence-gap loss detected on multicast port {{ $labels.port }}.
-            This may indicate network congestion or switch misconfiguration.
+            Sequence-gap loss detected on multicast port {{ $labels.port }}, in the
+            series of the publisher at {{ $labels.source_addr }}. Loss on one publisher
+            of a group is a fault on its path; loss on every publisher of the group
+            points at the publisher side. missing_seqs_total and datagrams_total give
+            the loss ratio of each publisher.
 
       # Warn: conformance tool not reachable (scrape target down).
       # Uses the synthetic `up` metric Prometheus sets per scrape — more

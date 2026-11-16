@@ -312,7 +312,7 @@ func (e *Engine) evictOldestInstance() {
 		e.refdata.drop(refdataKey{src: oldest.src, ch: oldest.ch})
 	}
 	for range oldestPT.drainAll() {
-		e.rep.TransportLoss(oldest.port)
+		e.rep.TransportLoss(oldest.port, oldest.src, 0)
 	}
 	delete(e.ports, oldest)
 	// The MBO state of the instance spans its three ports, so it goes with the last
@@ -694,7 +694,7 @@ func (e *Engine) Process(src netip.Addr, f *wire.Frame, port core.Port, sf []wir
 	res := pt.enqueue(tuple, e.cfg.ReorderWindow)
 	if res.quarantine {
 		// A late datagram of an era this port left: account as transport loss, never classify.
-		e.rep.TransportLoss(port)
+		e.rep.TransportLoss(port, src, 0)
 		return
 	}
 
@@ -809,6 +809,9 @@ func (e *Engine) classify(item *bufferItem, pt *portTracker) {
 	// item.era: old-era items are classified before advanceEra() in Process,
 	// and new-era items are classified after. So seq tracking is always active.
 	e.beginFrame(f.Header.SchemaVersion)
+	if res.advanced {
+		e.rep.Accepted(port, pt.src)
+	}
 
 	// Whether an admitted capture drop can own what this frame shows: one
 	// arrived between the previous frame on this series and this one. Recomputed
@@ -841,7 +844,7 @@ func (e *Engine) classify(item *bufferItem, pt *portTracker) {
 	// Forward gap: transport loss.
 	if res.gapBefore {
 		pt.taint()
-		e.rep.TransportLoss(port)
+		e.rep.TransportLoss(port, pt.src, res.missing)
 	}
 
 	// FRAME.SEND_TS_MONOTONIC: Send Timestamp must be non-decreasing across

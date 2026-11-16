@@ -1,6 +1,10 @@
 package report
 
-import "github.com/malbeclabs/edge-feed-spec/tools/conformance/core"
+import (
+	"net/netip"
+
+	"github.com/malbeclabs/edge-feed-spec/tools/conformance/core"
+)
 
 // Reporter consumes both conformance findings and non-finding telemetry
 // (transport health, oracle results, gauges). Findings flow through Record;
@@ -8,7 +12,16 @@ import "github.com/malbeclabs/edge-feed-spec/tools/conformance/core"
 // (transport loss/corruption, snapshot audits, instrument-state gauge, uptime).
 type Reporter interface {
 	Record(core.Finding)
-	TransportLoss(port core.Port)
+	// TransportLoss counts one transport loss event of the channel instance at src
+	// on port. A forward gap in its sequence series passes the count of Sequence
+	// Numbers it skipped. A received datagram discarded unclassified (a late one of
+	// an era the port left, or one still buffered when its instance was evicted)
+	// passes 0, because it is not missing from the series.
+	TransportLoss(port core.Port, src netip.Addr, missing uint64)
+	// Accepted counts one datagram that moved the sequence series of the channel
+	// instance at src forward on port. With the missing count of TransportLoss it
+	// gives the loss ratio of one publisher.
+	Accepted(port core.Port, src netip.Addr)
 	TransportCorruption(port core.Port, reason string)
 	SnapshotAudit(result string) // match | mismatch_suspected | mismatch_confirmed | unverifiable
 	SetInstrumentState(status string, n int)
@@ -22,9 +35,14 @@ func (m Multi) Record(f core.Finding) {
 		r.Record(f)
 	}
 }
-func (m Multi) TransportLoss(p core.Port) {
+func (m Multi) TransportLoss(p core.Port, src netip.Addr, missing uint64) {
 	for _, r := range m {
-		r.TransportLoss(p)
+		r.TransportLoss(p, src, missing)
+	}
+}
+func (m Multi) Accepted(p core.Port, src netip.Addr) {
+	for _, r := range m {
+		r.Accepted(p, src)
 	}
 }
 func (m Multi) TransportCorruption(p core.Port, s string) {
@@ -46,10 +64,11 @@ func (m Multi) SetInstrumentState(s string, n int) {
 // noopMetrics lets findings-only reporters (slog, json/Aggregator) satisfy Reporter.
 type noopMetrics struct{}
 
-func (noopMetrics) TransportLoss(core.Port)               {}
-func (noopMetrics) TransportCorruption(core.Port, string) {}
-func (noopMetrics) SnapshotAudit(string)                  {}
-func (noopMetrics) SetInstrumentState(string, int)        {}
+func (noopMetrics) TransportLoss(core.Port, netip.Addr, uint64) {}
+func (noopMetrics) Accepted(core.Port, netip.Addr)              {}
+func (noopMetrics) TransportCorruption(core.Port, string)       {}
+func (noopMetrics) SnapshotAudit(string)                        {}
+func (noopMetrics) SetInstrumentState(string, int)              {}
 
 // Aggregator tracks violation counts for the CI exit code and the JSON report.
 type Aggregator struct {

@@ -377,7 +377,9 @@ All metrics are prefixed `dz_conformance_`.
 | `violations_total` | counter | `feed`, `rule_id`, `severity`, `source_addr` | Confirmed conformance violations. See [The `source_addr` label](#the-source_addr-label) |
 | `unverifiable_total` | counter | `feed`, `rule_id`, `reason`, `source_addr` | Checks that could not be verified, by cause. `reason` is a closed enum (`core.Reason*`): `loss`, `capture_loss`, `cold_start`, `reorder`, `pending`, `overflow`, `truncated`, `insufficient_window`, `superseded`, `untrusted`, `bound_subset`, `transition`, `unspecified` |
 | `checks_total` | counter | `feed`, `rule_id`, `result`, `source_addr` | All checks by result — the **denominator** for every rule, see [Coverage vs. silence](#coverage-vs-silence). Sum over `source_addr` to get the denominator of the channel |
-| `transport_loss_total` | counter | `port` | Transport packet-loss events by port (`mktdata`, `refdata`, `snapshot`) |
+| `transport_loss_total` | counter | `port`, `source_addr` | Transport loss events by port (`mktdata`, `refdata`, `snapshot`) and publisher: a forward gap in the sequence series of one channel instance, or a received datagram discarded unclassified (a late one of an era the port left, or one still buffered when its instance was evicted). An event is not a datagram |
+| `missing_seqs_total` | counter | `port`, `source_addr` | Sequence Numbers that the forward gaps skipped. A discarded datagram adds nothing: it is not missing from the series |
+| `datagrams_total` | counter | `port`, `source_addr` | Datagrams that moved the sequence series of one channel instance forward. `missing_seqs_total / (datagrams_total + missing_seqs_total)` is the loss ratio of one publisher on one port |
 | `transport_corruption_total` | counter | `port`, `reason` | Transport corruption events |
 | `snapshot_audits_total` | counter | `result` | Snapshot oracle outcomes (`match`, `mismatch_suspected`, `mismatch_confirmed`, `unverifiable`) |
 | `instruments_state` | gauge | `status` | Instrument count per state (registered; not yet populated by current engine code) |

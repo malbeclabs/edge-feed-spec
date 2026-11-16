@@ -56,11 +56,12 @@ type goldenCapture struct {
 	findings []core.Finding
 }
 
-func (g *goldenCapture) Record(f core.Finding)                 { g.findings = append(g.findings, f) }
-func (g *goldenCapture) TransportLoss(core.Port)               {}
-func (g *goldenCapture) TransportCorruption(core.Port, string) {}
-func (g *goldenCapture) SnapshotAudit(string)                  {}
-func (g *goldenCapture) SetInstrumentState(string, int)        {}
+func (g *goldenCapture) Record(f core.Finding)                       { g.findings = append(g.findings, f) }
+func (g *goldenCapture) TransportLoss(core.Port, netip.Addr, uint64) {}
+func (g *goldenCapture) Accepted(core.Port, netip.Addr)              {}
+func (g *goldenCapture) TransportCorruption(core.Port, string)       {}
+func (g *goldenCapture) SnapshotAudit(string)                        {}
+func (g *goldenCapture) SetInstrumentState(string, int)              {}
 
 // mustViolationCount returns the count of Must+Violation findings.
 func mustViolationCount(gc *goldenCapture) int {

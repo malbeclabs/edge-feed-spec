@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"net/netip"
 	"testing"
 
 	"github.com/malbeclabs/edge-feed-spec/tools/conformance/core"
@@ -11,11 +12,12 @@ type capture struct {
 	n    int
 }
 
-func (c *capture) Record(f core.Finding)                 { c.last = f; c.n++ }
-func (c *capture) TransportLoss(core.Port)               {}
-func (c *capture) TransportCorruption(core.Port, string) {}
-func (c *capture) SnapshotAudit(string)                  {}
-func (c *capture) SetInstrumentState(string, int)        {}
+func (c *capture) Record(f core.Finding)                       { c.last = f; c.n++ }
+func (c *capture) TransportLoss(core.Port, netip.Addr, uint64) {}
+func (c *capture) Accepted(core.Port, netip.Addr)              {}
+func (c *capture) TransportCorruption(core.Port, string)       {}
+func (c *capture) SnapshotAudit(string)                        {}
+func (c *capture) SetInstrumentState(string, int)              {}
 
 func TestEmitConditionalDowngrade(t *testing.T) {
 	cap := &capture{}
