@@ -296,7 +296,7 @@ func TestExecDanglingOrder(t *testing.T) {
 	t.Run("unverifiable_mktdata_gap", func(t *testing.T) {
 		e, ac := newMBOEngineW1()
 		// Feed perInstrSeq=1, then skip mktdata seq 2, feed perInstrSeq=2.
-		// gateDetector returns false because mktdata channel has a gap.
+		// instanceGapless returns false because the mktdata series has a gap.
 		runMktdataSeq(e, buildOrderAddFull(ch, instrID, 1, 90001, 0, 1, 100, 0), 1)
 		// Skip mktdata seq=2; jump to seq=3 to set dirtyWindow.
 		runMktdataSeq(e, buildOrderExecuteFull(ch, instrID, 2, 99, 1, 0, 0, 100, 1), 3)

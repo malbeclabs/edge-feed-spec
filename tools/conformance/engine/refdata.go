@@ -33,6 +33,7 @@ package engine
 import (
 	"cmp"
 	"fmt"
+	"maps"
 	"net/netip"
 	"slices"
 	"time"
@@ -381,19 +382,44 @@ func (rs *refdataState) drop(k refdataKey) {
 	delete(rs.e.sessionEnd, k)
 }
 
-// notifyMBO passes a newly frozen definition set to the MBO per-instrument state of
-// the same instance, which prunes the trackers of instruments that left the set and
-// discards the instance's open snapshot group.
+// notifyMBO passes a newly frozen definition set to the MBO per-instrument states
+// that read it, which prune the trackers of instruments that left the set and
+// discard their open snapshot group.
 //
-// **Only the instance's own MBO state.** Each instance freezes its own set, and the
-// MBO state is keyed on the instance too. Another path that freezes a set of the
-// same channel does not touch this instance's state: passing it on would discard
-// this instance's open snapshot group, and the rest of that group would read as
-// SNAP.BEGIN_ORDER_END_GROUPING violations.
+//   - The MBO state of the same instance always reads it.
+//   - An MBO state at an address with no refdata instance of its own reads the set
+//     of another instance through forChannel: the one whose refdata arrived most
+//     recently, which is this one while it freezes. It gets the set only when the
+//     set differs from the last one it got. Two paths that serve one channel freeze
+//     the same set, and the second freeze is not a change: passing it on would
+//     discard the open snapshot group, and the rest of that group would read as
+//     SNAP.BEGIN_ORDER_END_GROUPING violations.
+//   - An MBO state at an address with its own refdata instance reads only that, so
+//     another instance's set does not touch it.
 func (rs *refdataState) notifyMBO(k refdataKey, set map[uint32]struct{}) {
-	if s := rs.e.mbos[k]; s != nil {
+	for mk, s := range rs.e.mbos {
+		if mk.ch != k.ch {
+			continue
+		}
+		if mk != k {
+			if rs.hasInstance(mk) || maps.Equal(s.fallbackSet, set) {
+				continue
+			}
+			s.fallbackSet = set
+		}
 		s.onManifestBump(k.ch, set)
 	}
+}
+
+// hasInstance reports whether the address of k has a refdata instance of its own
+// on the channel: a refdata state, or a refdata tracker whose first datagram is
+// still buffered. forChannel reads the same two.
+func (rs *refdataState) hasInstance(k refdataKey) bool {
+	if _, ok := rs.channels[k]; ok {
+		return true
+	}
+	_, ok := rs.e.ports[instanceKey{src: k.src, port: core.PortRefData, ch: k.ch}]
+	return ok
 }
 
 // channelKnown returns two booleans: (ready, known).

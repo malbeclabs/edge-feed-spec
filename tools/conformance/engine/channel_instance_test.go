@@ -100,7 +100,7 @@ func assertNoFabricatedLoss(t *testing.T, eng *Engine, cap *captureAll, ch uint8
 	if n := len(cap.lostPorts); n != 0 {
 		t.Errorf("got %d transport losses, want 0: a merged series reads the other publisher's next datagram as a gap", n)
 	}
-	if !eng.gateDetector(ch) {
+	if eng.dirtyOn(core.PortMktData, ch) {
 		t.Errorf("the channel-level gate on channel %d is latched: every rule gated on it grades nothing for the rest of the run", ch)
 	}
 }
