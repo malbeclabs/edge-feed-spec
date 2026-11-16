@@ -53,6 +53,12 @@ const (
 	// only the message in front of it is also of this kind, because it judges
 	// one path and a tier-2 rule cannot be StateNone.
 	StateInstanceCounters
+	// StateMBOInstance is the market-by-order state, which engine.mbos keys on the
+	// channel instance (source IP address and Channel ID): the per-instrument
+	// sequence, the Batch ID, the snapshot anchors and groups, the reconstructed
+	// book and the round robin. Every port of one publisher feeds it, and no other
+	// publisher does, so a rule that reads it judges that publisher.
+	StateMBOInstance
 )
 
 // InstanceScoped reports whether a rule that holds this kind of state judges one
@@ -80,21 +86,23 @@ const (
 //     channel and the instrument: the per-instrument sequence and the snapshot
 //     anchors. Two publishers that serve one channel advance the same counter.
 //     The datagram in front of the engine can thus complete a verdict that its
-//     peer started. The market-by-order counters (the per-instrument sequence,
-//     the Batch ID and the snapshot anchors) and the Manifest Seq are in this
-//     kind too, but engine.mbos and engine.refdata key them on the instance
-//     (source IP address and Channel ID); their rules stay here, and so report no
-//     source IP address, until the catalog moves them.
+//     peer started. The Manifest Seq is in this kind too, but engine.refdata keys
+//     it on the instance (source IP address and Channel ID); its rules stay here,
+//     and so report no source IP address, until the catalog moves them.
 //   - StateOrderIDSet, StateFullBook, StateSnapshotGroup and StateRefdata are
 //     reconstructed state. They have the same keys as StateCounters: the
-//     market-by-price state from every path of the channel, the market-by-order
-//     and reference-data state from one instance.
+//     market-by-price state from every path of the channel, and the
+//     reference-data state from one instance, whose rules have not moved.
+//   - StateMBOInstance is the market-by-order state of one channel instance. The
+//     engine sets the source address in front of it for each verdict, also at end
+//     of run and at eviction, where it visits the instances one by one.
 //
 // A rule moves to StateInstanceCounters only when all the state that it reads is
-// on the portTracker. The README section "Known limitations" records the
+// on the portTracker, and to StateMBOInstance only when all of it is in the
+// instance's mboState (with the reference data it reads for its instruments). The README section "Known limitations" records the
 // boundary.
 func (k StateKind) InstanceScoped() bool {
-	return k == StateNone || k == StateInstanceCounters
+	return k == StateNone || k == StateInstanceCounters || k == StateMBOInstance
 }
 
 type Feed string

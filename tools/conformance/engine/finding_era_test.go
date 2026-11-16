@@ -57,9 +57,10 @@ func TestChannelFindingCarriesNoEra(t *testing.T) {
 	f, sf := wire.Decode(buildResetCountFrame(ch, 3, 0), wire.MagicMBO)
 	e.Process(srcA, f, core.PortMktData, sf)
 
-	// BATCH.ID_MONOTONIC reads a counter the engine keys on the channel.
-	e.Emit("BATCH.ID_MONOTONIC", core.Violation, core.PortMktData, 0, ch, 0, "x")
-	got := findingsFor(ac, "BATCH.ID_MONOTONIC")
+	// REFDATA.COUNT_CHANGE_NO_SEQ_BUMP is a rule that the catalog judges on the
+	// channel (StateCounters).
+	e.Emit("REFDATA.COUNT_CHANGE_NO_SEQ_BUMP", core.Violation, core.PortMktData, 0, ch, 0, "x")
+	got := findingsFor(ac, "REFDATA.COUNT_CHANGE_NO_SEQ_BUMP")
 	if len(got) != 1 {
 		t.Fatalf("got %d findings, want 1", len(got))
 	}
