@@ -26,9 +26,23 @@ func TestPromCounts(t *testing.T) {
 		t.Fatalf("violations_total: want 1, got %v", got)
 	}
 
+	// The first accepted datagram of a publisher creates its loss series at 0, so a
+	// healthy publisher has a loss ratio of 0 and not no value, and the first gap is
+	// an increase that `increase` sees.
+	src := netip.MustParseAddr("10.0.0.1")
+	p.Accepted(core.PortMktData, src)
+	if n := testutil.CollectAndCount(p.missingSeqs); n != 1 {
+		t.Fatalf("missing_seqs_total has %d series after the first accepted datagram, want 1", n)
+	}
+	if got := testutil.ToFloat64(p.missingSeqs.WithLabelValues("mktdata", "10.0.0.1")); got != 0 {
+		t.Fatalf("missing_seqs_total starts at %v, want 0", got)
+	}
+	if n := testutil.CollectAndCount(p.transportLoss); n != 1 {
+		t.Fatalf("transport_loss_total has %d series after the first accepted datagram, want 1", n)
+	}
+
 	// TransportLoss bumps transport_loss_total{port=mktdata,source_addr} once per
 	// event and missing_seqs_total by the Sequence Numbers the gap skipped.
-	src := netip.MustParseAddr("10.0.0.1")
 	p.TransportLoss(core.PortMktData, src, 3)
 	p.TransportLoss(core.PortMktData, src, 0) // a discarded datagram: not missing
 	if got := testutil.ToFloat64(p.transportLoss.WithLabelValues("mktdata", "10.0.0.1")); got != 2 {
@@ -37,10 +51,14 @@ func TestPromCounts(t *testing.T) {
 	if got := testutil.ToFloat64(p.missingSeqs.WithLabelValues("mktdata", "10.0.0.1")); got != 3 {
 		t.Fatalf("missing_seqs_total: want 3, got %v", got)
 	}
-	// Accepted bumps datagrams_total for the same address.
+	// Accepted bumps datagrams_total for the same address, and does not reset the
+	// loss series it created.
 	p.Accepted(core.PortMktData, src)
-	if got := testutil.ToFloat64(p.datagrams.WithLabelValues("mktdata", "10.0.0.1")); got != 1 {
-		t.Fatalf("datagrams_total: want 1, got %v", got)
+	if got := testutil.ToFloat64(p.datagrams.WithLabelValues("mktdata", "10.0.0.1")); got != 2 {
+		t.Fatalf("datagrams_total: want 2, got %v", got)
+	}
+	if got := testutil.ToFloat64(p.missingSeqs.WithLabelValues("mktdata", "10.0.0.1")); got != 3 {
+		t.Fatalf("missing_seqs_total after a second accepted datagram: want 3, got %v", got)
 	}
 }
 

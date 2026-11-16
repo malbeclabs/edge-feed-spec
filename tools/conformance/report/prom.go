@@ -40,6 +40,9 @@ type Prom struct {
 	// CounterVecs are safe for concurrent use and this map must not change that.
 	srcMu    sync.Mutex
 	srcAddrs map[netip.Addr]struct{}
+	// lossSeries holds the (port, source_addr) label pairs whose loss counters
+	// Accepted already created at 0; see Accepted. srcMu guards it too.
+	lossSeries map[[2]string]struct{}
 
 	startTime time.Time
 }
@@ -49,9 +52,10 @@ type Prom struct {
 // rules are published to rule_info (only rules applicable to the active feed).
 func NewProm(reg *prometheus.Registry, version, commit string, feed core.Feed) *Prom {
 	p := &Prom{
-		registry:  reg,
-		srcAddrs:  make(map[netip.Addr]struct{}),
-		startTime: time.Now(),
+		registry:   reg,
+		srcAddrs:   make(map[netip.Addr]struct{}),
+		lossSeries: make(map[[2]string]struct{}),
+		startTime:  time.Now(),
 	}
 
 	p.violations = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -253,8 +257,25 @@ func (p *Prom) TransportLoss(port core.Port, src netip.Addr, missing uint64) {
 }
 
 // Accepted implements Reporter.
+//
+// The first datagram of a (port, source_addr) pair also creates its
+// transport_loss_total and missing_seqs_total series, at 0. Without them a healthy
+// publisher has no missing_seqs_total sample, so its loss ratio is no value rather
+// than 0, and a series that first appears at its first gap starts above 0, which
+// `increase` does not count.
 func (p *Prom) Accepted(port core.Port, src netip.Addr) {
-	p.datagrams.WithLabelValues(port.String(), p.addrLabel(src)).Inc()
+	labels := [2]string{port.String(), p.addrLabel(src)}
+	p.datagrams.WithLabelValues(labels[0], labels[1]).Inc()
+	p.srcMu.Lock()
+	_, seen := p.lossSeries[labels]
+	if !seen {
+		p.lossSeries[labels] = struct{}{}
+	}
+	p.srcMu.Unlock()
+	if !seen {
+		p.transportLoss.WithLabelValues(labels[0], labels[1])
+		p.missingSeqs.WithLabelValues(labels[0], labels[1])
+	}
 }
 
 // TransportCorruption implements Reporter.

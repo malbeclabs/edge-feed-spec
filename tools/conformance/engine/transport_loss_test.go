@@ -19,13 +19,16 @@ import (
 	"github.com/malbeclabs/edge-feed-spec/tools/conformance/wire"
 )
 
+// lossCh is the Channel ID of the publishers in these tests.
+const lossCh uint8 = 1
+
 // TestTransportLossNamesThePublisherAndCountsMissingSeqs: A and B serve one
 // channel on one port. A skips Sequence Numbers 3, 4 and 5. B skips none.
 func TestTransportLossNamesThePublisherAndCountsMissingSeqs(t *testing.T) {
 	cap := &captureAll{}
 	eng := New(Config{Feed: core.FeedTOB, ReorderWindow: 1}, cap)
 	send := func(src netip.Addr, seq uint64) {
-		eng.Process(src, makeHB(wire.MagicTOB, chArmA, seq, 0, (seq+1)*nsPerSec), core.PortMktData, nil)
+		eng.Process(src, makeHB(wire.MagicTOB, lossCh, seq, 0, (seq+1)*nsPerSec), core.PortMktData, nil)
 	}
 	for _, seq := range []uint64{0, 1, 2} {
 		send(srcA, seq)
@@ -54,9 +57,9 @@ func TestTransportLossNamesThePublisherAndCountsMissingSeqs(t *testing.T) {
 func TestDiscardedDatagramIsLossButNotMissing(t *testing.T) {
 	cap := &captureAll{}
 	eng := New(Config{Feed: core.FeedTOB, ReorderWindow: 1}, cap)
-	eng.Process(srcA, makeHB(wire.MagicTOB, chArmA, 0, 1, 1*nsPerSec), core.PortMktData, nil)
-	eng.Process(srcA, makeHB(wire.MagicTOB, chArmA, 0, 2, 2*nsPerSec), core.PortMktData, nil) // era 2
-	eng.Process(srcA, makeHB(wire.MagicTOB, chArmA, 1, 1, 3*nsPerSec), core.PortMktData, nil) // late, era 1
+	eng.Process(srcA, makeHB(wire.MagicTOB, lossCh, 0, 1, 1*nsPerSec), core.PortMktData, nil)
+	eng.Process(srcA, makeHB(wire.MagicTOB, lossCh, 0, 2, 2*nsPerSec), core.PortMktData, nil) // era 2
+	eng.Process(srcA, makeHB(wire.MagicTOB, lossCh, 1, 1, 3*nsPerSec), core.PortMktData, nil) // late, era 1
 	eng.Flush()
 
 	if len(cap.losses) != 1 {
