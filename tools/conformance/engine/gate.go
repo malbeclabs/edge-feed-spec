@@ -563,14 +563,20 @@ func (e *Engine) checkMBO(f *wire.Frame, ch uint8) {
 	e.selectMBO(ch)
 	frameSeq := f.Header.Sequence
 
-	// Track the highest mktdata-port frame Sequence for SNAP.ANCHOR_IS_MKTDATA_SEQ.
-	if !e.mbo.highestMktdataSeqSet || frameSeq > e.mbo.highestMktdataSeq {
-		e.mbo.highestMktdataSeq = frameSeq
-		e.mbo.highestMktdataSeqSet = true
-	}
-	if !e.mbo.firstMktdataSeqSet {
-		e.mbo.firstMktdataSeq = frameSeq
-		e.mbo.firstMktdataSeqSet = true
+	// Track the first and the highest mktdata-port datagram Sequence of the era, for
+	// SNAP.ANCHOR_IS_MKTDATA_SEQ and seedPlan. Only a datagram of the instance's
+	// current Reset Count moves them. Another port can wipe the state for a new era
+	// first (onResetCountForEra); the mktdata port then still drains datagrams of the
+	// old era, and their Sequence Numbers belong to the old series.
+	if !e.mbo.resetEraSet || f.Header.ResetCount == e.mbo.resetEra {
+		if !e.mbo.highestMktdataSeqSet || frameSeq > e.mbo.highestMktdataSeq {
+			e.mbo.highestMktdataSeq = frameSeq
+			e.mbo.highestMktdataSeqSet = true
+		}
+		if !e.mbo.firstMktdataSeqSet {
+			e.mbo.firstMktdataSeq = frameSeq
+			e.mbo.firstMktdataSeqSet = true
+		}
 	}
 
 	for _, m := range f.Messages {

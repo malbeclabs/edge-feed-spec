@@ -397,3 +397,27 @@ func TestSeedGatedRulesNeedASeededBook(t *testing.T) {
 		}
 	}
 }
+
+// TestOldEraDatagramDoesNotOpenTheSeedWindow: the publisher restarts and its
+// refdata port shows the new Reset Count first, so the state is wiped for the new
+// era. An old-era mktdata datagram still in the reorder buffer drains after that.
+// Its Sequence Number is of the old series, so it must not count as the first or
+// the highest mktdata datagram of the new era. If it did, a new-era group at K = 2
+// would seed the book before new-era deltas 1 and 2 arrive, and they would read as
+// a false DELTA.PERINSTR_NO_SNAPSHOT_RESET violation.
+func TestOldEraDatagramDoesNotOpenTheSeedWindow(t *testing.T) {
+	e, ac, a := readyPub(t)
+	a.otherInstrAdds(e, 3) // the last one stays in the reorder buffer
+	a.restart(4)
+	a.ready(e) // the refdata port leads the reset and wipes the state
+	e.Flush()  // drains the old-era datagram into the wiped state
+	a.group(e, 1, 7, 2, 11)
+	e.Flush()
+	a.add(e, 1, 21)
+	a.add(e, 2, 22)
+	a.add(e, 3, 23)
+	e.Flush()
+	if v := violations(ac, "DELTA."); len(v) != 0 {
+		t.Errorf("got %d DELTA.* violations, want 0: an old-era datagram opened the seed window%s", len(v), describe(v))
+	}
+}
