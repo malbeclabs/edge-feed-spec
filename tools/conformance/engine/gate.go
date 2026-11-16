@@ -215,7 +215,7 @@ type oracleSuspect struct {
 }
 
 // mboState holds all per-instrument tracker state of one channel instance.
-// selectMBO creates it on the instance's first MBO frame.
+// selectMBO creates it on the instance's first MBO datagram.
 type mboState struct {
 	trackers map[instrTrackerKey]*instrTracker
 	// snapTrackers holds per-(channel, instrument) snapshot counters.
@@ -227,7 +227,7 @@ type mboState struct {
 	// Key is channelID; value is last seen Batch ID and whether it was set.
 	lastBatchID    map[uint8]uint32
 	lastBatchIDSet map[uint8]bool
-	// highestMktdataSeq is the highest mktdata-port frame Sequence the instance
+	// highestMktdataSeq is the highest mktdata-port datagram Sequence the instance
 	// sent. Used for SNAP.ANCHOR_IS_MKTDATA_SEQ: an Anchor Seq is a value of the
 	// mktdata series of the instance that sent the snapshot.
 	highestMktdataSeq    uint64
@@ -240,6 +240,10 @@ type mboState struct {
 	maxSnapCycle int
 	// oracleSuspects holds per-(channel, instrument) oracle suspect state (Task 26).
 	oracleSuspects map[instrTrackerKey]*oracleSuspect
+	// fallbackSet is the definition set that refdataState.notifyMBO last passed to
+	// this state from another instance. Only a state whose address has no refdata
+	// instance of its own reads one; see notifyMBO.
+	fallbackSet map[uint32]struct{}
 	// resetEra/resetEraSet track the Reset Count era that onResetCountForEra last
 	// wiped state for, so a reset of the instance observed on ANY of its ports wipes
 	// exactly once even though all three ports advance their era independently (F4).
@@ -312,6 +316,7 @@ func (s *mboState) onResetCount() {
 	s.maxSnapCycle = 0
 	s.book.onResetCount()
 	clear(s.oracleSuspects)
+	s.fallbackSet = nil
 }
 
 // onManifestBump retains trackers for surviving instruments and drops trackers
@@ -382,31 +387,20 @@ func (s *mboState) onInstrumentReset(ch uint8, instrID uint32, newAnchorSeq uint
 
 // --- Engine integration ---
 
-// gateDetector returns true when the channel's mktdata frame-seq series was
-// contiguous across the relevant window (no forward gaps observed), on every
-// instance of the channel. It is the gate of state keyed on the channel; see
-// Engine.dirtyOn for why any instance of the channel gates it.
-//
-// We consult the dirtyWindow flag of the channel's mktdata instances. The flag is
-// set in engine.go classify() whenever a forward gap is declared (res.gapBefore)
-// and cleared on era advance (advanceEra), so it reflects only gaps within the
-// current era.
-func (e *Engine) gateDetector(ch uint8) bool {
-	return !e.dirtyOn(core.PortMktData, ch)
-}
-
 // gateDetectorSnap returns true when the channel's snapshot frame-seq series was
 // contiguous (no forward gaps), on every instance of the channel. The
-// market-by-price snapshot rules gate on it.
+// market-by-price snapshot rules gate on it; see Engine.dirtyOn for why any
+// instance of the channel gates them.
 func (e *Engine) gateDetectorSnap(ch uint8) bool {
 	return !e.dirtyOn(core.PortSnapshot, ch)
 }
 
-// instanceGapless returns true when the frame-seq series of the channel instance in
-// front of the engine (Engine.curSrc, port, ch) was contiguous in the current era.
-// When it returns false, an anomaly in the instance's state is reported as
-// Unverifiable rather than Violation, because the missing frames could have carried
-// what explains it.
+// instanceGapless returns true when the Sequence Number series of the channel
+// instance in front of the engine (Engine.curSrc, port, ch) was contiguous in the
+// current era. The flag it reads (dirtyWindow) is set when a forward gap is
+// declared and cleared on era advance. When it returns false, an anomaly in the
+// instance's state is reported as Unverifiable rather than Violation, because the
+// missing datagrams could have carried what explains it.
 //
 // It is the gate of the market-by-order rules. Their state is keyed on the instance,
 // so only the instance's own loss can explain an anomaly in it: a datagram that
@@ -448,7 +442,7 @@ func (e *Engine) snapPortBound() bool {
 //     continuously without per-instrument gaps since seq=1 or since a recovery
 //     snapshot (bookTrusted=true). A prior gap could have carried a missing OrderAdd.
 //  3. The incoming perInstrSeq == lastInstrSeq+1 (no gap immediately before this msg).
-//  4. The instance's mktdata series is gapless (instanceGapless): a frame gap could
+//  4. The instance's mktdata series is gapless (instanceGapless): a datagram gap could
 //     have carried the missing delta.
 //
 // If any condition is false, the anomaly is Unverifiable, never Violation.
@@ -481,7 +475,7 @@ func (e *Engine) gateConsumer(ch uint8, instrID uint32, perInstrSeq uint32) bool
 
 // selectMBO points e.mbo at the state of the channel instance in front of the
 // engine, (Engine.curSrc, ch), and returns it. It creates the state on the
-// instance's first MBO frame.
+// instance's first MBO datagram.
 func (e *Engine) selectMBO(ch uint8) *mboState {
 	if e.mbos == nil {
 		e.mbos = make(map[refdataKey]*mboState)
@@ -1206,7 +1200,8 @@ func (e *Engine) onSnapGroupComplete(ch uint8, instrID uint32, anchorSeq uint64,
 	// RESET.RECOVERY_SNAPSHOT_ANCHOR_MATCHES_RESET: if the instrument had an
 	// InstrumentReset and was awaiting recovery, check anchor exact match.
 	// Gate: requires BOTH the snapshot port to be gapless (dirty==false) AND the
-	// mktdata port to be gapless (gateDetector). If either has a gap → Unverifiable.
+	// instance's mktdata port to be gapless (instanceGapless). If either has a gap →
+	// Unverifiable.
 	if dt.awaitingRecovery {
 		gapless := !dirty && e.instanceGapless(core.PortMktData, ch)
 		// RESET.SNAPSHOT_FOLLOWS passes here, and here is the only place it can: a
@@ -1386,28 +1381,42 @@ func (e *Engine) checkInstanceResetSnapshotFollows(s *mboState) {
 // engine/denominator.go.
 //
 // The rule judges each channel instance, on its own snapshot cycle and its own
-// definition set: each publisher of a channel runs its own round robin. Only the
-// channels that have reference data are judged, as before.
+// definition set: each publisher of a channel runs its own round robin. It judges
+// every instance that has MBO state on a channel with reference data, and every
+// instance that sent reference data but no MBO datagram: that instance ran no
+// snapshot cycle, so its instruments get insufficient_window and not silence.
 func (e *Engine) checkRoundRobinCoversManifest() {
-	if e.refdata == nil {
-		// No manifest: there is no instrument set to iterate, so there are no
-		// opportunities to account for — not one skipped opportunity.
+	if e.refdata == nil || len(e.mbos) == 0 {
+		// No manifest, or no snapshot state on any instance: there is no instrument
+		// set to iterate, or no feed of this kind, so there are no opportunities to
+		// account for — not one skipped opportunity.
 		return
 	}
 	withRefdata := make(map[uint8]bool)
+	keys := make(map[refdataKey]struct{})
 	for _, k := range e.refdata.keys() {
 		withRefdata[k.ch] = true
+		keys[k] = struct{}{}
 	}
-	e.eachMBOInstance(func(k refdataKey, s *mboState) {
+	for k := range e.mbos {
 		if withRefdata[k.ch] {
-			e.checkInstanceRoundRobin(k.ch, s)
+			keys[k] = struct{}{}
 		}
-	})
+	}
+	for _, k := range slices.SortedFunc(maps.Keys(keys), compareRefdataKeys) {
+		e.curSrc, e.mbo = k.src, e.mbos[k]
+		e.checkInstanceRoundRobin(k.ch, e.mbo)
+	}
+	e.curSrc, e.mbo = netip.Addr{}, nil
 }
 
 // checkInstanceRoundRobin is checkRoundRobinCoversManifest for the instance in
-// front of the engine.
+// front of the engine. s is nil for an instance with reference data and no MBO
+// state.
 func (e *Engine) checkInstanceRoundRobin(ch uint8, s *mboState) {
+	if s == nil {
+		s = newMBOState()
+	}
 	// Fewer than 2 clean cycles observed — conservative, this rule does not judge. The
 	// instruments are still enumerated below and reported, because a capture too short
 	// to hold two cycles must not read as one where every instrument was covered.

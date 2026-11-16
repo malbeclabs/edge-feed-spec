@@ -17,7 +17,7 @@ package engine
 //
 // Each test runs twice: with a different Reset Count on each publisher, which is
 // the usual case because the Reset Count is per process, and with the same one,
-// which hides the two eras from the frame state. The converse checks are in the
+// which hides the two eras from the datagram tracker state. The converse checks are in the
 // same tests: a fault inside one instance still fires, so the fix does not switch
 // the rules off.
 
@@ -77,20 +77,32 @@ func (p *mboPub) restart(era uint8) {
 
 // ready sends this publisher's reference data for one instrument, so that the
 // rules gated on a ready channel can grade it.
-func (p *mboPub) ready(e *Engine) {
+func (p *mboPub) ready(e *Engine) { p.refdataSet(e, 1, instInstr) }
+
+// refdataSet sends this publisher's reference data at one Manifest Seq: a
+// ManifestSummary, one InstrumentDefinition for each instrument, and a second
+// ManifestSummary that classifies the last definition.
+func (p *mboPub) refdataSet(e *Engine, manifestSeq uint16, ids ...uint32) {
 	manifest := wb.Frame(wire.MagicMBO).Channel(instCh).
-		Msg(wire.TypeManifest, 24, manifestBody(1, 1, 1)).Bytes()
-	def := wb.Frame(wire.MagicMBO).Channel(instCh).
-		Msg(wire.TypeInstrumentDef, 130, func(b *wb.Body) {
-			b.U32(instInstr) // body[0]   Instrument ID
-			b.U16(1)         // body[4]   Source ID
-			b.Pad(117)       // body[6]   opaque
-			b.U8(0)          // body[123] Price Bound: unbounded
-			b.U16(1)         // body[124] Manifest Seq
-		}).Bytes()
+		Msg(wire.TypeManifest, 24, manifestBody(1, manifestSeq, uint32(len(ids)))).Bytes()
 	p.send(e, core.PortRefData, manifest)
-	p.send(e, core.PortRefData, def)
+	for _, id := range ids {
+		p.send(e, core.PortRefData, wb.Frame(wire.MagicMBO).Channel(instCh).
+			Msg(wire.TypeInstrumentDef, 130, func(b *wb.Body) {
+				b.U32(id)          // body[0]   Instrument ID
+				b.U16(1)           // body[4]   Source ID
+				b.Pad(117)         // body[6]   opaque
+				b.U8(0)            // body[123] Price Bound: unbounded
+				b.U16(manifestSeq) // body[124] Manifest Seq
+			}).Bytes())
+	}
 	p.send(e, core.PortRefData, manifest)
+}
+
+// emptyGroup sends one complete snapshot group of an empty book for an instrument.
+func (p *mboPub) emptyGroup(e *Engine, instrID, snapID uint32) {
+	p.send(e, core.PortSnapshot, buildSnapBeginFull(instCh, instrID, 0, 0, snapID, 0))
+	p.send(e, core.PortSnapshot, buildSnapEndFull(instCh, instrID, 0, snapID))
 }
 
 func (p *mboPub) add(e *Engine, perSeq uint32, orderID uint64) {
@@ -274,5 +286,155 @@ func TestMBOInstanceLossGatesOnlyItsOwnRules(t *testing.T) {
 				t.Errorf("got %d REF.CANCEL_DANGLING_ORDER violations, want 1: loss on B gated a rule on A%s", len(got), describe(ac.findings))
 			}
 		})
+	}
+}
+
+// TestMBOInstanceSnapshotLossGatesOnlyItsOwnRules: B loses a snapshot datagram.
+// That loss cannot explain a SnapshotEnd that A sends with no SnapshotBegin, so the
+// grouping fault on A is still a violation.
+func TestMBOInstanceSnapshotLossGatesOnlyItsOwnRules(t *testing.T) {
+	for _, tc := range instanceEras {
+		t.Run(tc.name, func(t *testing.T) {
+			e, ac := newMBOEngineW1()
+			a, b := newMBOPub(srcA, tc.a), newMBOPub(srcB, tc.b)
+			b.emptyGroup(e, instInstr, 400000)
+			b.skip(core.PortSnapshot, 5)
+			b.emptyGroup(e, instInstr, 400001)
+			a.end(e, 0, 10) // no SnapshotBegin on A
+			e.Flush()
+
+			if got := violations(ac, "SNAP.BEGIN_ORDER_END_GROUPING"); len(got) != 1 {
+				t.Errorf("got %d SNAP.BEGIN_ORDER_END_GROUPING violations, want 1: loss on B gated a snapshot rule on A%s", len(got), describe(ac.findings))
+			}
+		})
+	}
+}
+
+// roundRobin returns the SNAP.ROUND_ROBIN_COVERS_MANIFEST findings by status, and
+// the unverifiable ones by reason.
+func roundRobin(ac *allCapture) (pass, viol int, unver map[string]int) {
+	unver = make(map[string]int)
+	for _, f := range findingsFor(ac, "SNAP.ROUND_ROBIN_COVERS_MANIFEST") {
+		switch f.Status {
+		case core.Pass:
+			pass++
+		case core.Violation:
+			viol++
+		case core.Unverifiable:
+			unver[f.Reason]++
+		}
+	}
+	return pass, viol, unver
+}
+
+// TestMBORoundRobinJudgesEachInstance: A and B each declare instruments 101 and
+// 102. A snapshots both twice. B snapshots only 101, twice. B's round robin misses
+// 102, and A's does not: one violation and three passes.
+func TestMBORoundRobinJudgesEachInstance(t *testing.T) {
+	e, ac := newMBOEngineW1()
+	a, b := newMBOPub(srcA, 3), newMBOPub(srcB, 7)
+	a.refdataSet(e, 1, instInstr, instInstr+1)
+	b.refdataSet(e, 1, instInstr, instInstr+1)
+	for cycle := uint32(0); cycle < 2; cycle++ {
+		a.emptyGroup(e, instInstr, 10+2*cycle)
+		a.emptyGroup(e, instInstr+1, 11+2*cycle)
+		b.emptyGroup(e, instInstr, 400000+cycle)
+	}
+	e.Flush()
+	e.EndRun()
+
+	if pass, viol, unver := roundRobin(ac); pass != 3 || viol != 1 || len(unver) != 0 {
+		t.Errorf("got %d passes, %d violations and unverifiable %v; want 3, 1 and none: each publisher runs its own round robin%s",
+			pass, viol, unver, describe(ac.findings))
+	}
+}
+
+// TestMBORoundRobinCoversARefdataOnlyInstance: A snapshots its instruments. C sends
+// reference data and nothing else. C ran no snapshot cycle, so each of its
+// instruments is reported insufficient_window, not left out.
+func TestMBORoundRobinCoversARefdataOnlyInstance(t *testing.T) {
+	srcC := netip.MustParseAddr("10.0.0.3")
+	e, ac := newMBOEngineW1()
+	a, c := newMBOPub(srcA, 3), newMBOPub(srcC, 9)
+	a.refdataSet(e, 1, instInstr, instInstr+1)
+	c.refdataSet(e, 1, instInstr, instInstr+1)
+	for cycle := uint32(0); cycle < 2; cycle++ {
+		a.emptyGroup(e, instInstr, 10+2*cycle)
+		a.emptyGroup(e, instInstr+1, 11+2*cycle)
+	}
+	e.Flush()
+	e.EndRun()
+
+	if pass, viol, unver := roundRobin(ac); pass != 2 || viol != 0 || unver[core.ReasonInsufficientWindow] != 2 {
+		t.Errorf("got %d passes, %d violations and unverifiable %v; want 2, 0 and 2 insufficient_window%s",
+			pass, viol, unver, describe(ac.findings))
+	}
+}
+
+// TestMBOFallbackStateFollowsTheSetItReads: A sends mktdata and no reference data,
+// so it reads B's set through forChannel. C sends both. B drops instrument 102 from
+// its set. A's tracker of 102 goes with it; C's does not, because C reads its own
+// set, which still holds 102.
+func TestMBOFallbackStateFollowsTheSetItReads(t *testing.T) {
+	srcC := netip.MustParseAddr("10.0.0.3")
+	e, _ := newMBOEngineW1()
+	a, b, c := newMBOPub(srcA, 3), newMBOPub(srcB, 7), newMBOPub(srcC, 9)
+	b.refdataSet(e, 1, instInstr, instInstr+1)
+	c.refdataSet(e, 1, instInstr, instInstr+1)
+	for _, p := range []*mboPub{a, c} {
+		p.send(e, core.PortMktData, buildOrderAddFull(instCh, instInstr+1, 1, 1, 0, 1, 100, 0))
+		p.send(e, core.PortMktData, buildOrderAddFull(instCh, instInstr, 1, 2, 0, 1, 100, 0))
+	}
+	e.Flush()
+	b.refdataSet(e, 2, instInstr)
+	e.Flush()
+
+	gone := instrTrackerKey{instCh, instInstr + 1}
+	if _, ok := e.mbos[refdataKey{src: srcA, ch: instCh}].trackers[gone]; ok {
+		t.Error("A reads B's set, and B dropped instrument 102, but A still tracks it")
+	}
+	if _, ok := e.mbos[refdataKey{src: srcC, ch: instCh}].trackers[gone]; !ok {
+		t.Error("C reads its own set, which still holds instrument 102, but B's change dropped it")
+	}
+}
+
+// TestMBOStateIsBoundedWithTheTrackers: the MBO state of an instance goes with the
+// last of its trackers when the tracker map evicts them. Its open snapshot group and
+// its awaited recovery snapshot are reported Unverifiable, truncated, and are not
+// lost. Eviction is not end of run, so neither is a violation.
+func TestMBOStateIsBoundedWithTheTrackers(t *testing.T) {
+	e, ac := newMBOEngineW1()
+	for i := 0; i < maxChannelInstances+64; i++ {
+		p := newMBOPub(netip.AddrFrom4([4]byte{10, byte(i >> 16), byte(i >> 8), byte(i)}), 1)
+		// The second datagram on each port classifies the first.
+		p.send(e, core.PortMktData, buildInstrumentResetFrame(instCh, instInstr, 0))
+		p.send(e, core.PortMktData, buildOrderAddFull(instCh, instInstr+1, 1, 1, 0, 1, 100, 0))
+		p.begin(e, 0, 1, 0)
+		p.order(e, 1, 11)
+	}
+	for k := range e.mbos {
+		owned := false
+		for _, port := range []core.Port{core.PortMktData, core.PortRefData, core.PortSnapshot} {
+			if _, ok := e.ports[instanceKey{src: k.src, port: port, ch: k.ch}]; ok {
+				owned = true
+			}
+		}
+		if !owned {
+			t.Fatalf("MBO state for %v channel %d outlived its trackers", k.src, k.ch)
+		}
+	}
+	for _, rule := range []string{"SNAP.BEGIN_ORDER_END_GROUPING", "RESET.SNAPSHOT_FOLLOWS"} {
+		truncated := 0
+		for _, f := range findingsFor(ac, rule) {
+			if f.Status == core.Violation {
+				t.Fatalf("%s: eviction produced a violation: %s", rule, f.Detail)
+			}
+			if f.Status == core.Unverifiable && f.Reason == core.ReasonTruncated {
+				truncated++
+			}
+		}
+		if truncated == 0 {
+			t.Errorf("%s: no Unverifiable truncated finding, so the evicted instances' opportunities were lost", rule)
+		}
 	}
 }

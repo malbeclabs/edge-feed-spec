@@ -2,6 +2,7 @@ package engine
 
 import (
 	"fmt"
+	"maps"
 	"math"
 	"net/netip"
 	"slices"
@@ -59,10 +60,10 @@ type Engine struct {
 	// Per-Instrument Seq, Snapshot ID, Anchor Seq and Reset Count, and its order
 	// flow is its own, so a subscriber MUST NOT apply two instances' messages to one
 	// state (market-by-order/spec.md, "Redundant Channel Instances"). selectMBO
-	// creates an entry on the first MBO frame of the instance.
+	// creates an entry on the first MBO datagram of the instance.
 	mbos map[refdataKey]*mboState
 	// mbo is the state of the instance in front of the engine. It is per-datagram
-	// context, like curSrc: selectMBO sets it for each MBO frame, and the end-of-run
+	// context, like curSrc: selectMBO sets it for each MBO datagram, and the end-of-run
 	// checks set it for each instance they visit (eachMBOInstance).
 	mbo *mboState
 	// Market-by-price consumer state; lazily initialised by ensureMBP.
@@ -246,7 +247,7 @@ func (e *Engine) emit(ruleID string, st core.Status, port core.Port, seq uint64,
 // ports × the 256 channels a u8 allows is 1,536) so only a pathological sender
 // reaches it.
 //
-// Reaching it is not free. dirtyOn scans the map and gateDetector consults it
+// Reaching it is not free. dirtyOn scans the map and the channel gates consult it
 // several times per message, so a sender that fills the map makes every message
 // pay a handful of 4,096-entry scans and every new instance one eviction scan:
 // throughput degrades linearly with the flood, while no result changes. A dirty
@@ -321,7 +322,42 @@ func (e *Engine) evictOldestInstance() {
 			return
 		}
 	}
-	delete(e.mbos, refdataKey{src: oldest.src, ch: oldest.ch})
+	e.dropMBO(refdataKey{src: oldest.src, ch: oldest.ch})
+}
+
+// dropMBO removes the MBO state of an instance that the engine stops tracking (see
+// evictOldestInstance). **Eviction is not end of run.** The instance can still be
+// sending, and its reorder buffers were discarded, so a verdict that turns on the
+// absence of a datagram cannot be a Violation. The open snapshot groups and the
+// awaited recovery snapshots of the instance are reported Unverifiable, reason
+// truncated, so that their opportunities are not lost. refdataState.drop does the
+// same for the refdata verdicts.
+func (e *Engine) dropMBO(k refdataKey) {
+	s, ok := e.mbos[k]
+	if !ok {
+		return
+	}
+	prevSrc, prevMBO := e.curSrc, e.mbo
+	e.curSrc, e.mbo = k.src, s
+	for _, ch := range slices.Sorted(maps.Keys(s.openSnaps)) {
+		if open := s.openSnaps[ch]; open != nil {
+			e.unverified("SNAP.BEGIN_ORDER_END_GROUPING", core.ReasonTruncated, core.PortSnapshot, 0, ch, open.instrID,
+				fmt.Sprintf("instrument %d: snapshot id %d was still open when the tracker map evicted the instance",
+					open.instrID, open.snapshotID))
+		}
+	}
+	for _, key := range sortedTrackerKeys(s.trackers) {
+		if dt := s.trackers[key]; dt.awaitingRecovery {
+			e.unverified("RESET.SNAPSHOT_FOLLOWS", core.ReasonTruncated, core.PortMktData, 0, key.channelID, key.instrumentID,
+				fmt.Sprintf("instrument %d: the tracker map evicted the instance before a recovery snapshot for the InstrumentReset (anchor seq %d)",
+					key.instrumentID, dt.awaitingRecoveryAnchor))
+		}
+	}
+	if prevMBO == s {
+		prevMBO = nil
+	}
+	e.curSrc, e.mbo = prevSrc, prevMBO
+	delete(e.mbos, k)
 }
 
 // instancesOn lists the instances observed on a port, ordered by channel then
@@ -473,10 +509,10 @@ func (e *Engine) captureDirtyOn(port core.Port, ch uint8) bool {
 }
 
 // mktdataPending reports whether the mktdata reorder buffer of the channel instance in
-// front of the engine still holds unclassified frames. Cross-port snapshot checks that
+// front of the engine still holds unclassified datagrams. Cross-port snapshot checks that
 // compare a snapshot against mktdata-derived state (SNAP.ANCHOR_IS_MKTDATA_SEQ,
 // SNAP.LAST_INSTRUMENT_SEQ_CONSISTENT_WITH_DELTAS) must downgrade to Unverifiable when
-// this is true, even on a gapless channel: a still-buffered mktdata frame could carry
+// this is true, even on a gapless channel: a still-buffered mktdata datagram could carry
 // the anchor seq or the deltas up to K, so the current mktdata state is not yet
 // as-of-anchor (F3). Only the instance's own buffer can: the anchor and K of a
 // snapshot are values of the instance that sent it.
@@ -574,10 +610,10 @@ func readyDeadlineTS(firstSendTS uint64, window time.Duration) uint64 {
 // snapPortDirty reports whether the snapshot verifiability window of the channel
 // instance in front of the engine is tainted (a snapshot-seq gap or transport
 // corruption occurred this era). Used by the SNAP.TOTAL_ORDERS_COUNT_MATCH
-// under-count gate so a truncated snapshot frame — whose header may not decode a
+// under-count gate so a truncated snapshot datagram — whose header may not decode a
 // channel — still downgrades the under-count to Unverifiable rather than a false
 // publisher Violation (F2). markCorrupt taints every instance on the port for such
-// a frame, so the instance's own window sees it.
+// a datagram, so the instance's own window sees it.
 func (e *Engine) snapPortDirty(ch uint8) bool {
 	return !e.instanceGapless(core.PortSnapshot, ch)
 }
@@ -681,7 +717,7 @@ func (e *Engine) Process(src netip.Addr, f *wire.Frame, port core.Port, sf []wir
 		// port (mktdata, refdata, OR snapshot) to observe the era advance wipes the
 		// instance's per-instrument MBO state, idempotently (onResetCountForEra is a
 		// no-op for ports that advance into the same era later). This keeps the three
-		// independent ports consistent: new-era frames on ANY port are never checked
+		// independent ports consistent: new-era datagrams on ANY port are never checked
 		// against stale old-era trackers. Handling only the mktdata-leads case (the
 		// prior approach) left a false-positive window when the snapshot port observed
 		// the reset first (F4). The other instances of the channel keep their state:
@@ -693,7 +729,7 @@ func (e *Engine) Process(src netip.Addr, f *wire.Frame, port core.Port, sf []wir
 			wiped := e.selectMBO(f.Header.ChannelID).onResetCountForEra(res.newEra)
 			// If a NON-snapshot port led the reset and actually wiped MBO state, any
 			// old-era snapshot group was just dropped and old-era SnapshotOrder/End
-			// frames may still be in flight on the snapshot port. Taint the instance's
+			// datagrams may still be in flight on the snapshot port. Taint the instance's
 			// snapshot port so orphan-grouping checks (which gate on instanceGapless)
 			// treat those stragglers as Unverifiable rather than a false BEGIN_ORDER_END
 			// Violation, until the snapshot port observes its own era advance (which
