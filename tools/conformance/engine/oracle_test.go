@@ -127,6 +127,7 @@ func buildOrderAddExact(ch uint8, instrID uint32, perSeq uint32, orderID uint64,
 // orderID range: 80000+n (to avoid conflict with test-case orderIDs).
 func seedOracleHistory(e *Engine, ch uint8, instrID uint32, n uint32, mktSeq uint64) uint64 {
 	reachedReadyMBO(e, ch, instrID, 0, 1)
+	seedEmptyBooks(e, ch, instrID)
 	seq := mktSeq
 	for i := uint32(1); i <= n; i++ {
 		runMktdataSeq(e, buildOrderAddExact(ch, instrID, i, uint64(80000+i), 0, 0, 1000, 100, 10), seq)
@@ -195,6 +196,7 @@ func TestOracleMismatchSuspectedThenConfirmed(t *testing.T) {
 	// Seed gapless history: two orders added at perSeq=1,2.
 	// orderID 80001 and 80002 are in the delta book at K=2.
 	reachedReadyMBO(e, ch, instrID, 0, 1)
+	seedEmptyBooks(e, ch, instrID)
 	runMktdataSeq(e, buildOrderAddExact(ch, instrID, 1, 80001, 0, 0, 1000, 100, 10), 1)
 	runMktdataSeq(e, buildOrderAddExact(ch, instrID, 2, 80002, 1, 0, 2000, 200, 5), 2)
 	e.Flush()
@@ -258,6 +260,7 @@ func TestOracleMismatchSuspectedThenConfirmedFixedK(t *testing.T) {
 
 	// Bootstrap refdata so gateConsumer condition 1 is met.
 	reachedReadyMBO(e, ch, instrID, 0, 1)
+	seedEmptyBooks(e, ch, instrID)
 	// Feed perSeq=1 so lastInstrSeq=1 and bookTrusted=true.
 	runMktdataSeq(e, buildOrderAddExact(ch, instrID, 1, 80001, 0, 0, 1000, 100, 10), 1)
 	e.Flush()
@@ -305,6 +308,7 @@ func TestOracleUnverifiableOnLoss(t *testing.T) {
 
 	// Bootstrap refdata.
 	reachedReadyMBO(e, ch, instrID, 0, 1)
+	seedEmptyBooks(e, ch, instrID)
 
 	// Feed perSeq=1 then SKIP perSeq=2 (gap) → bookTrusted=false after the gap.
 	runMktdataSeq(e, buildOrderAddExact(ch, instrID, 1, 80001, 0, 0, 1000, 100, 10), 1)
@@ -338,6 +342,7 @@ func TestOracleConfirmCycles1(t *testing.T) {
 
 	// Bootstrap refdata and seed one order.
 	reachedReadyMBO(e, ch, instrID, 0, 1)
+	seedEmptyBooks(e, ch, instrID)
 	runMktdataSeq(e, buildOrderAddExact(ch, instrID, 1, 80001, 0, 0, 1000, 100, 10), 1)
 	e.Flush()
 	clearFindings(&oc.allCapture)
@@ -369,6 +374,7 @@ func TestOracleHiddenOrdersExcluded(t *testing.T) {
 
 	// Bootstrap refdata.
 	reachedReadyMBO(e, ch, instrID, 0, 1)
+	seedEmptyBooks(e, ch, instrID)
 
 	// Add a hidden order at perSeq=1. Hidden orders go into hiddenIDs, not live.
 	runMktdataSeq(e, buildOrderAddExact(ch, instrID, 1, 80001, 0, hiddenFlags, 1000, 100, 10), 1)
@@ -418,6 +424,7 @@ func TestOracleUnverifiableBookAheadOfK(t *testing.T) {
 
 	// Bootstrap refdata.
 	reachedReadyMBO(e, ch, instrID, 0, 1)
+	seedEmptyBooks(e, ch, instrID)
 
 	// Feed perSeq=1 and perSeq=2 (delta book at K=2 after flush).
 	runMktdataSeq(e, buildOrderAddExact(ch, instrID, 1, 80001, 0, 0, 1000, 100, 10), 1)
@@ -451,6 +458,7 @@ func TestOracleUnverifiableDirtyGroup(t *testing.T) {
 
 	// Bootstrap refdata and seed gapless history at K=1.
 	reachedReadyMBO(e, ch, instrID, 0, 1)
+	seedEmptyBooks(e, ch, instrID)
 	runMktdataSeq(e, buildOrderAddExact(ch, instrID, 1, 80001, 0, 0, 1000, 100, 10), 1)
 	e.Flush()
 	clearFindings(&oc.allCapture)
@@ -482,6 +490,7 @@ func TestOracleSuspectResetOnDifferentSignature(t *testing.T) {
 
 	// Bootstrap refdata and add two orders.
 	reachedReadyMBO(e, ch, instrID, 0, 1)
+	seedEmptyBooks(e, ch, instrID)
 	runMktdataSeq(e, buildOrderAddExact(ch, instrID, 1, 80001, 0, 0, 1000, 100, 10), 1)
 	runMktdataSeq(e, buildOrderAddExact(ch, instrID, 2, 80002, 1, 0, 2000, 200, 5), 2)
 	e.Flush()
@@ -529,6 +538,7 @@ func TestOracleSuspectClearedOnMatch(t *testing.T) {
 	e, oc := newOracleEngine(2)
 
 	reachedReadyMBO(e, ch, instrID, 0, 1)
+	seedEmptyBooks(e, ch, instrID)
 	runMktdataSeq(e, buildOrderAddExact(ch, instrID, 1, 80001, 0, 0, 1000, 100, 10), 1)
 	e.Flush()
 	clearFindings(&oc.allCapture)
@@ -608,6 +618,7 @@ func TestOracleUnverifiableStructuralViolation(t *testing.T) {
 
 	// Bootstrap refdata and seed gapless history at K=1.
 	reachedReadyMBO(e, ch, instrID, 0, 1)
+	seedEmptyBooks(e, ch, instrID)
 	runMktdataSeq(e, buildOrderAddExact(ch, instrID, 1, 80001, 0, 0, 1000, 100, 10), 1)
 	e.Flush()
 	clearFindings(&oc.allCapture)
@@ -650,6 +661,7 @@ func TestOracleSuspectResetOnUnverifiable(t *testing.T) {
 
 	// Bootstrap refdata and seed one order at K=1.
 	reachedReadyMBO(e, ch, instrID, 0, 1)
+	seedEmptyBooks(e, ch, instrID)
 	runMktdataSeq(e, buildOrderAddExact(ch, instrID, 1, 80001, 0, 0, 1000, 100, 10), 1)
 	e.Flush()
 	clearFindings(&oc.allCapture)
@@ -708,6 +720,7 @@ func TestOracleUnverifiableDuplicateDelta(t *testing.T) {
 	// Delta book at K=2: {80001: side=0, flags=0, enterTS=1000, price=100, qty=10}
 	//                     {80002: side=1, flags=0, enterTS=2000, price=200, qty=5}
 	reachedReadyMBO(e, ch, instrID, 0, 1)
+	seedEmptyBooks(e, ch, instrID)
 	runMktdataSeq(e, buildOrderAddExact(ch, instrID, 1, 80001, 0, 0, 1000, 100, 10), 1)
 	runMktdataSeq(e, buildOrderAddExact(ch, instrID, 2, 80002, 1, 0, 2000, 200, 5), 2)
 	e.Flush()

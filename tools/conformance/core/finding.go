@@ -165,8 +165,9 @@ const (
 	// ReasonSuperseded — not evaluated because another finding already explains
 	// this unit. Reporting both would name one defect twice.
 	ReasonSuperseded = "superseded"
-	// ReasonUntrusted — the instrument's history is not established: it was first
-	// seen mid-stream, or a prior per-instrument gap cleared its trust.
+	// ReasonUntrusted — a snapshot seeded the instrument's book, and a later
+	// per-instrument gap cleared its trust. A book that no snapshot has seeded yet
+	// is ReasonColdStart.
 	ReasonUntrusted = "untrusted"
 	// ReasonBoundSubset — the capture covers a subset of the deployment, so the
 	// absence the check reads may be outside it rather than missing.

@@ -237,6 +237,39 @@ var snapshotDriven = map[string]struct{}{
 	"SNAP.TOTAL_ORDERS_COUNT_MATCH":                   {},
 }
 
+// seedGated lists the market-by-order rules that grade a message against the
+// reconstructed book. A book is trusted only after a snapshot group seeds it
+// (engine.seedBookFromSnapshot), so these rules reach a verdict only when the
+// snapshot port is bound. Without `--snapshot-port` they still report each
+// opportunity, as unverifiable, from the mktdata path. That is why they are not in
+// snapshotDriven and are not reported as NA. But no run without the port can pass
+// or fail them, so reportStarvedRules names them too.
+var seedGated = map[string]struct{}{
+	"FIELD.SOURCE_ID_CONSISTENCY":    {},
+	"REF.CANCEL_DANGLING_ORDER":      {},
+	"REF.DUPLICATE_LIVE_ORDERADD":    {},
+	"REF.EXEC_DANGLING_ORDER":        {},
+	"REF.EXEC_OVERFILL":              {},
+	"REF.FULLFILL_FLAG_DISAGREEMENT": {},
+	"REF.OPERATION_AFTER_REMOVAL":    {},
+	"REF.SIDE_PRICE_CONSISTENCY":     {},
+	"TRADE.EXEC_GROUPING":            {},
+}
+
+// SeedGatedRules returns the rule IDs applicable to feed that reach a verdict only
+// on a book that a snapshot seeded. Sorted, so callers report them
+// deterministically.
+func SeedGatedRules(feed Feed) []string {
+	var out []string
+	for _, r := range Rules {
+		if _, ok := seedGated[r.ID]; ok && slices.Contains(r.Feeds, feed) {
+			out = append(out, r.ID)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 // SnapshotDrivenRules returns the rule IDs applicable to feed that can only ever
 // fire from a snapshot-port frame — the rules an operator silently loses by leaving
 // --snapshot-port unset. Sorted, so callers report them deterministically.
