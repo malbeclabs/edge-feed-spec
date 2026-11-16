@@ -1,6 +1,9 @@
 package core
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
 func TestRegistryComplete(t *testing.T) {
 	if len(Rules) != 94 {
@@ -117,5 +120,25 @@ func TestFeedRuleCounts(t *testing.T) {
 		if _, ok := want[feed]; !ok {
 			t.Errorf("feed %s has rules but no expected count; add it here and to the README table", feed)
 		}
+	}
+}
+
+// TestSeedGatedRulesAreMarketByOrderRules: every entry of seedGated names a rule
+// in the catalog that applies to the market-by-order feed. A misspelled or
+// misplaced entry would drop out of the warning in reportStarvedRules without a
+// sound.
+func TestSeedGatedRulesAreMarketByOrderRules(t *testing.T) {
+	for id := range seedGated {
+		meta, ok := Lookup(id)
+		if !ok {
+			t.Errorf("%s is in seedGated but not in the rule catalog", id)
+			continue
+		}
+		if !slices.Contains(meta.Feeds, FeedMBO) {
+			t.Errorf("%s is in seedGated but does not apply to the mbo feed", id)
+		}
+	}
+	if got := SeedGatedRules(FeedMBO); len(got) != len(seedGated) {
+		t.Errorf("SeedGatedRules(mbo) returns %d rules, want %d", len(got), len(seedGated))
 	}
 }

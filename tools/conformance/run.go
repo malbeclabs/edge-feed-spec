@@ -88,6 +88,16 @@ func reportStarvedRules(rep report.Reporter, opts RunOpts) {
 	if opts.SnapshotPort != 0 {
 		return
 	}
+	// The rules that grade a message against the book do report, as unverifiable,
+	// so they are not marked na. But no book is seeded without the snapshot port,
+	// so no run like this one can pass or fail them, and the operator must hear it.
+	if gated := core.SeedGatedRules(opts.Cfg.Feed); len(gated) > 0 {
+		fmt.Fprintf(os.Stderr,
+			"dz-conformance: WARNING --snapshot-port is not set, so no %s book is seeded from a "+
+				"snapshot, and %d rule(s) that grade a message against the book report every "+
+				"opportunity as unverifiable. The exit code does not cover them: %v\n",
+			opts.Cfg.Feed, len(gated), gated)
+	}
 	starved := core.SnapshotDrivenRules(opts.Cfg.Feed)
 	if len(starved) == 0 {
 		return // this feed has no snapshot-port rules; nothing is lost

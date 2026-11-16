@@ -133,11 +133,18 @@ func (e *Engine) runOracleForGroup(ch uint8, snap *openSnapshot, snapPortSeq uin
 				fmt.Sprintf("instrument %d: this snapshot group seeds the book, so there is no book to compare it with", instrID))
 			return
 		}
-		// Cold start and a prior gap both land here and the tracker does not record
-		// which, so the reason says what is actually known — the history is not
-		// established — rather than guessing at a cause.
+		// No group has seeded the book yet: on a busy instrument the tracker is often
+		// past K when a group ends, so the wait can last several cycles. That is the
+		// state the check reads not being established yet, which is cold_start and
+		// routine, and not a fault upstream.
+		if !dt.seeded {
+			e.unverifiable(key, snapPortSeq, core.ReasonColdStart,
+				fmt.Sprintf("instrument %d: no snapshot group has seeded the book yet, so there is no book to compare", instrID))
+			return
+		}
+		// The book was seeded, and a per-instrument gap cleared its trust.
 		e.unverifiable(key, snapPortSeq, core.ReasonUntrusted,
-			fmt.Sprintf("instrument %d's order history is not established (mid-stream start or a prior per-instrument gap)", instrID))
+			fmt.Sprintf("instrument %d: a per-instrument gap cleared the trust of the book a snapshot seeded", instrID))
 		return
 	}
 	if dt.bookCorruptedByDup {

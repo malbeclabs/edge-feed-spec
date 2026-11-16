@@ -164,6 +164,11 @@ type instrTracker struct {
 	// RESET.RECOVERY_SNAPSHOT_ANCHOR_MATCHES_RESET).
 	awaitingRecovery       bool
 	awaitingRecoveryAnchor uint64 // New Anchor Seq from the InstrumentReset
+	// seeded is true once a snapshot group seeded this book in the current
+	// lifecycle (seedBookFromSnapshot). The oracle reads it to tell a book that is
+	// still waiting for its first seed (cold_start) from one that lost its trust to
+	// a per-instrument gap (untrusted).
+	seeded bool
 }
 
 // snapOrderRecord is the full order record collected from a SnapshotOrder message.
@@ -236,6 +241,12 @@ type mboState struct {
 	// mktdata series of the instance that sent the snapshot.
 	highestMktdataSeq    uint64
 	highestMktdataSeqSet bool
+	// firstMktdataSeq is the first mktdata-port datagram Sequence the instance sent
+	// that this subscriber classified in the current era. A snapshot whose Anchor Seq
+	// is older than firstMktdataSeq-1 was taken before this subscriber saw the
+	// instance's mktdata, so deltas after the anchor can be ones it never saw.
+	firstMktdataSeq    uint64
+	firstMktdataSeqSet bool
 	// book holds the per-instrument live order-id set (Task 20).
 	book *bookState
 	// maxSnapCycle is the highest snapCount observed across all instruments in the
@@ -317,6 +328,7 @@ func (s *mboState) onResetCount() {
 	clear(s.lastBatchIDSet)
 	s.highestMktdataSeq = 0
 	s.highestMktdataSeqSet = false
+	s.firstMktdataSeqSet = false
 	s.maxSnapCycle = 0
 	s.book.onResetCount()
 	clear(s.oracleSuspects)
@@ -545,6 +557,10 @@ func (e *Engine) checkMBO(f *wire.Frame, ch uint8) {
 	if !e.mbo.highestMktdataSeqSet || frameSeq > e.mbo.highestMktdataSeq {
 		e.mbo.highestMktdataSeq = frameSeq
 		e.mbo.highestMktdataSeqSet = true
+	}
+	if !e.mbo.firstMktdataSeqSet {
+		e.mbo.firstMktdataSeq = frameSeq
+		e.mbo.firstMktdataSeqSet = true
 	}
 
 	for _, m := range f.Messages {
@@ -1216,9 +1232,15 @@ func (e *Engine) handleSnapEnd(m wire.Message, ch uint8, snapPortSeq uint64) {
 //     InstrumentReset (recoveryKSet). RESET.NO_DANGLING_DELTAS_AT_OR_BELOW_ANCHOR
 //     grades the first delta against K, and applyDeltaSeq clears the trust if it
 //     is not K+1.
-//   - The tracker has no delta, and the instance's mktdata series is classified
-//     through the group's Anchor Seq. Every delta up to K came before this
-//     subscriber joined. The tracker moves to K, so the next delta must be K+1.
+//   - The tracker has no delta, and this subscriber classified every mktdata
+//     datagram of the instance from the one after the group's Anchor Seq up to
+//     the anchor itself and beyond: the first datagram it classified is at most
+//     Anchor Seq + 1, it has classified past the anchor, and none is still
+//     buffered. Every delta up to K then came before the anchor, and every delta
+//     after K is one this subscriber sees. The tracker moves to K, so the next
+//     delta must be K+1. If the first datagram it classified is later (a
+//     restart), a delta after K can be one it never saw, and moving to K would
+//     make the next delta a false DELTA.PERINSTR_DENSITY violation.
 //
 // When the tracker is past K, the deltas after K are already in the book, and the
 // book stays untrusted until a later group lines up.
@@ -1234,6 +1256,7 @@ func (e *Engine) seedBookFromSnapshot(ch uint8, snap *openSnapshot) {
 	}
 	e.mbo.book.book(ch, snap.instrID).seed(snap.orders)
 	dt.bookTrusted = true
+	dt.seeded = true
 	dt.bookCorruptedByDup = false
 }
 
@@ -1256,7 +1279,8 @@ func (e *Engine) seedPlan(ch uint8, snap *openSnapshot) (ok, moveToK bool) {
 	case k == 0 || dt.recoveryKSet:
 		// The first delta grades the seed: see applyDeltaSeq.
 		return true, false
-	case e.mbo.highestMktdataSeqSet && snap.anchorSeq <= e.mbo.highestMktdataSeq && !e.mktdataPending(ch):
+	case e.mbo.firstMktdataSeqSet && snap.anchorSeq+1 >= e.mbo.firstMktdataSeq &&
+		snap.anchorSeq <= e.mbo.highestMktdataSeq && !e.mktdataPending(ch):
 		return true, true
 	}
 	return false, false

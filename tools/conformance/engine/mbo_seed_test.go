@@ -15,6 +15,7 @@ package engine
 // publisher produced.
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/malbeclabs/edge-feed-spec/tools/conformance/core"
@@ -208,5 +209,191 @@ func TestSeedingGroupIsNotCompared(t *testing.T) {
 	got = findingsFor(ac, "SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT")
 	if len(got) != 1 || got[0].Status != core.Pass {
 		t.Errorf("second group: got %v, want one Pass", got)
+	}
+}
+
+// otherInstrAdds sends n OrderAdds of another instrument, so that the mktdata
+// series moves without a delta of instInstr.
+func (p *mboPub) otherInstrAdds(e *Engine, n uint32) {
+	for i := uint32(1); i <= n; i++ {
+		p.send(e, core.PortMktData, buildOrderAddFull(instCh, instInstr+1, i, uint64(70000+i), 0, 1, 100, 0))
+	}
+}
+
+// TestRestartAnchorBeforeFirstDatagramDoesNotSeed: the validator restarts while
+// the publisher runs, so the first mktdata datagram it classifies is at Sequence
+// 100. A group taken at Anchor Seq 50 with K = 40 arrives for an instrument with no
+// delta seen yet. Deltas 41 to 44 came between the anchor and the restart, so the
+// next delta seen is 45. A seed that moved the tracker to 40 would make 45 a false
+// DELTA.PERINSTR_DENSITY violation.
+func TestRestartAnchorBeforeFirstDatagramDoesNotSeed(t *testing.T) {
+	e, ac, a := readyPub(t)
+	a.skip(core.PortMktData, 100)
+	a.otherInstrAdds(e, 3)
+	e.Flush()
+	a.group(e, 50, 7, 40, 11)
+	e.Flush()
+	a.cancel(e, 45, 11)
+	a.cancel(e, 46, 999)
+	e.Flush()
+	if v := violations(ac, "DELTA."); len(v) != 0 {
+		t.Errorf("got %d DELTA.* violations, want 0: the validator never saw the deltas after the anchor%s", len(v), describe(v))
+	}
+	if v, _ := danglingCancels(ac); v != 0 {
+		t.Errorf("got %d REF.CANCEL_DANGLING_ORDER violations, want 0: the book must not be seeded%s", v, describe(ac.findings))
+	}
+}
+
+// TestAnchorAheadOfClassifiedMktdataDoesNotSeed: the group's Anchor Seq is past
+// every mktdata datagram classified so far, so deltas up to K can still arrive. A
+// seed at K would read them as late or replayed deltas.
+func TestAnchorAheadOfClassifiedMktdataDoesNotSeed(t *testing.T) {
+	e, ac, a := readyPub(t)
+	a.otherInstrAdds(e, 1)
+	e.Flush()
+	a.group(e, 5, 7, 3, 11)
+	e.Flush()
+	a.add(e, 1, 1)
+	a.add(e, 2, 2)
+	a.add(e, 3, 3)
+	a.cancel(e, 4, 2)
+	e.Flush()
+	if v := violations(ac, "DELTA."); len(v) != 0 {
+		t.Errorf("got %d DELTA.* violations, want 0: the deltas up to K arrived after the group%s", len(v), describe(v))
+	}
+}
+
+// TestSeedReplacesTheUntrustedBook: the untrusted book holds order 7 from a delta.
+// The group at K = 50 holds only order 8, so order 7 is not resting at K. After
+// the seed, a cancel of 7 is dangling.
+func TestSeedReplacesTheUntrustedBook(t *testing.T) {
+	e, ac, a := readyPub(t)
+	a.add(e, 50, 7)
+	e.Flush()
+	a.group(e, 0, 7, 50, 8)
+	e.Flush()
+	a.cancel(e, 51, 7)
+	e.Flush()
+	if v, _ := danglingCancels(ac); v != 1 {
+		t.Errorf("got %d REF.CANCEL_DANGLING_ORDER violations, want 1: the seed must replace the book, not add to it%s", v, describe(ac.findings))
+	}
+}
+
+// TestFirstDeltaAfterSeedMustContinue: the first delta after a seed must continue
+// from the group's K. If it does not, deltas are missing from the seeded book, so
+// it is untrusted, and a cancel of an order that a missing delta could have added
+// is not a violation.
+func TestFirstDeltaAfterSeedMustContinue(t *testing.T) {
+	t.Run("recovery snapshot, first delta past K+1", func(t *testing.T) {
+		e, ac, a := readyPub(t)
+		a.group(e, 0, 1, 0)
+		e.Flush()
+		a.add(e, 1, 1)
+		e.Flush()
+		anchor := a.seq[core.PortMktData]
+		a.send(e, core.PortMktData, buildInstrumentResetFrame(instCh, instInstr, anchor))
+		e.Flush()
+		a.group(e, anchor, 2, 7, 11)
+		e.Flush()
+		a.add(e, 10, 12)     // deltas 8 and 9 are missing
+		a.cancel(e, 11, 999) // 8 or 9 could have added it
+		e.Flush()
+		if v, _ := danglingCancels(ac); v != 0 {
+			t.Errorf("got %d REF.CANCEL_DANGLING_ORDER violations, want 0%s", v, describe(ac.findings))
+		}
+	})
+	t.Run("seed at K = 0, first delta past 1", func(t *testing.T) {
+		e, ac, a := readyPub(t)
+		a.group(e, 0, 1, 0)
+		e.Flush()
+		a.add(e, 3, 12)     // deltas 1 and 2 are missing
+		a.cancel(e, 4, 999) // 1 or 2 could have added it
+		e.Flush()
+		if v, _ := danglingCancels(ac); v != 0 {
+			t.Errorf("got %d REF.CANCEL_DANGLING_ORDER violations, want 0%s", v, describe(ac.findings))
+		}
+	})
+}
+
+// TestUnseededWaitIsColdStart: a book that no group has seeded yet is the state the
+// oracle reads not being established, which is cold_start. Only a book that a
+// group seeded and a per-instrument gap then made untrusted is untrusted, which
+// the coverage-loss alert counts.
+func TestUnseededWaitIsColdStart(t *testing.T) {
+	e, ac, a := readyPub(t)
+	oracleReason := func() string {
+		got := findingsFor(ac, "SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT")
+		if len(got) != 1 || got[0].Status != core.Unverifiable {
+			t.Fatalf("got %v, want one Unverifiable", got)
+		}
+		clearFindings(ac)
+		return got[0].Reason
+	}
+	a.add(e, 50, 7)
+	a.add(e, 51, 8)
+	e.Flush()
+	clearFindings(ac)
+	a.group(e, 0, 7, 50, 7) // the tracker is past K
+	e.Flush()
+	if r := oracleReason(); r != core.ReasonColdStart {
+		t.Errorf("never seeded: reason %q, want %q", r, core.ReasonColdStart)
+	}
+	a.group(e, 0, 8, 51, 7, 8) // lines up: seeds
+	e.Flush()
+	if r := oracleReason(); r != core.ReasonColdStart {
+		t.Errorf("seeding group: reason %q, want %q", r, core.ReasonColdStart)
+	}
+	a.add(e, 53, 9) // a per-instrument gap
+	a.add(e, 54, 10)
+	e.Flush()
+	clearFindings(ac)
+	a.group(e, 0, 9, 53, 7, 8, 9) // the tracker is past K
+	e.Flush()
+	if r := oracleReason(); r != core.ReasonUntrusted {
+		t.Errorf("seeded, then a gap: reason %q, want %q", r, core.ReasonUntrusted)
+	}
+}
+
+// TestSeedGatedRulesNeedASeededBook: one stream that is non-conformant for five of
+// the seed-gated rules. Without a seed none of them is a violation; after an empty
+// seed each one is. This is what reportStarvedRules warns about when
+// --snapshot-port is not set.
+func TestSeedGatedRulesNeedASeededBook(t *testing.T) {
+	rules := []string{
+		"REF.DUPLICATE_LIVE_ORDERADD", "FIELD.SOURCE_ID_CONSISTENCY", "REF.OPERATION_AFTER_REMOVAL",
+		"REF.CANCEL_DANGLING_ORDER", "REF.EXEC_DANGLING_ORDER",
+	}
+	gated := core.SeedGatedRules(core.FeedMBO)
+	for _, id := range rules {
+		if !slices.Contains(gated, id) {
+			t.Fatalf("%s needs a seeded book but core.SeedGatedRules does not list it", id)
+		}
+	}
+	stream := func(e *Engine, a *mboPub) {
+		a.send(e, core.PortMktData, buildOrderAddFull(instCh, instInstr, 1, 1, 0, 1, 100, 0))
+		a.send(e, core.PortMktData, buildOrderAddFull(instCh, instInstr, 2, 1, 0, 1, 100, 0))          // live already
+		a.send(e, core.PortMktData, buildOrderCancelFull(instCh, instInstr, 3, 1, 2))                  // Source ID 2, not 1
+		a.send(e, core.PortMktData, buildOrderCancelFull(instCh, instInstr, 4, 1, 1))                  // removed already
+		a.cancel(e, 5, 999)                                                                            // never added
+		a.send(e, core.PortMktData, buildOrderExecuteFull(instCh, instInstr, 6, 998, 0, 1, 0, 100, 1)) // never added
+		e.Flush()
+	}
+
+	e, ac, a := readyPub(t)
+	stream(e, a)
+	for _, id := range rules {
+		if n := len(violations(ac, id)); n != 0 {
+			t.Errorf("unseeded: %s has %d violations, want 0", id, n)
+		}
+	}
+
+	e, ac, a = readyPub(t)
+	a.group(e, 0, 1, 0)
+	e.Flush()
+	stream(e, a)
+	for _, id := range rules {
+		if n := len(violations(ac, id)); n == 0 {
+			t.Errorf("seeded: %s has no violation, so the stream does not exercise it", id)
+		}
 	}
 }
