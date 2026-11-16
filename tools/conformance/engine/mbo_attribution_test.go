@@ -2,8 +2,9 @@ package engine
 
 // mbo_attribution_test.go — market-by-order findings name the publisher.
 //
-// The market-by-order state is keyed on the channel instance, so a rule that reads
-// it judges one publisher, and the catalog lists it as StateMBOInstance. These
+// The market-by-order state is keyed on (source IP address, Channel ID): one
+// publisher of the channel, across its port roles. A rule that reads it judges that
+// publisher, and the catalog lists it as StateMBOInstance. These
 // tests pin the address on each of the three paths that emit such a finding: in
 // front of a datagram, at end of run, and at eviction. Each also checks the
 // invariant over every finding of the run: a finding carries an address if and

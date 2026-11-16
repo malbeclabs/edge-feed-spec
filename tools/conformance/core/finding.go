@@ -53,11 +53,13 @@ const (
 	// only the message in front of it is also of this kind, because it judges
 	// one path and a tier-2 rule cannot be StateNone.
 	StateInstanceCounters
-	// StateMBOInstance is the market-by-order state, which engine.mbos keys on the
-	// channel instance (source IP address and Channel ID): the per-instrument
-	// sequence, the Batch ID, the snapshot anchors and groups, the reconstructed
-	// book and the round robin. Every port of one publisher feeds it, and no other
-	// publisher does, so a rule that reads it judges that publisher.
+	// StateMBOInstance is the market-by-order state, which engine.mbos keys on
+	// (source IP address, Channel ID): the per-instrument sequence, the Batch ID,
+	// the snapshot anchors and groups, the reconstructed book and the round robin.
+	// The key holds no destination port, so the state spans the three port roles
+	// of one publisher of the channel: three channel instances (GLOSSARY.md), one
+	// source IP address. No other publisher feeds it, so a rule that reads it
+	// judges that publisher.
 	StateMBOInstance
 )
 
@@ -93,13 +95,16 @@ const (
 //     reconstructed state. They have the same keys as StateCounters: the
 //     market-by-price state from every path of the channel, and the
 //     reference-data state from one instance, whose rules have not moved.
-//   - StateMBOInstance is the market-by-order state of one channel instance. The
+//   - StateMBOInstance is the market-by-order state of one publisher of a channel,
+//     keyed (source IP address, Channel ID) across its port roles. It names the
+//     same source IP address as the channel instances of that publisher. The
 //     engine sets the source address in front of it for each verdict, also at end
 //     of run and at eviction, where it visits the instances one by one.
 //
 // A rule moves to StateInstanceCounters only when all the state that it reads is
 // on the portTracker, and to StateMBOInstance only when all of it is in the
-// instance's mboState (with the reference data it reads for its instruments). The README section "Known limitations" records the
+// mboState of one (source IP address, Channel ID), with the reference data that it
+// reads for its instruments. The README section "Known limitations" records the
 // boundary.
 func (k StateKind) InstanceScoped() bool {
 	return k == StateNone || k == StateInstanceCounters || k == StateMBOInstance
