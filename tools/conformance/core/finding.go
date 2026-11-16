@@ -58,8 +58,12 @@ const (
 	// the snapshot anchors and groups, the reconstructed book and the round robin.
 	// The key holds no destination port, so the state spans the three port roles
 	// of one publisher of the channel: three channel instances (GLOSSARY.md), one
-	// source IP address. No other publisher feeds it, so a rule that reads it
-	// judges that publisher.
+	// source IP address. Its verdicts are about that publisher's datagrams, so a
+	// rule that reads it judges that publisher. Other paths can still change the
+	// state: a refdata freeze at another address, for a publisher that sends no
+	// refdata of its own, and a corrupt snapshot datagram from any address, which
+	// marks every open group dirty. Both only prune or downgrade, and neither is a
+	// verdict about the other address.
 	StateMBOInstance
 )
 

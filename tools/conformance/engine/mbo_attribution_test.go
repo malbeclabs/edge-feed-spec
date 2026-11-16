@@ -111,3 +111,82 @@ func TestMBOEvictionFindingNamesTheEvictedInstance(t *testing.T) {
 	}
 	assertAttributionFollowsCatalog(t, ac.findings)
 }
+
+// TestMBOVerdictsCarryTheirOwnEvidence (from review): a finding that names a
+// publisher is placed in the rule report with its sequence range in its era. A
+// verdict must carry the Sequence Number of the datagram it is about, and a verdict
+// that no single datagram decided must carry no evidence, never Sequence 0 in a
+// live era.
+func TestMBOVerdictsCarryTheirOwnEvidence(t *testing.T) {
+	one := func(t *testing.T, ac *allCapture, rule string) core.Finding {
+		t.Helper()
+		got := findingsFor(ac, rule)
+		if len(got) != 1 {
+			t.Fatalf("got %d %s findings, want 1%s", len(got), rule, describe(ac.findings))
+		}
+		if got[0].SourceAddr != srcA {
+			t.Fatalf("%s names %v, want %v", rule, got[0].SourceAddr, srcA)
+		}
+		return got[0]
+	}
+
+	t.Run("batch atomicity: the BatchBoundary datagram", func(t *testing.T) {
+		e, ac, a := readyPub(t)
+		a.group(e, 0, 1, 0)
+		e.Flush()
+		a.add(e, 1, 7)
+		e.Flush()
+		// An orphan no delta can make: a live order with nothing remaining.
+		bk := e.mbos[refdataKey{src: srcA, ch: instCh}].book.book(instCh, instInstr)
+		lo := bk.live[7]
+		lo.remaining = 0
+		bk.live[7] = lo
+		clearFindings(ac)
+		seq := a.seq[core.PortMktData]
+		a.send(e, core.PortMktData, buildBatchBoundaryFrame(instCh, 1))
+		e.Flush()
+		if f := one(t, ac, "BATCH.ATOMICITY_CONSISTENCY"); f.Seq != seq || !f.ResetCountKnown {
+			t.Errorf("evidence seq %d (era known %v), want %d", f.Seq, f.ResetCountKnown, seq)
+		}
+	})
+
+	t.Run("open group at end of run: its last datagram", func(t *testing.T) {
+		e, ac, a := readyPub(t)
+		a.group(e, 0, 1, 0)
+		a.begin(e, 0, 2, 0)
+		last := a.seq[core.PortSnapshot]
+		a.order(e, 2, 11) // the group never ends
+		e.Flush()
+		clearFindings(ac)
+		e.EndRun()
+		if f := one(t, ac, "SNAP.BEGIN_ORDER_END_GROUPING"); f.Seq != last || !f.ResetCountKnown {
+			t.Errorf("evidence seq %d (era known %v), want %d", f.Seq, f.ResetCountKnown, last)
+		}
+	})
+
+	t.Run("awaited recovery at end of run: the InstrumentReset datagram", func(t *testing.T) {
+		e, ac, a := readyPub(t)
+		a.group(e, 0, 1, 0)
+		a.add(e, 1, 7)
+		reset := a.seq[core.PortMktData]
+		a.send(e, core.PortMktData, buildInstrumentResetFrame(instCh, instInstr, reset))
+		e.Flush()
+		clearFindings(ac)
+		e.EndRun()
+		if f := one(t, ac, "RESET.SNAPSHOT_FOLLOWS"); f.Seq != reset || !f.ResetCountKnown {
+			t.Errorf("evidence seq %d (era known %v), want %d", f.Seq, f.ResetCountKnown, reset)
+		}
+	})
+
+	t.Run("round robin: no evidence", func(t *testing.T) {
+		e, ac, a := readyPub(t)
+		a.group(e, 0, 1, 0)
+		a.group(e, 0, 2, 0)
+		e.Flush()
+		clearFindings(ac)
+		e.EndRun()
+		if f := one(t, ac, "SNAP.ROUND_ROBIN_COVERS_MANIFEST"); f.ResetCountKnown {
+			t.Errorf("round robin carries era %d and seq %d, want no evidence", f.ResetCount, f.Seq)
+		}
+	})
+}
