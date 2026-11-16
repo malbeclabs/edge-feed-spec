@@ -260,6 +260,12 @@ type mboState struct {
 	// refdataState.notifyMBO last passed to it. Only a state whose address has no
 	// refdata instance of its own reads one; see notifyMBO.
 	fallbackSet map[uint32]struct{}
+	// wipedEraOrderID and wipedEraPos name the era that onResetCountForEra last
+	// wiped the state for: the era order of the instance and the ordinal of the era
+	// in it. wipedEraSet is false until the first wipe. See Engine.mboStraggler.
+	wipedEraOrderID uint64
+	wipedEraPos     uint64
+	wipedEraSet     bool
 	// resetEra/resetEraSet track the Reset Count era that onResetCountForEra last
 	// wiped state for, so a reset of the instance observed on ANY of its ports wipes
 	// exactly once even though all three ports advance their era independently (F4).
@@ -517,6 +523,33 @@ func (e *Engine) selectMBO(ch uint8) *mboState {
 	return s
 }
 
+// mboStraggler reports whether the datagram that classify is handling belongs to
+// an era before the one that the instance's state was wiped for. One port of the
+// instance wipes the state when it sees a new Reset Count (onResetCountForEra).
+// The other ports then still classify the old-era datagrams in their reorder
+// buffers before they advance. Those datagrams must not act on the state of the
+// new era: an old delta would leave its Per-Instrument Seq in a new-era tracker,
+// and an old SnapshotBegin would leave a group open in the new era.
+//
+// The era order of the instance (eraOrder) numbers its eras in arrival order, so
+// an earlier ordinal of the same order is an earlier era. A tracker that was
+// evicted and came back has a new order, and its datagrams are not stragglers.
+func (e *Engine) mboStraggler(s *mboState) bool {
+	return s.wipedEraSet && e.curEraOrderID == s.wipedEraOrderID && e.curEraPos < s.wipedEraPos
+}
+
+// selectMBOForDatagram is selectMBO for the datagram that classify is handling.
+// A straggler (mboStraggler) gets a new, empty state that is used for this
+// datagram only, so its rules still report an outcome, against no history, and
+// the instance's state is not changed.
+func (e *Engine) selectMBOForDatagram(ch uint8) *mboState {
+	s := e.selectMBO(ch)
+	if e.mboStraggler(s) {
+		e.mbo = newMBOState()
+	}
+	return e.mbo
+}
+
 // eachMBOInstance calls fn once for each market-by-order channel instance, in
 // (Channel ID, source address) order, with that instance in front of the engine:
 // curSrc is its address and e.mbo is its state. The end-of-run checks use it,
@@ -561,7 +594,7 @@ func (e *Engine) eachMBOInstance(fn func(k refdataKey, s *mboState)) {
 //
 // InstrumentReset (0x14) messages call onInstrumentReset to wipe the tracker.
 func (e *Engine) checkMBO(f *wire.Frame, ch uint8) {
-	e.selectMBO(ch)
+	e.selectMBOForDatagram(ch)
 	frameSeq := f.Header.Sequence
 
 	// Track the first and the highest mktdata-port datagram Sequence of the era, for
@@ -927,7 +960,7 @@ func (e *Engine) applyDeltaSeq(ch uint8, instrID uint32, perSeq uint32, frameSeq
 //   - SNAP.EMPTY_BOOK_WELL_FORMED
 //   - SNAP.ORDER_PRICE_BOUND
 func (e *Engine) checkMBOSnapshot(f *wire.Frame, ch uint8, snapPortSeq uint64) {
-	e.selectMBO(ch)
+	e.selectMBOForDatagram(ch)
 
 	// Detect intra-group snapshot-port seq gaps by comparing snapPortSeq with
 	// the group's lastSnapPortSeq. This is more precise than the era-wide

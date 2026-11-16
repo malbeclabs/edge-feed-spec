@@ -43,7 +43,13 @@ type Engine struct {
 	// those paths reads no address rather than the last one classify happened to
 	// leave behind.
 	curSrc netip.Addr
-	now    func() time.Time
+	// curEraOrderID and curEraPos name the era of the datagram that classify is
+	// handling: the era order of its channel instance and the ordinal of the era in
+	// it. classify sets them from the tracker, which holds the old era while it
+	// drains old-era datagrams. See mboStraggler.
+	curEraOrderID uint64
+	curEraPos     uint64
+	now           func() time.Time
 	// reorder buffers and seq trackers, one per channel instance — per (source
 	// address, port, channel). Sequencing keys on the instance and never on the
 	// channel (GLOSSARY.md): two publishers may serve one channel on one group and
@@ -726,7 +732,13 @@ func (e *Engine) Process(src netip.Addr, f *wire.Frame, port core.Port, sf []wir
 		// MBP handles the reset from classify instead (see mbpObserveEra): it must
 		// also see the era a port *seeds* without advancing, which never reaches here.
 		if e.cfg.Feed == core.FeedMBO {
-			wiped := e.selectMBO(f.Header.ChannelID).onResetCountForEra(res.newEra)
+			s := e.selectMBO(f.Header.ChannelID)
+			wiped := s.onResetCountForEra(res.newEra)
+			if wiped {
+				// The era that the state now belongs to. A datagram of an earlier era
+				// that another port still drains is a straggler (mboStraggler).
+				s.wipedEraOrderID, s.wipedEraPos, s.wipedEraSet = pt.order.id, pt.eraPos, true
+			}
 			// If a NON-snapshot port led the reset and actually wiped MBO state, any
 			// old-era snapshot group was just dropped and old-era SnapshotOrder/End
 			// datagrams may still be in flight on the snapshot port. Taint the instance's
@@ -823,6 +835,7 @@ func (e *Engine) classify(item *bufferItem, pt *portTracker) {
 	// frame behind it, not to this one.
 	pt.captureDirty = item.tuple.captureEpoch > pt.captureEpochSeen
 	e.curCaptureEpoch = item.tuple.captureEpoch
+	e.curEraOrderID, e.curEraPos = pt.order.id, pt.eraPos
 
 	// Channel-wide reset bookkeeping for MBP, driven by every accepted frame on any
 	// port rather than by the per-series era advance in Process.
