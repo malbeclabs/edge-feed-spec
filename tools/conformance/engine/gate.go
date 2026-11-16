@@ -240,9 +240,10 @@ type mboState struct {
 	maxSnapCycle int
 	// oracleSuspects holds per-(channel, instrument) oracle suspect state (Task 26).
 	oracleSuspects map[instrTrackerKey]*oracleSuspect
-	// fallbackSet is the definition set that refdataState.notifyMBO last passed to
-	// this state from another instance. Only a state whose address has no refdata
-	// instance of its own reads one; see notifyMBO.
+	// fallbackSet is the definition set this state reads from another instance: the
+	// set it read when selectMBO created it, then the set that
+	// refdataState.notifyMBO last passed to it. Only a state whose address has no
+	// refdata instance of its own reads one; see notifyMBO.
 	fallbackSet map[uint32]struct{}
 	// resetEra/resetEraSet track the Reset Count era that onResetCountForEra last
 	// wiped state for, so a reset of the instance observed on ANY of its ports wipes
@@ -316,7 +317,8 @@ func (s *mboState) onResetCount() {
 	s.maxSnapCycle = 0
 	s.book.onResetCount()
 	clear(s.oracleSuspects)
-	s.fallbackSet = nil
+	// fallbackSet stays: it is the set of another instance, and this instance's
+	// reset does not change it.
 }
 
 // onManifestBump retains trackers for surviving instruments and drops trackers
@@ -484,6 +486,14 @@ func (e *Engine) selectMBO(ch uint8) *mboState {
 	s, ok := e.mbos[k]
 	if !ok {
 		s = newMBOState()
+		// A state at an address with no refdata instance of its own reads another
+		// instance's set (refdataState.forChannel). The set it reads now is its
+		// baseline, so that a later freeze of an equal set is not a change to it.
+		if rs := e.refdata; rs != nil && !rs.hasInstance(k) {
+			if cs := rs.forChannel(ch); cs != nil && cs.setSnapshotSet {
+				s.fallbackSet = cs.setSnapshot
+			}
+		}
 		e.mbos[k] = s
 	}
 	e.mbo = s
@@ -1385,6 +1395,12 @@ func (e *Engine) checkInstanceResetSnapshotFollows(s *mboState) {
 // every instance that has MBO state on a channel with reference data, and every
 // instance that sent reference data but no MBO datagram: that instance ran no
 // snapshot cycle, so its instruments get insufficient_window and not silence.
+//
+// The exception is a channel where an MBO state reads its set from another
+// address (refdataState.forChannel). There a refdata-only instance can be the
+// refdata half of that publisher, whose instruments the MBO state already
+// accounts for, so the refdata-only instances of the channel are not judged
+// again.
 func (e *Engine) checkRoundRobinCoversManifest() {
 	if e.refdata == nil || len(e.mbos) == 0 {
 		// No manifest, or no snapshot state on any instance: there is no instrument
@@ -1398,9 +1414,18 @@ func (e *Engine) checkRoundRobinCoversManifest() {
 		withRefdata[k.ch] = true
 		keys[k] = struct{}{}
 	}
+	fallbackReader := make(map[uint8]bool)
 	for k := range e.mbos {
 		if withRefdata[k.ch] {
 			keys[k] = struct{}{}
+			if !e.refdata.hasInstance(k) {
+				fallbackReader[k.ch] = true
+			}
+		}
+	}
+	for k := range keys {
+		if _, ok := e.mbos[k]; !ok && fallbackReader[k.ch] {
+			delete(keys, k)
 		}
 	}
 	for _, k := range slices.SortedFunc(maps.Keys(keys), compareRefdataKeys) {

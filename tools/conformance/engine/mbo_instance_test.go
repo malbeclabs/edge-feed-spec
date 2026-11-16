@@ -438,3 +438,44 @@ func TestMBOStateIsBoundedWithTheTrackers(t *testing.T) {
 		}
 	}
 }
+
+// TestMBOFallbackEqualSetKeepsTheOpenGroup: A sends no reference data and reads B's
+// set. A's state is created after B's set froze, so that set is its baseline. A
+// opens a snapshot group, and C then freezes an equal set. That is not a change to
+// the set A reads, so A's group stays open and closes without a violation.
+func TestMBOFallbackEqualSetKeepsTheOpenGroup(t *testing.T) {
+	srcC := netip.MustParseAddr("10.0.0.3")
+	e, ac := newMBOEngineW1()
+	a, b, c := newMBOPub(srcA, 3), newMBOPub(srcB, 7), newMBOPub(srcC, 9)
+	b.refdataSet(e, 1, instInstr)
+	e.Flush()
+	a.begin(e, 0, 10, 0)
+	a.order(e, 10, 11) // classifies A's SnapshotBegin: the group is open
+	c.refdataSet(e, 1, instInstr)
+	a.end(e, 0, 10)
+	e.Flush()
+
+	if got := violations(ac, "SNAP."); len(got) != 0 {
+		t.Errorf("got %d SNAP.* violations, want 0: an equal set discarded A's open group%s", len(got), describe(got))
+	}
+}
+
+// TestMBORoundRobinCountsASplitPublisherOnce: one publisher sends its MBO datagrams
+// from M and its reference data from R. M reads R's set and is judged on it. R is
+// the refdata half of the same publisher, so it is not judged again.
+func TestMBORoundRobinCountsASplitPublisherOnce(t *testing.T) {
+	e, ac := newMBOEngineW1()
+	m, r := newMBOPub(srcA, 3), newMBOPub(srcB, 3)
+	r.refdataSet(e, 1, instInstr, instInstr+1)
+	for cycle := uint32(0); cycle < 2; cycle++ {
+		m.emptyGroup(e, instInstr, 10+2*cycle)
+		m.emptyGroup(e, instInstr+1, 11+2*cycle)
+	}
+	e.Flush()
+	e.EndRun()
+
+	if pass, viol, unver := roundRobin(ac); pass != 2 || viol != 0 || len(unver) != 0 {
+		t.Errorf("got %d passes, %d violations and unverifiable %v; want 2, 0 and none: one publisher's instruments counted twice%s",
+			pass, viol, unver, describe(ac.findings))
+	}
+}

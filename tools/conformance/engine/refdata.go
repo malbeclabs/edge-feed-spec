@@ -390,7 +390,8 @@ func (rs *refdataState) drop(k refdataKey) {
 //   - An MBO state at an address with no refdata instance of its own reads the set
 //     of another instance through forChannel: the one whose refdata arrived most
 //     recently, which is this one while it freezes. It gets the set only when the
-//     set differs from the last one it got. Two paths that serve one channel freeze
+//     set differs from the one it reads (fallbackSet: the set it read when it was
+//     created, then the last set it got). Two paths that serve one channel freeze
 //     the same set, and the second freeze is not a change: passing it on would
 //     discard the open snapshot group, and the rest of that group would read as
 //     SNAP.BEGIN_ORDER_END_GROUPING violations.
