@@ -433,20 +433,21 @@ func (e *Engine) instanceGapless(port core.Port, ch uint8) bool {
 	return !ok || !pt.dirtyWindow
 }
 
-// snapPortBound returns true when at least one snapshot-port frame has been
-// observed, on any channel. Port-level on purpose: an unobserved port is a
-// property of the capture, not of a channel. Rules that
-// depend on cross-port snapshot state must downgrade to NA when this returns
-// false — the subscriber simply has not seen the snapshot port yet (cold start
-// or the port is not part of the capture), and firing a Violation or even
-// Unverifiable would be a false positive.
-func (e *Engine) snapPortBound() bool {
-	for k := range e.ports {
-		if k.port == core.PortSnapshot {
-			return true
-		}
-	}
-	return false
+// snapPortBound returns true when the channel instance in front of the engine
+// (Engine.curSrc, ch) has sent at least one snapshot-port datagram. Rules that
+// depend on the instance's snapshot state must downgrade to NA when this returns
+// false, because a Violation or even Unverifiable would be a false positive. Two
+// causes have that result:
+//
+//   - The capture: the snapshot port is not part of it, or the subscriber has not
+//     seen it yet (cold start).
+//   - The deployment: a publisher that sends its snapshots from another source
+//     address than its mktdata is two instances here, because the market-by-order
+//     state is keyed on (source IP address, Channel ID). The snapshots of the
+//     mktdata instance arrive in the other instance, so this one cannot see them.
+func (e *Engine) snapPortBound(ch uint8) bool {
+	_, ok := e.ports[instanceKey{src: e.curSrc, port: core.PortSnapshot, ch: ch}]
+	return ok
 }
 
 // gateConsumer returns true when referential-integrity checks (REF.*, TRADE.*)
@@ -719,12 +720,12 @@ func (e *Engine) applyDeltaSeq(ch uint8, instrID uint32, perSeq uint32, frameSeq
 	// If the instrument had an InstrumentReset and no recovery snapshot has
 	// completed yet, a new delta is premature. Gate on BOTH mktdata and snapshot
 	// port gaplessness.
-	// F5: if the snapshot port has never been seen (unbound), the recovery
-	// snapshot simply has not arrived yet — downgrade to NA to avoid a false
-	// positive on a subscriber that captures mktdata before the snapshot port.
+	// F5: if the instance's snapshot port has never been seen (unbound), the
+	// recovery snapshot simply has not arrived yet — downgrade to NA to avoid a
+	// false positive on a subscriber that captures mktdata before the snapshot port.
 	if t.awaitingRecovery {
 		var st core.Status
-		if !e.snapPortBound() {
+		if !e.snapPortBound(ch) {
 			st = core.NA
 		} else {
 			gaplessSnap := e.instanceGapless(core.PortSnapshot, ch)
@@ -1454,18 +1455,17 @@ func (e *Engine) checkResetSnapshotFollows() {
 // checkInstanceResetSnapshotFollows is checkResetSnapshotFollows for the instance
 // in front of the engine.
 func (e *Engine) checkInstanceResetSnapshotFollows(s *mboState) {
-	// F5: if the snapshot port has never been seen (unbound), we cannot determine
-	// whether a recovery snapshot was emitted. Downgrade to NA rather than firing
-	// Violation or Unverifiable — the subscriber simply has not observed the
-	// snapshot port (cold start or not part of the capture).
-	snapBound := e.snapPortBound()
+	// F5: if the instance's snapshot port has never been seen (unbound), we cannot
+	// determine whether a recovery snapshot was emitted. Downgrade to NA rather than
+	// firing Violation or Unverifiable — the subscriber has not observed the
+	// instance's snapshot port (see snapPortBound).
 	for _, key := range sortedTrackerKeys(s.trackers) {
 		dt := s.trackers[key]
 		if !dt.awaitingRecovery {
 			continue
 		}
 		var st core.Status
-		if !snapBound {
+		if !e.snapPortBound(key.channelID) {
 			st = core.NA
 		} else {
 			st = core.Violation
