@@ -740,7 +740,13 @@ func (e *Engine) Process(src netip.Addr, f *wire.Frame, port core.Port, sf []wir
 		// also see the era a port *seeds* without advancing, which never reaches here.
 		if e.cfg.Feed == core.FeedMBO {
 			s := e.selectMBO(f.Header.ChannelID)
-			wiped := s.onResetCountForEra(res.newEra)
+			// A port that enters an era at or behind the one that the state was last
+			// wiped for is catching up, as in a publisher crash loop where the snapshot
+			// port enters era 4 after mktdata is in era 5. Its datagrams are
+			// stragglers. The Reset Count value alone cannot tell this case from a new
+			// era, because any change of it is a reset, so the era order decides.
+			behind := s.wipedEraSet && pt.order.id == s.wipedEraOrderID && pt.eraPos <= s.wipedEraPos
+			wiped := !behind && s.onResetCountForEra(res.newEra)
 			if wiped {
 				// The era that the state now belongs to. A datagram of an earlier era
 				// that another port still drains is a straggler (mboStraggler).

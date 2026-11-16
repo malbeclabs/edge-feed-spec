@@ -14,9 +14,11 @@ package engine
 // port shows the new Reset Count first.
 
 import (
+	"net/netip"
 	"testing"
 
 	"github.com/malbeclabs/edge-feed-spec/tools/conformance/core"
+	"github.com/malbeclabs/edge-feed-spec/tools/conformance/wire"
 )
 
 // TestOldEraDeltaDoesNotTouchTheNewEra: an old-era delta drains after the refdata
@@ -113,5 +115,85 @@ func TestOrphanSnapshotOrderHasAPriceBoundOutcome(t *testing.T) {
 	got := findingsFor(ac, "SNAP.ORDER_PRICE_BOUND")
 	if len(got) != 1 || got[0].Status != core.Unverifiable || got[0].Reason != core.ReasonSuperseded {
 		t.Errorf("SNAP.ORDER_PRICE_BOUND: got %v, want one Unverifiable, reason superseded", got)
+	}
+}
+
+// TestCrashLoopPortCatchingUpDoesNotWipeTheNewerEra (from review): the publisher
+// restarts twice in a row, so its mktdata port goes from Reset Count 3 to 4 to 5.
+// Its snapshot port lags, and enters era 4 only after mktdata is in era 5. Era 4 is
+// behind the era that the state was last wiped for, so entering it must not wipe
+// the era-5 state, and its datagrams are stragglers. An era-4 group whose K is
+// ahead of the era-5 tracker is then not compared with that tracker.
+func TestCrashLoopPortCatchingUpDoesNotWipeTheNewerEra(t *testing.T) {
+	e, ac, a := readyPub(t)
+	a.group(e, 0, 1, 0) // the snapshot port is in era 3
+	e.Flush()
+	a.add(e, 1, 1)
+	e.Flush()
+	a.restart(4)
+	for i := uint32(1); i <= 5; i++ {
+		a.add(e, i, uint64(40+i))
+	}
+	e.Flush()
+	a.restart(5)
+	a.add(e, 1, 51)
+	a.add(e, 2, 52)
+	e.Flush()
+
+	snap4 := newMBOPub(srcA, 4) // the snapshot port, one restart behind
+	snap4.send(e, core.PortSnapshot, buildSnapBeginFull(instCh, instInstr, 5, 1, 2, 5))
+	a.add(e, 3, 53)
+	a.add(e, 4, 54)
+	e.Flush()
+	snap4.order(e, 2, 41)
+	snap4.end(e, 5, 2)
+	e.Flush()
+
+	for _, prefix := range []string{"SNAP.", "DELTA."} {
+		if v := violations(ac, prefix); len(v) != 0 {
+			t.Errorf("got %d %s* violations, want 0: era 4 wiped or was compared with the era-5 state%s", len(v), prefix, describe(v))
+		}
+	}
+}
+
+// TestEvictionDecidesTheStragglerState (from review): an instance holds an old-era
+// group open in its straggler state when the tracker map evicts it. The group gets
+// its verdict, Unverifiable with reason truncated, and the engine does not keep
+// pointing at the state it dropped.
+func TestEvictionDecidesTheStragglerState(t *testing.T) {
+	e, ac, a := readyPub(t)
+	a.restart(4)
+	a.ready(e) // the refdata port enters era 4 and wipes the state
+	e.Flush()
+	old := newMBOPub(srcA, 3)
+	old.begin(e, 0, 7, 0)
+	old.order(e, 7, 11) // classifies the SnapshotBegin into the straggler state
+	k := refdataKey{src: srcA, ch: instCh}
+	state := e.mbos[k]
+	if state == nil || state.straggler == nil || len(state.straggler.openSnaps) == 0 {
+		t.Fatal("setup: no open group in the straggler state")
+	}
+	straggler := state.straggler
+
+	// One new address at a time, so that A's trackers are the least recently seen.
+	// A first datagram stays in its reorder buffer, so nothing else is selected.
+	for i := 0; i < maxChannelInstances+64 && e.mbos[k] != nil; i++ {
+		src := netip.AddrFrom4([4]byte{10, 1, byte(i >> 8), byte(i)})
+		e.Process(src, makeHB(wire.MagicMBO, instCh, 0, 1, uint64(i+1)*nsPerSec), core.PortMktData, nil)
+	}
+	if e.mbos[k] != nil {
+		t.Fatal("setup: the instance was not evicted")
+	}
+	if e.mbo == state || e.mbo == straggler {
+		t.Error("after eviction the engine still points at the state it dropped")
+	}
+	found := false
+	for _, f := range findingsFor(ac, "SNAP.BEGIN_ORDER_END_GROUPING") {
+		if f.Status == core.Unverifiable && f.Reason == core.ReasonTruncated && f.InstrumentID == instInstr {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("the open old-era group got no truncated verdict at eviction%s", describe(findingsFor(ac, "SNAP.BEGIN_ORDER_END_GROUPING")))
 	}
 }
