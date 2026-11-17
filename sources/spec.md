@@ -8,7 +8,7 @@ A Source ID identifies the **matching engine** whose activity the message descri
 
 **One exception: a second interface.** An engine holds a second ID where a publisher reads it through a different interface of the venue, and the two interfaces differ in the fields that a subscriber orders or deduplicates messages on, such as `Source Timestamp` or `Venue Update ID`, so that copies under one ID could not be arbitrated against each other. Other differences between two interfaces, such as an extra field, a different precision or a different latency, do not qualify. Each such ID names the engine and the interface, and its section says what the interface does not carry. Two such IDs describe the same books and the same instruments. A subscriber MUST NOT merge their messages as copies by `Source ID`, and MUST NOT read them as two engines. ID `10` is the only use of this exception, and its section gives the case.
 
-This document specifies version **1.7.0**: the reserved ranges, the current assignment set, and the process for requesting a new ID.
+This document specifies version **1.8.0**: the reserved ranges, the current assignment set, and the process for requesting a new ID.
 
 ## Reserved Ranges
 
@@ -23,16 +23,18 @@ This document specifies version **1.7.0**: the reserved ranges, the current assi
 
 | ID | Name | Code | Venue | Kind | Notes |
 |----|------|------|-------|------|-------|
-| `1` | Hyperliquid | `HYPERLIQUID` | Hyperliquid | Perpetual DEX | Currently stamped on the venue's native perps and on its HIP-3 builder-deployed DEXes alike. Each builder DEX is a separate matching engine and takes its own ID; this row narrows to the native perps once the ID `1` publishers filter, and records the current state until then. See `7`. |
+| `1` | Hyperliquid | `HYPERLIQUID` | Hyperliquid | Perpetual DEX | Currently stamped on the venue's native perps and on its HIP-3 builder-deployed DEXes alike. Each builder DEX is a separate matching engine and takes its own ID; this row narrows to the native perps once the ID `1` publishers filter, and records the current state until then. See `7`, `11` and `12`. |
 | `2` | Phoenix | `PHOENIX` | Phoenix | Perpetual DEX | |
 | `3` | Kalshi | `KALSHI` | Kalshi | Perpetual Futures, Prediction Market | Registered under the codename `Lashay` until the venue launched. Carries two matching engines and is due to split; see below. |
 | `4` | Setai Financials | `SETAI_FINANCIALS` | Setai | Futures | Interface versioned separately from `5`. |
 | `5` | Setai Commodities | `SETAI_COMMODITIES` | Setai | Futures, Options on Futures | Interface versioned separately from `4`. |
 | `6` | Binance USD-Margined Futures | `BINANCE` | Binance | Perpetual Futures, Dated Futures | The venue's own `futuresType` for this engine is `U_MARGINED`. Spot is a separate matching engine at this venue and holds ID `8`. Coin-margined futures is one too and holds ID `9`. Options is one too, unclaimed, and will share this `Code`. |
-| `7` | XYZ | `HYPERLIQUID` | Hyperliquid | Perpetual DEX | HIP-3 builder-deployed DEX. Matches the `xyz:`-prefixed perps on real-world assets, a set disjoint from ID `1`'s native perps. Shares ID `1`'s `Code`. The other builder DEXes at this venue are separate matching engines, unclaimed; see below. |
+| `7` | XYZ | `HYPERLIQUID` | Hyperliquid | Perpetual DEX | HIP-3 builder-deployed DEX. Matches the `xyz:`-prefixed perps on real-world assets, a set disjoint from ID `1`'s native perps. Shares ID `1`'s `Code`. The other builder DEXes at this venue are separate matching engines; IDs `11` and `12` claim two of them and the rest are unclaimed; see below. |
 | `8` | Binance Spot | `BINANCE` | Binance | Spot | The spot matching engine at the venue that holds ID `6`. Different order-matching rules. Shares ID `6`'s `Code`. Read through a second interface under ID `10`. |
 | `9` | Binance Coin-Margined Futures | `BINANCE` | Binance | Perpetual Futures, Dated Futures | The venue's own `futuresType` for this engine is `COIN_MARGINED`. Matches an instrument set disjoint from ID `6`'s; see below. Shares ID `6`'s `Code`. |
 | `10` | Binance Spot, JSON Interface | `BINANCE` | Binance | Spot | The engine that holds ID `8`, read through its keyless JSON interface. A second interface, not a second engine; see below. Shares ID `6`'s `Code`. |
+| `11` | EntropyIO | `HYPERLIQUID` | Hyperliquid | Perpetual DEX | HIP-3 builder-deployed DEX. Matches the `io:`-prefixed perps, a set disjoint from ID `1`'s native perps and from the sets of IDs `7` and `12`. Shares ID `1`'s `Code`. See below. |
+| `12` | Paragon | `HYPERLIQUID` | Hyperliquid | Perpetual DEX | HIP-3 builder-deployed DEX. Matches the `para:`-prefixed perps, a set disjoint from ID `1`'s native perps and from the sets of IDs `7` and `11`. Shares ID `1`'s `Code`. See below. |
 
 `Code` is the machine-readable short name **for the venue**. It matches the `Venue` column and takes the same name TradingView uses. Uppercase, never an abbreviation, each space and hyphen a single underscore.
 
@@ -80,7 +82,7 @@ The boundary is durable rather than a capacity shard the venue can rebalance. Th
 
 This is the same basis as IDs `4` and `5`, which this document records as the first assignment resting on the second half of the rule. [GLOSSARY.md](../GLOSSARY.md) `1.3.0` already counts each HIP-3 builder DEX as an engine of its own, so the definition needs no change; its worked example named a fixed total that this assignment outgrows, corrected in glossary `1.3.1`.
 
-**The set of engines at this venue is open.** On 17 September 2026 the venue API listed ten builder DEXes. This row claims one of them. The other nine are separate matching engines, as are HIP-4 prediction markets, and each is unclaimed rather than overlooked. No ID is reserved for them here: each takes the next unused ID when a publisher is ready, exactly as this one did. The count grows whenever a builder deploys, which is the open set the Source ID definition above describes.
+**The set of engines at this venue is open.** On 17 September 2026 the venue API listed ten builder DEXes. This row claims one of them. The other nine are separate matching engines, as are HIP-4 prediction markets, and each is unclaimed rather than overlooked. No ID is reserved for them here: each takes the next unused ID when a publisher is ready, exactly as this one did. The count grows whenever a builder deploys, which is the open set the Source ID definition above describes. IDs `11` and `12` later claimed two more on the same basis.
 
 Until the ID `1` publishers filter, the two IDs overlap rather than partition: an `xyz:` instrument is on the wire under ID `1` and under ID `7` at the same time. For as long as that holds, a subscriber MUST NOT treat ID `1` as native-only, and MUST expect the `xyz:` instruments under either ID. This is the counterpart to ID `3`'s rule above, and it lifts when those publishers filter, not when this row merges.
 
@@ -120,6 +122,26 @@ The instruments are the same. An instrument under this ID and one under ID `8` w
 
 No publisher stamps this ID today. Which instruments a publisher carries under it is a deployment concern and out of scope here.
 
+### IDs `11` and `12` are two more builder DEXes at the venue that holds IDs `1` and `7`
+
+These rest on the same basis as ID `7`, set out in its section above. Each is a HIP-3 builder-deployed DEX at Hyperliquid. Its order-matching rules are the venue's, so the first half of the engine rule does not separate it from IDs `1` or `7`. Under the second half, it matches independently over its own instrument set. Its builder holds its own deployer keys and controls asset registration, the oracle updater, trading halts, margin tables and funding multipliers for that set alone.
+
+On 17 November 2026 the venue API listed ten builder DEXes. Each count below gives the listed perps and the live perps. A listed perp that is not live is delisted.
+- `io` listed 24 `io:`-prefixed perps, 16 of them live, mostly on equities;
+- `para` listed 40 `para:`-prefixed perps, 33 of them live, on equities, exchange-traded funds, interest rates and crypto market indices;
+- the native engine listed 235 bare-symbol perps, 179 of them live;
+- `xyz` (ID `7`) listed 145 `xyz:`-prefixed perps, 122 of them live.
+
+Each builder DEX puts its own prefix on its instruments, and native perps carry no prefix. So no instrument appears in more than one of the four sets.
+
+**Two instruments can share an underlying and still be separate instruments.** Several builder DEXes list instruments on the same underlying: `io:NVDA` and `xyz:NVDA` are both perps on one equity. They are separate instruments with separate books, prices, funding and oracles, matched by separate engines. Each has its own `Instrument ID`. Each also has its own `Source ID` when a publisher stamps ID `11` or `12`. A subscriber MUST NOT treat two such instruments as one book because their underlying matches.
+
+Until the ID `1` publishers filter, an `io:` or `para:` instrument is on the wire under ID `1`. For as long as that holds, a subscriber MUST expect those instruments under ID `1`. If a publisher starts to stamp ID `11` or `12` before the ID `1` publishers filter, these IDs overlap with ID `1` rather than partition, as ID `7` does. The instrument is then on the wire under ID `1` and under its own ID at the same time, and a subscriber MUST expect it under either ID. This lifts when the ID `1` publishers filter, not when these rows merge.
+
+`Name` is the builder name the venue itself publishes for each DEX: `EntropyIO` for `io` and `Paragon` for `para`. Neither is a codename, so neither needs a later retirement. The other builder DEXes listed on that date remain unclaimed rather than overlooked, as ID `7`'s section describes.
+
+No publisher stamps these IDs today. Which instruments a publisher carries under each is a deployment concern and out of scope here.
+
 ## Adding a New Source ID
 
 To request a new Source ID, open a pull request against this file that:
@@ -138,6 +160,8 @@ Assigning a new Source ID is an additive change and is therefore a **MINOR** rel
 Because assigned IDs are stable and MUST NOT be renumbered, reordered, removed, or reused, this registry has no mechanism by which a MAJOR release could arise. A subscriber pinned to any `1.x` version of this registry will find that every ID it knows still names the same matching engine; the set of instruments a publisher stamps with it is a deployment concern and may be corrected. A later version only adds IDs it has not seen. Subscribers MUST treat an unrecognized Source ID as an unknown matching engine rather than an error, exactly as if they were running against an older copy of this registry.
 
 ### Changes
+
+**1.8.0** — assigned Source ID `11` to the `io` builder DEX at Hyperliquid (`EntropyIO`) and ID `12` to the `para` builder DEX (`Paragon`). Both share ID `1`'s `Code`. Both are distinct from IDs `1` and `7` under the second half of the engine rule alone, as ID `7` is. Recorded that instruments on the same underlying at different builder DEXes are separate instruments. Recorded that `io:` and `para:` instruments are on the wire under ID `1` until its publishers filter, and that both IDs overlap with ID `1` if a publisher stamps them before then. Updated ID `1`'s and ID `7`'s rows, and ID `7`'s section, which recorded the other builder DEXes as unclaimed. No existing assignment changed.
 
 **1.7.0** — assigned Source ID `10` to the spot engine at Binance that holds ID `8`, read through its keyless JSON interface. Recorded an exception to the rule that an ID names one engine: an engine holds a second ID where a publisher reads it through a second interface that differs in the fields a subscriber orders or deduplicates messages on. ID `10` is the only use. It shares ID `6`'s `Code`. ID `8`'s row points at it. No existing assignment changed.
 
