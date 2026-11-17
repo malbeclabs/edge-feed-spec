@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/malbeclabs/edge-feed-spec/tools/conformance/core"
+	"github.com/malbeclabs/edge-feed-spec/tools/conformance/wire"
 )
 
 // assertAttributionFollowsCatalog checks every finding against its catalog entry.
@@ -188,5 +189,59 @@ func TestMBOVerdictsCarryTheirOwnEvidence(t *testing.T) {
 		if f := one(t, ac, "SNAP.ROUND_ROBIN_COVERS_MANIFEST"); f.ResetCountKnown {
 			t.Errorf("round robin carries era %d and seq %d, want no evidence", f.ResetCount, f.Seq)
 		}
+	})
+}
+
+// TestMBOStragglerVerdictsCarryNoEvidence: a verdict of the straggler state is about
+// an era that the instance's ports have left. It names the publisher, and it
+// carries no evidence, because its Sequence Number is not in the era that a
+// tracker holds now. This covers the end of run (closeStraggler) and eviction.
+func TestMBOStragglerVerdictsCarryNoEvidence(t *testing.T) {
+	check := func(t *testing.T, ac *allCapture, reason string) {
+		t.Helper()
+		n := 0
+		for _, f := range findingsFor(ac, "SNAP.BEGIN_ORDER_END_GROUPING") {
+			if f.Reason != reason || f.InstrumentID != instInstr {
+				continue
+			}
+			n++
+			if f.SourceAddr != srcA {
+				t.Errorf("straggler verdict names %v, want %v", f.SourceAddr, srcA)
+			}
+			if f.ResetCountKnown {
+				t.Errorf("straggler verdict carries era %d and seq %d, want no evidence", f.ResetCount, f.Seq)
+			}
+		}
+		if n == 0 {
+			t.Fatalf("no %s verdict for the old-era group%s", reason, describe(ac.findings))
+		}
+	}
+	// An old-era group, open in the straggler state: the refdata port enters era 4
+	// before the snapshot port, which still sends era 3.
+	setup := func(t *testing.T) (*Engine, *allCapture) {
+		e, ac, a := readyPub(t)
+		a.restart(4)
+		a.ready(e)
+		e.Flush()
+		old := newMBOPub(srcA, 3)
+		old.begin(e, 0, 7, 0)
+		old.order(e, 7, 11)
+		return e, ac
+	}
+
+	t.Run("end of run", func(t *testing.T) {
+		e, ac := setup(t)
+		e.Flush()
+		e.EndRun()
+		check(t, ac, core.ReasonTransition)
+	})
+	t.Run("eviction", func(t *testing.T) {
+		e, ac := setup(t)
+		k := refdataKey{src: srcA, ch: instCh}
+		for i := 0; i < maxChannelInstances+64 && e.mbos[k] != nil; i++ {
+			src := netip.AddrFrom4([4]byte{10, 1, byte(i >> 8), byte(i)})
+			e.Process(src, makeHB(wire.MagicMBO, instCh, 0, 1, uint64(i+1)*nsPerSec), core.PortMktData, nil)
+		}
+		check(t, ac, core.ReasonTruncated)
 	})
 }

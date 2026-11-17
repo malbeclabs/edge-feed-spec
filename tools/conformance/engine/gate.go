@@ -581,20 +581,25 @@ func (e *Engine) closeStraggler(s *mboState) {
 	}
 	prev := e.mbo
 	e.mbo = st
-	for _, ch := range slices.Sorted(maps.Keys(st.openSnaps)) {
-		if open := st.openSnaps[ch]; open != nil {
-			e.unverified("SNAP.BEGIN_ORDER_END_GROUPING", core.ReasonTransition, core.PortSnapshot, 0, ch, open.instrID,
-				fmt.Sprintf("instrument %d: snapshot id %d was open in an era that a Reset Count change ended",
-					open.instrID, open.snapshotID))
+	// The verdicts are about an era that the instance's ports have left, so their
+	// Sequence Numbers are not in the era that a tracker holds now. They name the
+	// publisher and carry no evidence.
+	e.withoutEvidence(func() {
+		for _, ch := range slices.Sorted(maps.Keys(st.openSnaps)) {
+			if open := st.openSnaps[ch]; open != nil {
+				e.unverified("SNAP.BEGIN_ORDER_END_GROUPING", core.ReasonTransition, core.PortSnapshot, open.lastSnapPortSeq, ch, open.instrID,
+					fmt.Sprintf("instrument %d: snapshot id %d was open in an era that a Reset Count change ended",
+						open.instrID, open.snapshotID))
+			}
 		}
-	}
-	for _, key := range sortedTrackerKeys(st.trackers) {
-		if dt := st.trackers[key]; dt.awaitingRecovery {
-			e.unverified("RESET.SNAPSHOT_FOLLOWS", core.ReasonTransition, core.PortMktData, 0, key.channelID, key.instrumentID,
-				fmt.Sprintf("instrument %d: a Reset Count change ended the era before a recovery snapshot for its InstrumentReset (anchor seq %d)",
-					key.instrumentID, dt.awaitingRecoveryAnchor))
+		for _, key := range sortedTrackerKeys(st.trackers) {
+			if dt := st.trackers[key]; dt.awaitingRecovery {
+				e.unverified("RESET.SNAPSHOT_FOLLOWS", core.ReasonTransition, core.PortMktData, dt.resetFrameSeq, key.channelID, key.instrumentID,
+					fmt.Sprintf("instrument %d: a Reset Count change ended the era before a recovery snapshot for its InstrumentReset (anchor seq %d)",
+						key.instrumentID, dt.awaitingRecoveryAnchor))
+			}
 		}
-	}
+	})
 	e.mbo = prev
 	s.straggler = nil
 }
