@@ -33,8 +33,8 @@ This document specifies version **1.8.0**: the reserved ranges, the current assi
 | `8` | Binance Spot | `BINANCE` | Binance | Spot | The spot matching engine at the venue that holds ID `6`. Different order-matching rules. Shares ID `6`'s `Code`. Read through a second interface under ID `10`. |
 | `9` | Binance Coin-Margined Futures | `BINANCE` | Binance | Perpetual Futures, Dated Futures | The venue's own `futuresType` for this engine is `COIN_MARGINED`. Matches an instrument set disjoint from ID `6`'s; see below. Shares ID `6`'s `Code`. |
 | `10` | Binance Spot, JSON Interface | `BINANCE` | Binance | Spot | The engine that holds ID `8`, read through its keyless JSON interface. A second interface, not a second engine; see below. Shares ID `6`'s `Code`. |
-| `11` | EntropyIO | `HYPERLIQUID` | Hyperliquid | Perpetual DEX | HIP-3 builder-deployed DEX. Matches the `io:`-prefixed perps, a set disjoint from those of IDs `1`, `7` and `12`. Shares ID `1`'s `Code`. See below. |
-| `12` | Paragon | `HYPERLIQUID` | Hyperliquid | Perpetual DEX | HIP-3 builder-deployed DEX. Matches the `para:`-prefixed perps, a set disjoint from those of IDs `1`, `7` and `11`. Shares ID `1`'s `Code`. See below. |
+| `11` | EntropyIO | `HYPERLIQUID` | Hyperliquid | Perpetual DEX | HIP-3 builder-deployed DEX. Matches the `io:`-prefixed perps, a set disjoint from ID `1`'s native perps and from the sets of IDs `7` and `12`. Shares ID `1`'s `Code`. See below. |
+| `12` | Paragon | `HYPERLIQUID` | Hyperliquid | Perpetual DEX | HIP-3 builder-deployed DEX. Matches the `para:`-prefixed perps, a set disjoint from ID `1`'s native perps and from the sets of IDs `7` and `11`. Shares ID `1`'s `Code`. See below. |
 
 `Code` is the machine-readable short name **for the venue**. It matches the `Venue` column and takes the same name TradingView uses. Uppercase, never an abbreviation, each space and hyphen a single underscore.
 
@@ -126,17 +126,17 @@ No publisher stamps this ID today. Which instruments a publisher carries under i
 
 These rest on the same basis as ID `7`, set out in its section above. Each is a HIP-3 builder-deployed DEX at Hyperliquid. Its order-matching rules are the venue's, so the first half of the engine rule does not separate it from IDs `1` or `7`. Under the second half, it matches independently over its own instrument set. Its builder holds its own deployer keys and controls asset registration, the oracle updater, trading halts, margin tables and funding multipliers for that set alone.
 
-On 17 November 2026 the venue API listed ten builder DEXes:
+On 17 November 2026 the venue API listed ten builder DEXes. Each count below gives the listed perps and the live perps. A listed perp that is not live is delisted.
 - `io` listed 24 `io:`-prefixed perps, 16 of them live, mostly on equities;
 - `para` listed 40 `para:`-prefixed perps, 33 of them live, on equities, exchange-traded funds, interest rates and crypto market indices;
-- the native engine listed 179 live bare-symbol perps;
-- `xyz` (ID `7`) listed 122 live perps.
+- the native engine listed 235 bare-symbol perps, 179 of them live;
+- `xyz` (ID `7`) listed 145 `xyz:`-prefixed perps, 122 of them live.
 
-Every instrument carries its DEX's prefix, so no instrument appears in more than one of the four sets.
+Each builder DEX puts its own prefix on its instruments, and native perps carry no prefix. So no instrument appears in more than one of the four sets.
 
-**Some markets share an underlying, never an instrument.** Several builder DEXes list markets on the same underlying: `io:NVDA` and `xyz:NVDA` are both perps on one equity. They are separate instruments with separate books, prices, funding and oracles, matched by separate engines. The `Symbol` keeps them apart, and so does the `Source ID` from this release. A subscriber MUST NOT treat two such instruments as one book because their underlying matches.
+**Two instruments can share an underlying and still be separate instruments.** Several builder DEXes list instruments on the same underlying: `io:NVDA` and `xyz:NVDA` are both perps on one equity. They are separate instruments with separate books, prices, funding and oracles, matched by separate engines. Each has its own `Instrument ID`. Each also has its own `Source ID` when a publisher stamps ID `11` or `12`. A subscriber MUST NOT treat two such instruments as one book because their underlying matches.
 
-Until the ID `1` publishers filter, these IDs overlap with ID `1` rather than partition, as ID `7` does. An `io:` or `para:` instrument is on the wire under ID `1` and under its own ID at the same time. For as long as that holds, a subscriber MUST expect those instruments under either ID. This lifts when those publishers filter, not when these rows merge.
+Until the ID `1` publishers filter, an `io:` or `para:` instrument is on the wire under ID `1`. For as long as that holds, a subscriber MUST expect those instruments under ID `1`. If a publisher starts to stamp ID `11` or `12` before the ID `1` publishers filter, these IDs overlap with ID `1` rather than partition, as ID `7` does. The instrument is then on the wire under ID `1` and under its own ID at the same time, and a subscriber MUST expect it under either ID. This lifts when the ID `1` publishers filter, not when these rows merge.
 
 `Name` is the builder name the venue itself publishes for each DEX: `EntropyIO` for `io` and `Paragon` for `para`. Neither is a codename, so neither needs a later retirement. The other builder DEXes listed on that date remain unclaimed rather than overlooked, as ID `7`'s section describes.
 
@@ -161,7 +161,7 @@ Because assigned IDs are stable and MUST NOT be renumbered, reordered, removed, 
 
 ### Changes
 
-**1.8.0** — assigned Source ID `11` to the `io` builder DEX at Hyperliquid (`EntropyIO`) and ID `12` to the `para` builder DEX (`Paragon`). Both share ID `1`'s `Code`. Both are distinct from IDs `1` and `7` under the second half of the engine rule alone, as ID `7` is. Recorded that markets on the same underlying at different builder DEXes are separate instruments. Recorded that both IDs overlap with ID `1` until its publishers filter. Updated ID `1`'s and ID `7`'s rows, and ID `7`'s section, which recorded the other builder DEXes as unclaimed. No existing assignment changed.
+**1.8.0** — assigned Source ID `11` to the `io` builder DEX at Hyperliquid (`EntropyIO`) and ID `12` to the `para` builder DEX (`Paragon`). Both share ID `1`'s `Code`. Both are distinct from IDs `1` and `7` under the second half of the engine rule alone, as ID `7` is. Recorded that instruments on the same underlying at different builder DEXes are separate instruments. Recorded that `io:` and `para:` instruments are on the wire under ID `1` until its publishers filter, and that both IDs overlap with ID `1` if a publisher stamps them before then. Updated ID `1`'s and ID `7`'s rows, and ID `7`'s section, which recorded the other builder DEXes as unclaimed. No existing assignment changed.
 
 **1.7.0** — assigned Source ID `10` to the spot engine at Binance that holds ID `8`, read through its keyless JSON interface. Recorded an exception to the rule that an ID names one engine: an engine holds a second ID where a publisher reads it through a second interface that differs in the fields a subscriber orders or deduplicates messages on. ID `10` is the only use. It shares ID `6`'s `Code`. ID `8`'s row points at it. No existing assignment changed.
 
