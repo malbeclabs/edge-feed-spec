@@ -110,6 +110,9 @@ func TestOldEraGroupOnALateSnapshotPortStaysWhole(t *testing.T) {
 // opportunity, as Unverifiable, reason superseded.
 func TestOrphanSnapshotOrderHasAPriceBoundOutcome(t *testing.T) {
 	e, ac, a := readyPub(t)
+	a.group(e, 0, 1, 0) // past the join (TestJoinInsideAGroupIsColdStart covers the join)
+	e.Flush()
+	clearFindings(ac)
 	a.order(e, 7, 11) // no SnapshotBegin
 	e.Flush()
 	got := findingsFor(ac, "SNAP.ORDER_PRICE_BOUND")

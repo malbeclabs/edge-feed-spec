@@ -233,6 +233,12 @@ type mboState struct {
 	trackers map[instrTrackerKey]*instrTracker
 	// snapTrackers holds per-(channel, instrument) snapshot counters.
 	snapTrackers map[instrTrackerKey]*snapTracker
+	// sawSnapBegin is true once this state has seen a SnapshotBegin. Before that, a
+	// SnapshotOrder or SnapshotEnd with no open group is the tail of a group whose
+	// SnapshotBegin went out before the subscriber listened: its cold start, not a
+	// publisher fault. A Reset Count change does not clear it: the subscriber is past
+	// its join, and a new era starts with a SnapshotBegin.
+	sawSnapBegin bool
 	// openSnaps holds at most one in-progress snapshot group per channel instance.
 	// Keyed by channelID, which is the instance's own; nil value means no open group.
 	openSnaps map[uint8]*openSnapshot
@@ -388,9 +394,17 @@ func (s *mboState) onManifestBump(ch uint8, survivingInstrIDs map[uint32]struct{
 			delete(s.oracleSuspects, key)
 		}
 	}
-	// Discard any open snapshot group for this channel: the instrument may have
-	// been removed from the manifest, and we cannot trust partial-group state.
-	delete(s.openSnaps, ch)
+	// Discard the open snapshot group of this channel only when its instrument left
+	// the set: its partial state then describes an instrument that no longer exists.
+	// A group whose instrument stays is still the publisher's book of it. The first
+	// freeze of a set comes here too, and it usually comes while the subscriber's
+	// first group is in flight; discarding that group read each of its remaining
+	// SnapshotOrders as a SNAP.BEGIN_ORDER_END_GROUPING violation.
+	if open := s.openSnaps[ch]; open != nil {
+		if _, ok := survivingInstrIDs[open.instrID]; !ok {
+			delete(s.openSnaps, ch)
+		}
+	}
 	s.book.onManifestBump(ch, survivingInstrIDs)
 }
 
@@ -1055,6 +1069,7 @@ func (e *Engine) checkMBOSnapshot(f *wire.Frame, ch uint8, snapPortSeq uint64) {
 //   - emits the counter-state Begin rules (ANCHOR_IS_MKTDATA_SEQ etc.)
 //   - opens (or forcibly replaces) the open snapshot group for the channel.
 func (e *Engine) handleSnapBegin(m wire.Message, ch uint8, snapPortSeq uint64) {
+	e.mbo.sawSnapBegin = true
 	instrID := snapshotBeginInstrumentID(m)
 	anchorSeq := snapshotBeginAnchorSeq(m)
 	snapID := snapshotBeginSnapshotID(m)
@@ -1131,6 +1146,12 @@ func (e *Engine) handleSnapOrder(m wire.Message, ch uint8, snapPortSeq uint64) {
 
 	// SNAP.BEGIN_ORDER_END_GROUPING: order arrived without a preceding Begin.
 	if open == nil {
+		if !e.mbo.sawSnapBegin {
+			detail := fmt.Sprintf("SnapshotOrder (snapshot id %d) before the first SnapshotBegin seen from this publisher: the subscriber joined inside the group", snapID)
+			e.unverified("SNAP.BEGIN_ORDER_END_GROUPING", core.ReasonColdStart, core.PortSnapshot, snapPortSeq, ch, 0, detail)
+			e.unverified("SNAP.ORDER_PRICE_BOUND", core.ReasonColdStart, core.PortSnapshot, snapPortSeq, ch, 0, detail)
+			return
+		}
 		st := core.Violation
 		if !e.instanceGapless(core.PortSnapshot, ch) {
 			st = core.Unverifiable
@@ -1244,6 +1265,12 @@ func (e *Engine) handleSnapEnd(m wire.Message, ch uint8, snapPortSeq uint64) {
 
 	// SNAP.BEGIN_ORDER_END_GROUPING: End arrived without a preceding Begin.
 	if open == nil {
+		if !e.mbo.sawSnapBegin {
+			e.unverified("SNAP.BEGIN_ORDER_END_GROUPING", core.ReasonColdStart, core.PortSnapshot, snapPortSeq, ch, endInstrID,
+				fmt.Sprintf("instrument %d: SnapshotEnd (snapshot id %d) before the first SnapshotBegin seen from this publisher: the subscriber joined inside the group",
+					endInstrID, endSnapID))
+			return
+		}
 		st := core.Violation
 		if !e.instanceGapless(core.PortSnapshot, ch) {
 			st = core.Unverifiable

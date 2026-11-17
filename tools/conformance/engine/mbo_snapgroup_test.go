@@ -183,9 +183,13 @@ func TestSnapGroupOrderWithoutBegin(t *testing.T) {
 	const ch = uint8(1)
 	e, ac := newMBOEngineW1()
 
-	// No Begin — feed a SnapshotOrder directly.
+	// One whole group first, so the subscriber is past its join
+	// (TestJoinInsideAGroupIsColdStart covers the join). Then a SnapshotOrder with
+	// no Begin.
 	runStream(e, []streamEntry{
-		snapEntry(buildSnapOrderFull(ch, 99, 1001, 100), 1),
+		snapEntry(buildSnapBeginFull(ch, 200, 0, 0, 98, 0), 1),
+		snapEntry(buildSnapEndFull(ch, 200, 0, 98), 2),
+		snapEntry(buildSnapOrderFull(ch, 99, 1001, 100), 3),
 	})
 
 	if !hasViolation(ac, "SNAP.BEGIN_ORDER_END_GROUPING") {
@@ -199,9 +203,13 @@ func TestSnapGroupEndWithoutBegin(t *testing.T) {
 	const ch, instrID, snapID = uint8(1), uint32(203), uint32(5)
 	e, ac := newMBOEngineW1()
 
-	// No Begin — feed a SnapshotEnd directly.
+	// One whole group first, so the subscriber is past its join
+	// (TestJoinInsideAGroupIsColdStart covers the join). Then a SnapshotEnd with no
+	// Begin.
 	runStream(e, []streamEntry{
-		snapEntry(buildSnapEndFull(ch, instrID, 1, snapID), 1),
+		snapEntry(buildSnapBeginFull(ch, instrID, 0, 0, 4, 0), 1),
+		snapEntry(buildSnapEndFull(ch, instrID, 0, 4), 2),
+		snapEntry(buildSnapEndFull(ch, instrID, 1, snapID), 3),
 	})
 
 	if !hasViolation(ac, "SNAP.BEGIN_ORDER_END_GROUPING") {
