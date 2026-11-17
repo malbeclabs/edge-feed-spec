@@ -26,6 +26,14 @@ package engine
 //	OrderExecute (full-fill, ExecFlags bit0=1) → move from liveOrders → removedOrders
 //	OrderExecute (partial,   ExecFlags bit0=0) → leave in liveOrders, decrement remaining
 //
+// An execute without the full-fill flag that leaves remaining at zero does not
+// remove the order. market-by-order/spec.md lets a subscriber remove it as a
+// consistency guard, but that is the subscriber's choice: the publisher removes
+// the order with the flag or with an OrderCancel. The validator follows the
+// publisher's book, so the cancel that follows is a removal, not an operation
+// after removal, and an order still at zero at a BatchBoundary is the
+// inconsistency that BATCH.ATOMICITY_CONSISTENCY reports.
+//
 // Referential checks (all gated on gateConsumer):
 //
 //	REF.EXEC_DANGLING_ORDER       — execute on ID not in live or removed set
@@ -207,7 +215,8 @@ func (bk *instrBook) seed(orders map[uint64]snapOrderRecord) {
 }
 
 // applyOrderExecute decrements the resting order's remaining qty by execQty and
-// removes the order if fullFill is true or remaining reaches zero.
+// removes the order if fullFill is true. An order the execute leaves at zero
+// without fullFill stays live until its OrderCancel (see the lifecycle above).
 //
 // Returns:
 //   - errOverfill when execQty > remaining (non-hidden orders only).
@@ -263,7 +272,7 @@ func (bk *instrBook) applyOrderExecute(orderID uint64, execQty uint64, fullFill 
 
 	lo.remaining -= execQty
 
-	if fullFill || lo.remaining == 0 {
+	if fullFill {
 		delete(bk.live, orderID)
 		bk.removed.add(orderID)
 		return nil

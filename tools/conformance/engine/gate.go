@@ -743,12 +743,11 @@ func (e *Engine) checkBatchIDMonotonic(ch uint8, frameSeq uint64, m wire.Message
 
 // checkBatchAtomicityConsistency implements BATCH.ATOMICITY_CONSISTENCY: at a
 // BatchBoundary (0x13) the reconstructed book must be internally consistent.
-// Specifically, no live resting order may have remaining == 0; such an order is
-// an orphan that should have been removed by a prior full-fill or zero-remaining
-// execute but was not (impossible state). The book builder's applyOrderExecute
-// removes on remaining==0 during normal operation, so this is a defensive
-// boundary checkpoint — the check is non-redundant only when the book state has
-// been corrupted by an extraordinary sequence.
+// Specifically, no live resting order may have remaining == 0. An execute
+// without the full-fill flag that leaves an order at zero does not remove it
+// (see the lifecycle in book.go); the publisher removes it with an OrderCancel.
+// An order still at zero at the boundary is one whose batch ended before its
+// removal.
 //
 // BATCH.ATOMICITY_CONSISTENCY is evaluated only at BatchBoundary, not at every
 // intermediate delta, to keep the check precise and false-positive-free.
@@ -1954,8 +1953,8 @@ func (e *Engine) checkOrderExecute(ch uint8, instrID uint32, gated bool, frameSe
 			}
 		}
 
-		// Apply the book-builder mutation (quantity decrement + removal on full-fill or
-		// zero remaining). Map typed errors to quantity-conservation findings.
+		// Apply the book-builder mutation (quantity decrement + removal on full-fill).
+		// Map typed errors to quantity-conservation findings.
 		execQty := orderExecuteExecQuantity(m)
 		err := bk.applyOrderExecute(orderID, execQty, isFullFill(execFlags))
 		switch {

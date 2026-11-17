@@ -310,10 +310,9 @@ func TestFullFillFlagDisagreement(t *testing.T) {
 
 // TestBatchAtomicityConsistency: orphan live order (remaining==0) at BatchBoundary.
 //
-// The book builder's applyOrderExecute always removes an order when remaining
-// reaches zero during normal operation. This check is therefore a defensive
-// boundary assertion; the only way to trigger it in unit tests is to directly
-// inject a zero-remaining live order into the book state before the boundary.
+// These subtests inject the zero-remaining order into the book state. The
+// deltas that leave one there, an execute to zero without the full-fill flag
+// and no cancel before the boundary, are in mbo_exhausted_test.go.
 func TestBatchAtomicityConsistency(t *testing.T) {
 	const ch, instrID = uint8(1), uint32(220)
 	const orderID = uint64(221)
@@ -343,10 +342,7 @@ func TestBatchAtomicityConsistency(t *testing.T) {
 	})
 
 	t.Run("violation_orphan_zero_remaining", func(t *testing.T) {
-		// Inject a zero-remaining live order directly into the book state to simulate
-		// the impossible state that BATCH.ATOMICITY_CONSISTENCY guards against.
-		// (This state cannot occur through normal apply calls; it represents a
-		// corrupted or externally-modified book.)
+		// Inject a zero-remaining live order directly into the book state.
 		e, ac := newMBOEngineW1()
 		seq := seedGaplessHistory(e, ch, instrID, 3, 1)
 		clearFindings(ac)
@@ -355,7 +351,7 @@ func TestBatchAtomicityConsistency(t *testing.T) {
 		e.curSrc = srcA
 		e.selectMBO(ch)
 		bk := e.mbo.book.book(ch, instrID)
-		// Directly inject a zero-remaining live order (impossible via normal applies).
+		// Directly inject a zero-remaining live order.
 		bk.live[orderID] = liveOrder{
 			side:      1,
 			remaining: 0, // orphan: should have been removed
