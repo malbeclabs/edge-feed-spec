@@ -24,6 +24,8 @@ type Prom struct {
 	unverifiable  *prometheus.CounterVec
 	checks        *prometheus.CounterVec
 	transportLoss *prometheus.CounterVec
+	missingSeqs   *prometheus.CounterVec
+	datagrams     *prometheus.CounterVec
 	transportCorr *prometheus.CounterVec
 	snapshotAudit *prometheus.CounterVec
 
@@ -38,6 +40,9 @@ type Prom struct {
 	// CounterVecs are safe for concurrent use and this map must not change that.
 	srcMu    sync.Mutex
 	srcAddrs map[netip.Addr]struct{}
+	// lossSeries holds the (port, source_addr) label pairs whose loss counters
+	// Accepted already created at 0; see Accepted. srcMu guards it too.
+	lossSeries map[[2]string]struct{}
 
 	startTime time.Time
 }
@@ -47,9 +52,10 @@ type Prom struct {
 // rules are published to rule_info (only rules applicable to the active feed).
 func NewProm(reg *prometheus.Registry, version, commit string, feed core.Feed) *Prom {
 	p := &Prom{
-		registry:  reg,
-		srcAddrs:  make(map[netip.Addr]struct{}),
-		startTime: time.Now(),
+		registry:   reg,
+		srcAddrs:   make(map[netip.Addr]struct{}),
+		lossSeries: make(map[[2]string]struct{}),
+		startTime:  time.Now(),
 	}
 
 	p.violations = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -73,8 +79,20 @@ func NewProm(reg *prometheus.Registry, version, commit string, feed core.Feed) *
 	p.transportLoss = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: promNamespace,
 		Name:      "transport_loss_total",
-		Help:      "Total transport packet loss events by port.",
-	}, []string{"port"})
+		Help:      "Total transport loss events by port and publisher source address: a forward gap in the sequence series of one channel instance, or a received datagram discarded unclassified (a late one of an era the port left, or one still buffered when its instance was evicted). An event is not a datagram: see missing_seqs_total for how many Sequence Numbers the gaps skipped.",
+	}, []string{"port", "source_addr"})
+
+	p.missingSeqs = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: promNamespace,
+		Name:      "missing_seqs_total",
+		Help:      "Total Sequence Numbers that forward gaps skipped in the sequence series of one channel instance, by port and publisher source address. missing_seqs_total / (datagrams_total + missing_seqs_total) is the loss ratio of one publisher on one port.",
+	}, []string{"port", "source_addr"})
+
+	p.datagrams = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: promNamespace,
+		Name:      "datagrams_total",
+		Help:      "Total datagrams that moved the sequence series of one channel instance forward, by port and publisher source address. A duplicate or a datagram behind the series is not counted.",
+	}, []string{"port", "source_addr"})
 
 	p.transportCorr = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: promNamespace,
@@ -119,6 +137,8 @@ func NewProm(reg *prometheus.Registry, version, commit string, feed core.Feed) *
 		p.unverifiable,
 		p.checks,
 		p.transportLoss,
+		p.missingSeqs,
+		p.datagrams,
 		p.transportCorr,
 		p.snapshotAudit,
 		p.instrumentState,
@@ -178,18 +198,24 @@ const sourceAddrOther = "other"
 // later address gets sourceAddrOther. Only an instance-scoped rule carries an
 // address, so the other rules stay at one series apiece.
 func (p *Prom) sourceAddrLabel(f core.Finding) string {
-	if !f.SourceAddr.IsValid() {
+	return p.addrLabel(f.SourceAddr)
+}
+
+// addrLabel is the source_addr value for one address. Every metric with the label
+// shares one bounded set of addresses, so a publisher has the same value on each.
+func (p *Prom) addrLabel(addr netip.Addr) string {
+	if !addr.IsValid() {
 		return ""
 	}
 	p.srcMu.Lock()
 	defer p.srcMu.Unlock()
-	if _, ok := p.srcAddrs[f.SourceAddr]; !ok {
+	if _, ok := p.srcAddrs[addr]; !ok {
 		if len(p.srcAddrs) >= maxSourceAddrLabels {
 			return sourceAddrOther
 		}
-		p.srcAddrs[f.SourceAddr] = struct{}{}
+		p.srcAddrs[addr] = struct{}{}
 	}
-	return f.SourceAddr.String()
+	return addr.String()
 }
 
 // feedApplies reports whether feed is in the rule's applicable-feeds list.
@@ -222,8 +248,34 @@ func (p *Prom) Record(f core.Finding) {
 }
 
 // TransportLoss implements Reporter.
-func (p *Prom) TransportLoss(port core.Port) {
-	p.transportLoss.WithLabelValues(port.String()).Inc()
+func (p *Prom) TransportLoss(port core.Port, src netip.Addr, missing uint64) {
+	addr := p.addrLabel(src)
+	p.transportLoss.WithLabelValues(port.String(), addr).Inc()
+	if missing > 0 {
+		p.missingSeqs.WithLabelValues(port.String(), addr).Add(float64(missing))
+	}
+}
+
+// Accepted implements Reporter.
+//
+// The first datagram of a (port, source_addr) pair also creates its
+// transport_loss_total and missing_seqs_total series, at 0. Without them a healthy
+// publisher has no missing_seqs_total sample, so its loss ratio is no value rather
+// than 0, and a series that first appears at its first gap starts above 0, which
+// `increase` does not count.
+func (p *Prom) Accepted(port core.Port, src netip.Addr) {
+	labels := [2]string{port.String(), p.addrLabel(src)}
+	p.datagrams.WithLabelValues(labels[0], labels[1]).Inc()
+	p.srcMu.Lock()
+	_, seen := p.lossSeries[labels]
+	if !seen {
+		p.lossSeries[labels] = struct{}{}
+	}
+	p.srcMu.Unlock()
+	if !seen {
+		p.transportLoss.WithLabelValues(labels[0], labels[1])
+		p.missingSeqs.WithLabelValues(labels[0], labels[1])
+	}
 }
 
 // TransportCorruption implements Reporter.

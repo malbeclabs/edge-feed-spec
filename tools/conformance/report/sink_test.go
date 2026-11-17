@@ -1,6 +1,7 @@
 package report
 
 import (
+	"net/netip"
 	"testing"
 
 	"github.com/malbeclabs/edge-feed-spec/tools/conformance/core"
@@ -61,5 +62,32 @@ func TestAggregatorBreaksDownUnverifiableByReason(t *testing.T) {
 	}
 	if want := agg.Counts()["R"][core.Unverifiable]; sum != want {
 		t.Errorf("reasons sum to %d, but %d unverifiable findings were recorded", sum, want)
+	}
+}
+
+// lossRecorder records the transport calls that reach it.
+type lossRecorder struct {
+	noopMetrics
+	losses   int
+	accepted int
+}
+
+func (r *lossRecorder) Record(core.Finding)                         {}
+func (r *lossRecorder) TransportLoss(core.Port, netip.Addr, uint64) { r.losses++ }
+func (r *lossRecorder) Accepted(core.Port, netip.Addr)              { r.accepted++ }
+
+// TestMultiForwardsTransportCalls: production builds its reporter as a Multi of
+// the metrics, the log and the rule report, so a transport call that Multi does
+// not forward reaches none of them.
+func TestMultiForwardsTransportCalls(t *testing.T) {
+	a, b := &lossRecorder{}, &lossRecorder{}
+	m := Multi{a, b}
+	src := netip.MustParseAddr("10.0.0.1")
+	m.TransportLoss(core.PortMktData, src, 3)
+	m.Accepted(core.PortMktData, src)
+	for i, r := range []*lossRecorder{a, b} {
+		if r.losses != 1 || r.accepted != 1 {
+			t.Errorf("reporter %d got %d losses and %d accepted, want 1 and 1", i, r.losses, r.accepted)
+		}
 	}
 }

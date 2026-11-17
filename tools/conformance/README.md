@@ -377,7 +377,9 @@ All metrics are prefixed `dz_conformance_`.
 | `violations_total` | counter | `feed`, `rule_id`, `severity`, `source_addr` | Confirmed conformance violations. See [The `source_addr` label](#the-source_addr-label) |
 | `unverifiable_total` | counter | `feed`, `rule_id`, `reason`, `source_addr` | Checks that could not be verified, by cause. `reason` is a closed enum (`core.Reason*`): `loss`, `capture_loss`, `cold_start`, `reorder`, `pending`, `overflow`, `truncated`, `insufficient_window`, `superseded`, `untrusted`, `bound_subset`, `transition`, `unspecified` |
 | `checks_total` | counter | `feed`, `rule_id`, `result`, `source_addr` | All checks by result — the **denominator** for every rule, see [Coverage vs. silence](#coverage-vs-silence). Sum over `source_addr` to get the denominator of the channel |
-| `transport_loss_total` | counter | `port` | Transport packet-loss events by port (`mktdata`, `refdata`, `snapshot`) |
+| `transport_loss_total` | counter | `port`, `source_addr` | Transport loss events by port (`mktdata`, `refdata`, `snapshot`) and publisher: a forward gap in the sequence series of one channel instance, or a received datagram discarded unclassified (a late one of an era the port left, or one still buffered when its instance was evicted). An event is not a datagram |
+| `missing_seqs_total` | counter | `port`, `source_addr` | Sequence Numbers that the forward gaps skipped. A discarded datagram adds nothing: it is not missing from the series |
+| `datagrams_total` | counter | `port`, `source_addr` | Datagrams that moved the sequence series of one channel instance forward. `missing_seqs_total / (datagrams_total + missing_seqs_total)` is the loss ratio of one publisher on one port |
 | `transport_corruption_total` | counter | `port`, `reason` | Transport corruption events |
 | `snapshot_audits_total` | counter | `result` | Snapshot oracle outcomes (`match`, `mismatch_suspected`, `mismatch_confirmed`, `unverifiable`) |
 | `instruments_state` | gauge | `status` | Instrument count per state (registered; not yet populated by current engine code) |
@@ -389,7 +391,7 @@ Cardinality is bounded: `rule_id` is a fixed enum (from `core/registry.go`), `po
 
 ### The `source_addr` label
 
-A validator subscribes to a group, so it receives every path of a channel merged. `source_addr` on `violations_total`, `unverifiable_total` and `checks_total` tells the paths apart. It has three kinds of value:
+A validator subscribes to a group, so it receives every path of a channel merged. `source_addr` on `violations_total`, `unverifiable_total` and `checks_total`, and on the transport metrics `transport_loss_total`, `missing_seqs_total` and `datagrams_total`, tells the paths apart. It has three kinds of value:
 
 | Value | Meaning |
 |-------|---------|
@@ -401,7 +403,7 @@ A validator subscribes to a group, so it receives every path of a channel merged
 
 **An empty value is a statement, not an unknown.** Do not resolve it to a publisher. To read the verdicts of a channel, select `source_addr=""`. To read the verdicts of one path, select its address. To get the total of a rule, sum over the label.
 
-**The label is bounded.** Nothing authorises a source address, and a `CounterVec` keeps each label value until the process stops. The first 32 addresses that a finding names each get a label value (`maxSourceAddrLabels` in `report/prom.go`). Each later address gets `other`. Those findings are still counted, so the limit costs attribution and never coverage. A redundant feed has two publishers, so a series with `source_addr="other"` means that addresses change often or that a sender floods the group. A restart of the process clears the set.
+**The label is bounded.** Nothing authorises a source address, and a `CounterVec` keeps each label value until the process stops. The first 32 addresses that a finding or a transport metric names each get a label value (`maxSourceAddrLabels` in `report/prom.go`), from one set that all these metrics share. A sender that only sends heartbeats takes a value too, through `datagrams_total`. Each later address gets `other`. Those findings and datagrams are still counted, so the limit costs attribution and never coverage. A redundant feed has two publishers, so a series with `source_addr="other"` means that addresses change often or that a sender floods the group. A restart of the process clears the set.
 
 **Alerts.** `ConformanceMustViolation` and `ConformanceCoverageLoss` sum over `source_addr` before they test a rule, so the label does not change when they fire. The alert does not carry the label. To find the publisher, query the counter by `rule_id` and read `source_addr`.
 

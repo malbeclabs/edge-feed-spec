@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"net/netip"
 	"testing"
 
 	"github.com/malbeclabs/edge-feed-spec/tools/conformance/core"
@@ -43,11 +44,12 @@ type allCapture struct {
 	findings []core.Finding
 }
 
-func (a *allCapture) Record(f core.Finding)                 { a.findings = append(a.findings, f) }
-func (a *allCapture) TransportLoss(core.Port)               {}
-func (a *allCapture) TransportCorruption(core.Port, string) {}
-func (a *allCapture) SnapshotAudit(string)                  {}
-func (a *allCapture) SetInstrumentState(string, int)        {}
+func (a *allCapture) Record(f core.Finding)                       { a.findings = append(a.findings, f) }
+func (a *allCapture) TransportLoss(core.Port, netip.Addr, uint64) {}
+func (a *allCapture) Accepted(core.Port, netip.Addr)              {}
+func (a *allCapture) TransportCorruption(core.Port, string)       {}
+func (a *allCapture) SnapshotAudit(string)                        {}
+func (a *allCapture) SetInstrumentState(string, int)              {}
 
 // stubRegistry allows source IDs 1–1023 (production range), denies 0 and
 // anything >= 1024 that is not in the private range check.

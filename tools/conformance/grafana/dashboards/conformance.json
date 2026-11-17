@@ -498,7 +498,7 @@
             "type": "prometheus"
           },
           "expr": "increase(dz_conformance_transport_loss_total[$__rate_interval])",
-          "legendFormat": "loss \u00b7 port {{port}}"
+          "legendFormat": "loss \u00b7 port {{port}} \u00b7 {{source_addr}}"
         }
       ]
     },

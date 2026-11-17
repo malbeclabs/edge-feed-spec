@@ -2,6 +2,7 @@ package engine
 
 import (
 	"encoding/binary"
+	"net/netip"
 	"testing"
 
 	"github.com/malbeclabs/edge-feed-spec/tools/conformance/core"
@@ -9,14 +10,32 @@ import (
 	wb "github.com/malbeclabs/edge-feed-spec/tools/conformance/wire/wirebuild"
 )
 
-// captureAll captures all findings and transport-loss events.
+// captureAll captures all findings, transport-loss events and accepted datagrams.
 type captureAll struct {
 	findings  []core.Finding
 	lostPorts []core.Port
+	losses    []lossEvent
+	accepted  map[netip.Addr]int
 }
 
-func (c *captureAll) Record(f core.Finding)                 { c.findings = append(c.findings, f) }
-func (c *captureAll) TransportLoss(p core.Port)             { c.lostPorts = append(c.lostPorts, p) }
+// lossEvent is one TransportLoss call.
+type lossEvent struct {
+	port    core.Port
+	src     netip.Addr
+	missing uint64
+}
+
+func (c *captureAll) Record(f core.Finding) { c.findings = append(c.findings, f) }
+func (c *captureAll) TransportLoss(p core.Port, src netip.Addr, missing uint64) {
+	c.lostPorts = append(c.lostPorts, p)
+	c.losses = append(c.losses, lossEvent{p, src, missing})
+}
+func (c *captureAll) Accepted(_ core.Port, src netip.Addr) {
+	if c.accepted == nil {
+		c.accepted = map[netip.Addr]int{}
+	}
+	c.accepted[src]++
+}
 func (c *captureAll) TransportCorruption(core.Port, string) {}
 func (c *captureAll) SnapshotAudit(string)                  {}
 func (c *captureAll) SetInstrumentState(string, int)        {}
