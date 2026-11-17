@@ -48,7 +48,13 @@ type Engine struct {
 	// (withoutEvidence). Its findings carry no era, so the rule report places them
 	// on their publisher with no sequence range.
 	noEvidence bool
-	now        func() time.Time
+	// curEraOrderID and curEraPos name the era of the datagram that classify is
+	// handling: the era order of its channel instance and the ordinal of the era in
+	// it. classify sets them from the tracker, which holds the old era while it
+	// drains old-era datagrams. See mboStraggler.
+	curEraOrderID uint64
+	curEraPos     uint64
+	now           func() time.Time
 	// reorder buffers and seq trackers, one per channel instance — per (source
 	// address, port, channel). Sequencing keys on the instance and never on the
 	// channel (GLOSSARY.md): two publishers may serve one channel on one group and
@@ -317,7 +323,7 @@ func (e *Engine) evictOldestInstance() {
 		e.refdata.drop(refdataKey{src: oldest.src, ch: oldest.ch})
 	}
 	for range oldestPT.drainAll() {
-		e.rep.TransportLoss(oldest.port)
+		e.rep.TransportLoss(oldest.port, oldest.src, 0)
 	}
 	delete(e.ports, oldest)
 	// The MBO state of the instance spans its three ports, so it goes with the last
@@ -343,22 +349,33 @@ func (e *Engine) dropMBO(k refdataKey) {
 		return
 	}
 	prevSrc, prevMBO := e.curSrc, e.mbo
-	e.curSrc, e.mbo = k.src, s
-	for _, ch := range slices.Sorted(maps.Keys(s.openSnaps)) {
-		if open := s.openSnaps[ch]; open != nil {
-			e.unverified("SNAP.BEGIN_ORDER_END_GROUPING", core.ReasonTruncated, core.PortSnapshot, open.lastSnapPortSeq, ch, open.instrID,
-				fmt.Sprintf("instrument %d: snapshot id %d was still open when the tracker map evicted the instance",
-					open.instrID, open.snapshotID))
+	e.curSrc = k.src
+	// The instance's state and, if it has one, the state of its stragglers. The
+	// verdicts carry no evidence: dropMBO runs after the last tracker of the
+	// instance is gone, so no era is known, and the rule report places them on
+	// their publisher with no sequence range. Their Sequence Number is still the
+	// datagram they are about, for the log.
+	for _, st := range []*mboState{s, s.straggler} {
+		if st == nil {
+			continue
+		}
+		e.mbo = st
+		for _, ch := range slices.Sorted(maps.Keys(st.openSnaps)) {
+			if open := st.openSnaps[ch]; open != nil {
+				e.unverified("SNAP.BEGIN_ORDER_END_GROUPING", core.ReasonTruncated, core.PortSnapshot, open.lastSnapPortSeq, ch, open.instrID,
+					fmt.Sprintf("instrument %d: snapshot id %d was still open when the tracker map evicted the instance",
+						open.instrID, open.snapshotID))
+			}
+		}
+		for _, key := range sortedTrackerKeys(st.trackers) {
+			if dt := st.trackers[key]; dt.awaitingRecovery {
+				e.unverified("RESET.SNAPSHOT_FOLLOWS", core.ReasonTruncated, core.PortMktData, dt.resetFrameSeq, key.channelID, key.instrumentID,
+					fmt.Sprintf("instrument %d: the tracker map evicted the instance before a recovery snapshot for the InstrumentReset (anchor seq %d)",
+						key.instrumentID, dt.awaitingRecoveryAnchor))
+			}
 		}
 	}
-	for _, key := range sortedTrackerKeys(s.trackers) {
-		if dt := s.trackers[key]; dt.awaitingRecovery {
-			e.unverified("RESET.SNAPSHOT_FOLLOWS", core.ReasonTruncated, core.PortMktData, dt.resetFrameSeq, key.channelID, key.instrumentID,
-				fmt.Sprintf("instrument %d: the tracker map evicted the instance before a recovery snapshot for the InstrumentReset (anchor seq %d)",
-					key.instrumentID, dt.awaitingRecoveryAnchor))
-		}
-	}
-	if prevMBO == s {
+	if prevMBO == s || (prevMBO != nil && prevMBO == s.straggler) {
 		prevMBO = nil
 	}
 	e.curSrc, e.mbo = prevSrc, prevMBO
@@ -699,7 +716,7 @@ func (e *Engine) Process(src netip.Addr, f *wire.Frame, port core.Port, sf []wir
 	res := pt.enqueue(tuple, e.cfg.ReorderWindow)
 	if res.quarantine {
 		// A late datagram of an era this port left: account as transport loss, never classify.
-		e.rep.TransportLoss(port)
+		e.rep.TransportLoss(port, src, 0)
 		return
 	}
 
@@ -731,7 +748,20 @@ func (e *Engine) Process(src netip.Addr, f *wire.Frame, port core.Port, sf []wir
 		// MBP handles the reset from classify instead (see mbpObserveEra): it must
 		// also see the era a port *seeds* without advancing, which never reaches here.
 		if e.cfg.Feed == core.FeedMBO {
-			wiped := e.selectMBO(f.Header.ChannelID).onResetCountForEra(res.newEra)
+			s := e.selectMBO(f.Header.ChannelID)
+			// A port that enters an era at or behind the one that the state was last
+			// wiped for is catching up, as in a publisher crash loop where the snapshot
+			// port enters era 4 after mktdata is in era 5. Its datagrams are
+			// stragglers. The Reset Count value alone cannot tell this case from a new
+			// era, because any change of it is a reset, so the era order decides.
+			behind := s.wipedEraSet && pt.order.id == s.wipedEraOrderID && pt.eraPos <= s.wipedEraPos
+			wiped := !behind && s.onResetCountForEra(res.newEra)
+			if wiped {
+				// The era that the state now belongs to. A datagram of an earlier era
+				// that another port still drains is a straggler (mboStraggler).
+				s.wipedEraOrderID, s.wipedEraPos, s.wipedEraSet = pt.order.id, pt.eraPos, true
+				e.closeStraggler(s)
+			}
 			// If a NON-snapshot port led the reset and actually wiped MBO state, any
 			// old-era snapshot group was just dropped and old-era SnapshotOrder/End
 			// datagrams may still be in flight on the snapshot port. Taint the instance's
@@ -814,6 +844,9 @@ func (e *Engine) classify(item *bufferItem, pt *portTracker) {
 	// item.era: old-era items are classified before advanceEra() in Process,
 	// and new-era items are classified after. So seq tracking is always active.
 	e.beginFrame(f.Header.SchemaVersion)
+	if res.advanced {
+		e.rep.Accepted(port, pt.src)
+	}
 
 	// Whether an admitted capture drop can own what this frame shows: one
 	// arrived between the previous frame on this series and this one. Recomputed
@@ -828,6 +861,7 @@ func (e *Engine) classify(item *bufferItem, pt *portTracker) {
 	// frame behind it, not to this one.
 	pt.captureDirty = item.tuple.captureEpoch > pt.captureEpochSeen
 	e.curCaptureEpoch = item.tuple.captureEpoch
+	e.curEraOrderID, e.curEraPos = pt.order.id, pt.eraPos
 
 	// Channel-wide reset bookkeeping for MBP, driven by every accepted frame on any
 	// port rather than by the per-series era advance in Process.
@@ -846,7 +880,7 @@ func (e *Engine) classify(item *bufferItem, pt *portTracker) {
 	// Forward gap: transport loss.
 	if res.gapBefore {
 		pt.taint()
-		e.rep.TransportLoss(port)
+		e.rep.TransportLoss(port, pt.src, res.missing)
 	}
 
 	// FRAME.SEND_TS_MONOTONIC: Send Timestamp must be non-decreasing across
