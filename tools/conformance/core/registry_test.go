@@ -142,3 +142,54 @@ func TestSeedGatedRulesAreMarketByOrderRules(t *testing.T) {
 		t.Errorf("SeedGatedRules(mbo) returns %d rules, want %d", len(got), len(seedGated))
 	}
 }
+
+// TestMBOInstanceRulesAreExactlyThese pins the state kind of each rule that reads
+// the market-by-order state of one publisher (StateMBOInstance), and that no other
+// rule has the kind. A rule that moves back to a channel kind stops naming its
+// publisher, and no other test would see it.
+func TestMBOInstanceRulesAreExactlyThese(t *testing.T) {
+	want := map[string]bool{
+		"BATCH.ATOMICITY_CONSISTENCY":                     true,
+		"BATCH.ID_MONOTONIC":                              true,
+		"DELTA.PERINSTR_DENSITY":                          true,
+		"DELTA.PERINSTR_DUP_DIVERGENT":                    true,
+		"DELTA.PERINSTR_FIRST_VALUE":                      true,
+		"DELTA.PERINSTR_NO_SNAPSHOT_RESET":                true,
+		"DELTA.PERINSTR_WRAP_BEFORE_RESET":                true,
+		"FIELD.SOURCE_ID_CONSISTENCY":                     true,
+		"REF.CANCEL_DANGLING_ORDER":                       true,
+		"REF.DUPLICATE_LIVE_ORDERADD":                     true,
+		"REF.EXEC_DANGLING_ORDER":                         true,
+		"REF.EXEC_OVERFILL":                               true,
+		"REF.FULLFILL_FLAG_DISAGREEMENT":                  true,
+		"REF.OPERATION_AFTER_REMOVAL":                     true,
+		"REF.SIDE_PRICE_CONSISTENCY":                      true,
+		"RESET.NO_DANGLING_DELTAS_AT_OR_BELOW_ANCHOR":     true,
+		"RESET.RECOVERY_SNAPSHOT_ANCHOR_MATCHES_RESET":    true,
+		"RESET.SNAPSHOT_FOLLOWS":                          true,
+		"SNAP.ANCHOR_IS_MKTDATA_SEQ":                      true,
+		"SNAP.ANCHOR_LE_OR_GT_LAST_APPLIED_HANDLING":      true,
+		"SNAP.ANCHOR_MONOTONIC_PER_INSTRUMENT":            true,
+		"SNAP.BEGIN_ORDER_END_GROUPING":                   true,
+		"SNAP.EMPTY_BOOK_WELL_FORMED":                     true,
+		"SNAP.END_FIELDS_MATCH_BEGIN":                     true,
+		"SNAP.LAST_INSTRUMENT_SEQ_CONSISTENT_WITH_DELTAS": true,
+		"SNAP.ORDER_SNAPSHOT_ID_MATCH":                    true,
+		"SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT":        true,
+		"SNAP.ROUND_ROBIN_COVERS_MANIFEST":                true,
+		"SNAP.SNAPSHOT_ID_MONOTONIC":                      true,
+		"SNAP.SNAPSHOT_ORDER_NO_DUP_ORDER_ID":             true,
+		"SNAP.TOTAL_ORDERS_COUNT_MATCH":                   true,
+		"TRADE.EXEC_GROUPING":                             true,
+	}
+	for _, r := range Rules {
+		if got := r.State == StateMBOInstance; got != want[r.ID] {
+			t.Errorf("%s: StateMBOInstance = %v, want %v", r.ID, got, want[r.ID])
+		}
+	}
+	for id := range want {
+		if _, ok := Lookup(id); !ok {
+			t.Errorf("%s is listed but is not in the catalog", id)
+		}
+	}
+}

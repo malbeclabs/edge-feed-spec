@@ -37,12 +37,17 @@ type Engine struct {
 	// emits before the datagram is classified. classify sets it from the tracker it is
 	// handed, because Flush drains buffers with no caller holding an address at all.
 	//
-	// Cleared by EndRun, whose checks run over merged state with no datagram in
-	// front of them. Every rule they emit is channel-scoped today and so would
-	// drop the address anyway; clearing it means a rule that later moves into
-	// those paths reads no address rather than the last one classify happened to
-	// leave behind.
+	// Cleared by EndRun, whose checks have no datagram in front of them. The
+	// market-by-order checks among them visit each (source IP address, Channel ID)
+	// and set curSrc to its address while they emit (eachMBOInstance), because their
+	// rules judge one publisher. The other EndRun checks run over channel state and
+	// emit channel-scoped rules; clearing curSrc means a rule that later moves into
+	// those paths reads no address rather than the last one classify left behind.
 	curSrc netip.Addr
+	// noEvidence is true while a verdict that no single datagram decided is emitted
+	// (withoutEvidence). Its findings carry no era, so the rule report places them
+	// on their publisher with no sequence range.
+	noEvidence bool
 	// curEraOrderID and curEraPos name the era of the datagram that classify is
 	// handling: the era order of its channel instance and the ordinal of the era in
 	// it. classify sets them from the tracker, which holds the old era while it
@@ -233,7 +238,7 @@ func (e *Engine) emit(ruleID string, st core.Status, port core.Port, seq uint64,
 	var era uint8
 	var eraIndex uint64
 	var eraKnown bool
-	if src.IsValid() {
+	if src.IsValid() && !e.noEvidence {
 		key := instanceKey{src: src, port: port, ch: ch}
 		if pt, ok := e.ports[key]; ok && pt.eraInitialized {
 			era, eraKnown = pt.era, true
@@ -345,7 +350,11 @@ func (e *Engine) dropMBO(k refdataKey) {
 	}
 	prevSrc, prevMBO := e.curSrc, e.mbo
 	e.curSrc = k.src
-	// The instance's state and, if it has one, the state of its stragglers.
+	// The instance's state and, if it has one, the state of its stragglers. The
+	// verdicts carry no evidence: dropMBO runs after the last tracker of the
+	// instance is gone, so no era is known, and the rule report places them on
+	// their publisher with no sequence range. Their Sequence Number is still the
+	// datagram they are about, for the log.
 	for _, st := range []*mboState{s, s.straggler} {
 		if st == nil {
 			continue
@@ -353,14 +362,14 @@ func (e *Engine) dropMBO(k refdataKey) {
 		e.mbo = st
 		for _, ch := range slices.Sorted(maps.Keys(st.openSnaps)) {
 			if open := st.openSnaps[ch]; open != nil {
-				e.unverified("SNAP.BEGIN_ORDER_END_GROUPING", core.ReasonTruncated, core.PortSnapshot, 0, ch, open.instrID,
+				e.unverified("SNAP.BEGIN_ORDER_END_GROUPING", core.ReasonTruncated, core.PortSnapshot, open.lastSnapPortSeq, ch, open.instrID,
 					fmt.Sprintf("instrument %d: snapshot id %d was still open when the tracker map evicted the instance",
 						open.instrID, open.snapshotID))
 			}
 		}
 		for _, key := range sortedTrackerKeys(st.trackers) {
 			if dt := st.trackers[key]; dt.awaitingRecovery {
-				e.unverified("RESET.SNAPSHOT_FOLLOWS", core.ReasonTruncated, core.PortMktData, 0, key.channelID, key.instrumentID,
+				e.unverified("RESET.SNAPSHOT_FOLLOWS", core.ReasonTruncated, core.PortMktData, dt.resetFrameSeq, key.channelID, key.instrumentID,
 					fmt.Sprintf("instrument %d: the tracker map evicted the instance before a recovery snapshot for the InstrumentReset (anchor seq %d)",
 						key.instrumentID, dt.awaitingRecoveryAnchor))
 			}

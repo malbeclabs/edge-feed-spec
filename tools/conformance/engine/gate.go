@@ -164,6 +164,10 @@ type instrTracker struct {
 	// RESET.RECOVERY_SNAPSHOT_ANCHOR_MATCHES_RESET).
 	awaitingRecovery       bool
 	awaitingRecoveryAnchor uint64 // New Anchor Seq from the InstrumentReset
+	// resetFrameSeq is the mktdata Sequence Number of the datagram that carried the
+	// InstrumentReset. A RESET.SNAPSHOT_FOLLOWS verdict decided at end of run or at
+	// eviction names it as its evidence.
+	resetFrameSeq uint64
 	// seeded is true once a snapshot group seeded this book in the current
 	// lifecycle (seedBookFromSnapshot). The oracle reads it to tell a book that is
 	// still waiting for its first seed (cold_start) from one that lost its trust to
@@ -393,7 +397,7 @@ func (s *mboState) onManifestBump(ch uint8, survivingInstrIDs map[uint32]struct{
 // onInstrumentReset resets the tracker for one instrument, marking it as
 // awaiting a fresh seq=1 start. Called when an InstrumentReset (0x14) message
 // is processed on the mktdata stream.
-func (s *mboState) onInstrumentReset(ch uint8, instrID uint32, newAnchorSeq uint64) {
+func (s *mboState) onInstrumentReset(ch uint8, instrID uint32, newAnchorSeq, frameSeq uint64) {
 	key := instrTrackerKey{ch, instrID}
 	// Replace with a fresh tracker that records the reset was observed in-stream,
 	// preserving the new anchor seq for RESET.NO_DANGLING_DELTAS_AT_OR_BELOW_ANCHOR.
@@ -405,6 +409,7 @@ func (s *mboState) onInstrumentReset(ch uint8, instrID uint32, newAnchorSeq uint
 		pendingResetAnchorSet:  true,
 		awaitingRecovery:       true,
 		awaitingRecoveryAnchor: newAnchorSeq,
+		resetFrameSeq:          frameSeq,
 	}
 	// Clear oracle suspect state: the instrument's book is being reset, so any
 	// prior mismatch suspect is stale and must not carry over to the new lifecycle.
@@ -576,20 +581,25 @@ func (e *Engine) closeStraggler(s *mboState) {
 	}
 	prev := e.mbo
 	e.mbo = st
-	for _, ch := range slices.Sorted(maps.Keys(st.openSnaps)) {
-		if open := st.openSnaps[ch]; open != nil {
-			e.unverified("SNAP.BEGIN_ORDER_END_GROUPING", core.ReasonTransition, core.PortSnapshot, 0, ch, open.instrID,
-				fmt.Sprintf("instrument %d: snapshot id %d was open in an era that a Reset Count change ended",
-					open.instrID, open.snapshotID))
+	// The verdicts are about an era that the instance's ports have left, so their
+	// Sequence Numbers are not in the era that a tracker holds now. They name the
+	// publisher and carry no evidence.
+	e.withoutEvidence(func() {
+		for _, ch := range slices.Sorted(maps.Keys(st.openSnaps)) {
+			if open := st.openSnaps[ch]; open != nil {
+				e.unverified("SNAP.BEGIN_ORDER_END_GROUPING", core.ReasonTransition, core.PortSnapshot, open.lastSnapPortSeq, ch, open.instrID,
+					fmt.Sprintf("instrument %d: snapshot id %d was open in an era that a Reset Count change ended",
+						open.instrID, open.snapshotID))
+			}
 		}
-	}
-	for _, key := range sortedTrackerKeys(st.trackers) {
-		if dt := st.trackers[key]; dt.awaitingRecovery {
-			e.unverified("RESET.SNAPSHOT_FOLLOWS", core.ReasonTransition, core.PortMktData, 0, key.channelID, key.instrumentID,
-				fmt.Sprintf("instrument %d: a Reset Count change ended the era before a recovery snapshot for its InstrumentReset (anchor seq %d)",
-					key.instrumentID, dt.awaitingRecoveryAnchor))
+		for _, key := range sortedTrackerKeys(st.trackers) {
+			if dt := st.trackers[key]; dt.awaitingRecovery {
+				e.unverified("RESET.SNAPSHOT_FOLLOWS", core.ReasonTransition, core.PortMktData, dt.resetFrameSeq, key.channelID, key.instrumentID,
+					fmt.Sprintf("instrument %d: a Reset Count change ended the era before a recovery snapshot for its InstrumentReset (anchor seq %d)",
+						key.instrumentID, dt.awaitingRecoveryAnchor))
+			}
 		}
-	}
+	})
 	e.mbo = prev
 	s.straggler = nil
 }
@@ -699,14 +709,14 @@ func (e *Engine) checkMBO(f *wire.Frame, ch uint8) {
 			}
 			instrID := instrResetInstrumentID(m)
 			newAnchor := instrResetNewAnchorSeq(m)
-			e.mbo.onInstrumentReset(ch, instrID, newAnchor)
+			e.mbo.onInstrumentReset(ch, instrID, newAnchor, frameSeq)
 
 		case wire.TypeBatchBoundary:
 			if m.Length != expectedMsgLen(e.cfg.Feed, f.Header.SchemaVersion, m.Type) {
 				continue
 			}
 			e.checkBatchIDMonotonic(ch, frameSeq, m)
-			e.checkBatchAtomicityConsistency(ch)
+			e.checkBatchAtomicityConsistency(ch, frameSeq)
 		}
 	}
 }
@@ -745,7 +755,7 @@ func (e *Engine) checkBatchIDMonotonic(ch uint8, frameSeq uint64, m wire.Message
 //
 // Gated on mktdata channel contiguity: on a loss-tainted window the book may be
 // incomplete (missing OrderAdd deltas), so the anomaly is Unverifiable.
-func (e *Engine) checkBatchAtomicityConsistency(ch uint8) {
+func (e *Engine) checkBatchAtomicityConsistency(ch uint8, frameSeq uint64) {
 	if e.mbo == nil || e.mbo.book == nil {
 		return
 	}
@@ -778,7 +788,7 @@ func (e *Engine) checkBatchAtomicityConsistency(ch uint8) {
 	})
 	gated := e.instanceGapless(core.PortMktData, ch)
 	for _, o := range orphans {
-		e.Emit("BATCH.ATOMICITY_CONSISTENCY", statusFor(gated), core.PortMktData, 0, ch, o.instrID,
+		e.Emit("BATCH.ATOMICITY_CONSISTENCY", statusFor(gated), core.PortMktData, frameSeq, ch, o.instrID,
 			fmt.Sprintf("instrument %d: live order %d has remaining=0 at BatchBoundary (orphan)",
 				o.instrID, o.orderID))
 	}
@@ -1514,7 +1524,7 @@ func (e *Engine) flushInstanceOpenSnaps(s *mboState) {
 		if open.dirty || e.captureLossSince(open.captureEpoch) {
 			st = core.Unverifiable
 		}
-		e.Emit("SNAP.BEGIN_ORDER_END_GROUPING", st, core.PortSnapshot, 0, ch, open.instrID,
+		e.Emit("SNAP.BEGIN_ORDER_END_GROUPING", st, core.PortSnapshot, open.lastSnapPortSeq, ch, open.instrID,
 			fmt.Sprintf("instrument %d: SnapshotBegin (snapshot id %d) never followed by SnapshotEnd (end of stream)",
 				open.instrID, open.snapshotID))
 	}
@@ -1555,7 +1565,7 @@ func (e *Engine) checkInstanceResetSnapshotFollows(s *mboState) {
 				st = core.Unverifiable
 			}
 		}
-		e.Emit("RESET.SNAPSHOT_FOLLOWS", st, core.PortMktData, 0, key.channelID, key.instrumentID,
+		e.Emit("RESET.SNAPSHOT_FOLLOWS", st, core.PortMktData, dt.resetFrameSeq, key.channelID, key.instrumentID,
 			fmt.Sprintf("instrument %d: InstrumentReset (anchor seq %d) was not followed by a recovery snapshot before end of stream",
 				key.instrumentID, dt.awaitingRecoveryAnchor))
 		dt.awaitingRecovery = false // mark consumed so we don't emit again on repeated EndRun
@@ -1621,9 +1631,18 @@ func (e *Engine) checkRoundRobinCoversManifest() {
 	}
 	for _, k := range slices.SortedFunc(maps.Keys(keys), compareRefdataKeys) {
 		e.curSrc, e.mbo = k.src, e.mbos[k]
-		e.checkInstanceRoundRobin(k.ch, e.mbo)
+		e.withoutEvidence(func() { e.checkInstanceRoundRobin(k.ch, e.mbo) })
 	}
 	e.curSrc, e.mbo = netip.Addr{}, nil
+}
+
+// withoutEvidence runs fn with Engine.noEvidence set. A verdict that fn emits names
+// its publisher but no sequence range, because no single datagram decided it: the
+// round robin is decided over a whole run of snapshot cycles.
+func (e *Engine) withoutEvidence(fn func()) {
+	e.noEvidence = true
+	defer func() { e.noEvidence = false }()
+	fn()
 }
 
 // checkInstanceRoundRobin is checkRoundRobinCoversManifest for the instance in
