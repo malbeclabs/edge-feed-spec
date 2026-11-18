@@ -155,6 +155,10 @@ type instrBook struct {
 	// execTradeIDs holds the most recent maxExecTradeIDs Trade IDs seen in
 	// OrderExecute messages. Used by TRADE.EXEC_GROUPING.
 	execTradeIDs *idWindow
+	// zeroed holds the IDs of live orders that an OrderAdd or an OrderExecute left
+	// at zero remaining. Only those two can, so BATCH.ATOMICITY_CONSISTENCY reads
+	// these IDs at a BatchBoundary instead of every live order of every book.
+	zeroed []uint64
 	// log holds the deltas this book applied in per-instrument seq order, so
 	// that a snapshot group can seed or audit the book after the book moved past
 	// the group's Last Instrument Seq (see deltaLog).
@@ -194,6 +198,9 @@ func (bk *instrBook) applyOrderAddFull(orderID uint64, sourceID uint16, side uin
 		orderFlags: orderFlags,
 		enterTS:    enterTS,
 	}
+	if qty == 0 {
+		bk.zeroed = append(bk.zeroed, orderID)
+	}
 	bk.removed.remove(orderID)
 	return nil
 }
@@ -206,6 +213,7 @@ func (bk *instrBook) applyOrderAddFull(orderID uint64, sourceID uint16, side uin
 // contradict that.
 func (bk *instrBook) seed(orders map[uint64]snapOrderRecord) {
 	clear(bk.live)
+	bk.zeroed = bk.zeroed[:0]
 	for _, id := range slices.Sorted(maps.Keys(orders)) {
 		o := orders[id]
 		_ = bk.applyOrderAddFull(id, 0, o.side, o.price, o.qty, o.orderFlags, o.enterTS)
@@ -276,6 +284,9 @@ func (bk *instrBook) applyOrderExecute(orderID uint64, execQty uint64, fullFill 
 	}
 
 	bk.live[orderID] = lo
+	if lo.remaining == 0 {
+		bk.zeroed = append(bk.zeroed, orderID)
+	}
 	return nil
 }
 
@@ -401,16 +412,13 @@ func (bk *instrBook) applyDelta(m wire.Message) error {
 // log.covers first.
 func (bk *instrBook) seedAndReplay(orders map[uint64]snapOrderRecord, k uint32, log *deltaLog) {
 	bk.seed(orders)
-	for _, d := range log.after(k) {
-		_ = bk.applyDelta(d.message())
-	}
+	log.eachAfter(k, func(d *loggedDelta) { _ = bk.applyDelta(d.message()) })
 }
 
 // maxDeltaLog limits the deltas that the log of one instrument keeps. A group
 // close removes the deltas at or below its Last Instrument Seq, so the log of
 // an instrument holds the deltas since its last snapshot group, and only a busy
-// instrument reaches the limit. An entry is 60 bytes, so a full log is 240 KiB,
-// and its array is at most twice that. Measured on a 30-minute capture of two
+// instrument reaches the limit. An entry is 60 bytes, so a full log is 240 KiB. Measured on a 30-minute capture of two
 // busy feeds, 68,277 groups: when a group closed, the book was at most 1,878
 // deltas past its Last Instrument Seq, 200 to 342 at the 99th percentile. It is
 // a variable so that tests can use a small limit.
@@ -444,13 +452,16 @@ func (d *loggedDelta) message() wire.Message {
 // A delta with a seq that does not follow the last entry is not one more step of
 // the same history. A later seq (a jump) starts a new log. An earlier or equal
 // seq (a duplicate or a late delta) is not logged.
+//
+// The entries are a ring. It grows to maxDeltaLog entries, then each new entry
+// replaces the oldest.
 type deltaLog struct {
-	// entries[off:] are the logged deltas, oldest first.
-	entries []loggedDelta
-	off     int
+	buf   []loggedDelta
+	start int // index in buf of the oldest entry
+	n     int // number of entries
 }
 
-func (l *deltaLog) live() []loggedDelta { return l.entries[l.off:] }
+func (l *deltaLog) at(i int) *loggedDelta { return &l.buf[(l.start+i)%len(l.buf)] }
 
 // record logs delta m with per-instrument seq seq.
 func (l *deltaLog) record(seq uint32, m wire.Message) {
@@ -458,8 +469,8 @@ func (l *deltaLog) record(seq uint32, m wire.Message) {
 		l.clear()
 		return
 	}
-	if live := l.live(); len(live) > 0 {
-		last := live[len(live)-1].seq
+	if l.n > 0 {
+		last := l.at(l.n - 1).seq
 		if seq <= last {
 			return
 		}
@@ -467,13 +478,27 @@ func (l *deltaLog) record(seq uint32, m wire.Message) {
 			l.clear()
 		}
 	}
-	d := loggedDelta{seq: seq, typ: m.Type, length: m.Length, n: uint8(len(m.Body))}
-	copy(d.body[:], m.Body)
-	l.entries = append(l.entries, d)
-	if len(l.entries)-l.off > maxDeltaLog {
-		l.off++
-		l.compact()
+	if l.n == len(l.buf) {
+		if len(l.buf) < maxDeltaLog {
+			l.grow()
+		} else {
+			l.start = (l.start + 1) % len(l.buf)
+			l.n--
+		}
 	}
+	d := l.at(l.n)
+	*d = loggedDelta{seq: seq, typ: m.Type, length: m.Length, n: uint8(len(m.Body))}
+	copy(d.body[:], m.Body)
+	l.n++
+}
+
+// grow doubles the ring, up to maxDeltaLog entries, with the entries oldest first.
+func (l *deltaLog) grow() {
+	nb := make([]loggedDelta, min(max(2*len(l.buf), 16), maxDeltaLog))
+	for i := range l.n {
+		nb[i] = *l.at(i)
+	}
+	l.buf, l.start = nb, 0
 }
 
 // covers reports whether the log holds every delta from k+1 to last, the
@@ -482,48 +507,29 @@ func (l *deltaLog) covers(k, last uint32) bool {
 	if last == k {
 		return true
 	}
-	live := l.live()
-	return last > k && len(live) > 0 && live[0].seq <= k+1 && live[len(live)-1].seq == last
+	return last > k && l.n > 0 && l.at(0).seq <= k+1 && l.at(l.n-1).seq == last
 }
 
-// after returns the logged deltas with a seq above k, oldest first.
-func (l *deltaLog) after(k uint32) []loggedDelta {
-	live := l.live()
-	if len(live) == 0 || live[len(live)-1].seq <= k {
-		return nil
+// eachAfter calls fn for each logged delta with a seq above k, oldest first.
+func (l *deltaLog) eachAfter(k uint32, fn func(*loggedDelta)) {
+	for i := range l.n {
+		if d := l.at(i); d.seq > k {
+			fn(d)
+		}
 	}
-	if live[0].seq > k {
-		return live
-	}
-	return live[k-live[0].seq+1:]
 }
 
 // trimThrough removes the deltas at or below k. A later snapshot group of the
 // instrument has a Last Instrument Seq of at least k, so it does not need them.
 func (l *deltaLog) trimThrough(k uint32) {
-	live := l.live()
-	if len(live) == 0 || live[0].seq > k {
+	if l.n == 0 || l.at(0).seq > k {
 		return
 	}
-	if live[len(live)-1].seq <= k {
-		l.clear()
-		return
-	}
-	l.off += int(k - live[0].seq + 1)
-	l.compact()
+	drop := min(int(k-l.at(0).seq)+1, l.n)
+	l.start = (l.start + drop) % len(l.buf)
+	l.n -= drop
 }
 
 func (l *deltaLog) clear() {
-	l.entries = l.entries[:0]
-	l.off = 0
-}
-
-// compact moves the live entries to the start of the array when the removed
-// ones are at least half of it, so the array stays at most twice the live size.
-func (l *deltaLog) compact() {
-	if l.off > 0 && l.off*2 >= len(l.entries) {
-		n := copy(l.entries, l.entries[l.off:])
-		l.entries = l.entries[:n]
-		l.off = 0
-	}
+	l.start, l.n = 0, 0
 }

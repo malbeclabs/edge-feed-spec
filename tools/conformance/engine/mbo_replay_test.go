@@ -40,9 +40,7 @@ func deltaMsg(t *testing.T, raw []byte) wire.Message {
 // logSeqs returns the per-instrument seqs a log holds.
 func logSeqs(l *deltaLog) []uint32 {
 	var out []uint32
-	for _, d := range l.live() {
-		out = append(out, d.seq)
-	}
+	l.eachAfter(0, func(d *loggedDelta) { out = append(out, d.seq) })
 	return out
 }
 
@@ -63,8 +61,10 @@ func TestDeltaLog(t *testing.T) {
 		if !l.covers(4, 7) || !l.covers(6, 7) || l.covers(3, 7) || l.covers(4, 8) {
 			t.Errorf("covers wrong for log %v", logSeqs(&l))
 		}
-		if got := l.after(5); len(got) != 2 || got[0].seq != 6 {
-			t.Errorf("after(5) = %d deltas, want 6 and 7", len(got))
+		var after []uint32
+		l.eachAfter(5, func(d *loggedDelta) { after = append(after, d.seq) })
+		if !slices.Equal(after, []uint32{6, 7}) {
+			t.Errorf("eachAfter(5) = %v, want [6 7]", after)
 		}
 		if !(&deltaLog{}).covers(9, 9) {
 			t.Error("a book at K needs no delta, so an empty log covers it")
@@ -96,8 +96,8 @@ func TestDeltaLog(t *testing.T) {
 		if got := logSeqs(&l); !slices.Equal(got, []uint32{998, 999, 1000}) {
 			t.Errorf("log %v, want [998 999 1000]", got)
 		}
-		if len(l.entries) > 2*maxDeltaLog {
-			t.Errorf("array holds %d entries for %d live", len(l.entries), maxDeltaLog)
+		if len(l.buf) > maxDeltaLog {
+			t.Errorf("ring holds %d entries, limit %d", len(l.buf), maxDeltaLog)
 		}
 		if !l.covers(997, 1000) || l.covers(996, 1000) {
 			t.Error("the log covers 998 to 1000 and nothing before")

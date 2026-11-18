@@ -746,6 +746,11 @@ func (e *Engine) checkBatchIDMonotonic(ch uint8, frameSeq uint64, m wire.Message
 
 // checkBatchAtomicityConsistency implements BATCH.ATOMICITY_CONSISTENCY: at a
 // BatchBoundary (0x13) the reconstructed book must be internally consistent.
+// It reads the orders each book recorded as left at zero remaining (zeroed),
+// not every live order: with seeded books a channel holds tens of thousands of
+// live orders, and a walk of all of them at each BatchBoundary was half of the
+// validator's CPU time. An orphan that stays is recorded again, so it is
+// reported at each BatchBoundary, as before.
 // Specifically, no live resting order may have remaining == 0; such an order is
 // an orphan that should have been removed by a prior full-fill or zero-remaining
 // execute but was not (impossible state). The book builder's applyOrderExecute
@@ -762,23 +767,25 @@ func (e *Engine) checkBatchAtomicityConsistency(ch uint8, frameSeq uint64) {
 	if e.mbo == nil || e.mbo.book == nil {
 		return
 	}
-	// This runs at every BatchBoundary, so it walks the maps in their own order and
-	// sorts only the orphans, which are almost always none. Sorting every book key
-	// and live Order ID here made each BatchBoundary about six times slower.
+	// This runs at every BatchBoundary, so it walks the books in their own order
+	// and sorts only the orphans, which are almost always none.
 	type orphan struct {
 		instrID uint32
 		orderID uint64
 	}
 	var orphans []orphan
 	for key, bk := range e.mbo.book.books {
-		if key.channelID != ch {
+		if key.channelID != ch || len(bk.zeroed) == 0 {
 			continue
 		}
-		for orderID, lo := range bk.live {
-			if lo.remaining == 0 {
+		kept := bk.zeroed[:0]
+		for _, orderID := range bk.zeroed {
+			if lo, live := bk.live[orderID]; live && lo.remaining == 0 && !slices.Contains(kept, orderID) {
+				kept = append(kept, orderID)
 				orphans = append(orphans, orphan{key.instrumentID, orderID})
 			}
 		}
+		bk.zeroed = kept
 	}
 	if len(orphans) == 0 {
 		return
