@@ -311,6 +311,13 @@ func diffBooks(snapOrders map[uint64]snapOrderRecord, deltaOrders map[uint64]res
 		if isHidden(do.orderFlags) {
 			continue
 		}
+		// An order an execute left at zero stays in the delta book until its
+		// OrderCancel. A snapshot leaves it out, because a SnapshotOrder has
+		// Quantity > 0 (SNAP.ORDER_STRUCT_VALID), so its absence is not a
+		// divergence.
+		if do.remaining == 0 {
+			continue
+		}
 		if _, found := snapOrders[id]; !found {
 			diffs = append(diffs, oracleDiff{orderID: id, field: "extra_in_delta"})
 		}

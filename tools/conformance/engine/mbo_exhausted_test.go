@@ -14,6 +14,7 @@ package engine
 // inconsistency that BATCH.ATOMICITY_CONSISTENCY reports.
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/malbeclabs/edge-feed-spec/tools/conformance/core"
@@ -146,5 +147,44 @@ func TestOrphanOnAnUntrustedBookIsUnverifiable(t *testing.T) {
 	got := findingsFor(ac, "BATCH.ATOMICITY_CONSISTENCY")
 	if len(got) != 1 || got[0].Status != core.Unverifiable || got[0].Reason != core.ReasonUntrusted {
 		t.Errorf("got %v, want one Unverifiable, reason untrusted", got)
+	}
+}
+
+// TestOrphanOnAnUnseededBookIsColdStart: no snapshot group has seeded the book,
+// so it can lack the cancel of an order from before the subscriber joined. The
+// orphan is Unverifiable, reason cold_start.
+func TestOrphanOnAnUnseededBookIsColdStart(t *testing.T) {
+	e, ac := newMBOEngineW1()
+	reachedReadyMBO(e, exhaustedCh, exhaustedInstr, 0, 1)
+	runMktdataSeq(e, buildOrderAddWithQty(exhaustedCh, exhaustedInstr, 1, 247, 2), 1)
+	runMktdataSeq(e, buildOrderExecuteWithQty(exhaustedCh, exhaustedInstr, 2, 247, 0, 2), 2)
+	runMktdataSeq(e, buildBatchBoundaryFrame(exhaustedCh, 1), 3)
+	e.Flush()
+	got := findingsFor(ac, "BATCH.ATOMICITY_CONSISTENCY")
+	if len(got) != 1 || got[0].Status != core.Unverifiable || got[0].Reason != core.ReasonColdStart {
+		t.Errorf("got %v, want one Unverifiable, reason cold_start", got)
+	}
+	// It decides only on a seeded book, so a run without --snapshot-port names it.
+	if !slices.Contains(core.SeedGatedRules(core.FeedMBO), "BATCH.ATOMICITY_CONSISTENCY") {
+		t.Error("core.SeedGatedRules must list BATCH.ATOMICITY_CONSISTENCY")
+	}
+}
+
+// TestOracleSkipsAnOrderAtZero: a snapshot taken between an execute to zero and
+// its OrderCancel leaves the order out, because a SnapshotOrder has Quantity > 0.
+// The delta book still holds the order at zero. That is not a divergence.
+func TestOracleSkipsAnOrderAtZero(t *testing.T) {
+	const ch, instrID = uint8(1), uint32(248)
+	e, oc := newOracleEngine(1)
+	reachedReadyMBO(e, ch, instrID, 0, 1)
+	seedEmptyBooks(e, ch, instrID)
+	runMktdataSeq(e, buildOrderAddExact(ch, instrID, 1, 80001, 0, 0, 1000, 100, 10), 1)
+	runMktdataSeq(e, buildOrderAddExact(ch, instrID, 2, 80002, 1, 0, 2000, 200, 5), 2)
+	runMktdataSeq(e, buildOrderExecuteWithQty(ch, instrID, 3, 80002, 0, 5), 3) // 80002 at zero
+	e.Flush()
+	oc.auditResults = nil
+	completeSnapshot(e, ch, instrID, 3, 10, 3, [][]byte{buildSnapOrderFields(ch, 10, 80001, 0, 0, 1000, 100, 10)}, 1)
+	if got := oc.lastAudit(); got != "match" {
+		t.Errorf("snapshot without the order at zero: audit %q, want match", got)
 	}
 }

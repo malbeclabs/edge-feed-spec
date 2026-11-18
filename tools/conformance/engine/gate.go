@@ -798,7 +798,7 @@ func (e *Engine) checkBatchAtomicityConsistency(ch uint8, frameSeq uint64) {
 		t := e.mbo.trackers[instrTrackerKey{ch, o.instrID}]
 		switch {
 		case !gapless:
-			e.Emit(rule, core.Unverifiable, core.PortMktData, frameSeq, ch, o.instrID, detail)
+			e.unverified(rule, core.ReasonLoss, core.PortMktData, frameSeq, ch, o.instrID, detail)
 		case t == nil || !t.bookTrusted:
 			reason := core.ReasonColdStart
 			if t != nil && t.seeded {

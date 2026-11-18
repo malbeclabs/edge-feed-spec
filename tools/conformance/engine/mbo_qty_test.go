@@ -417,6 +417,9 @@ func TestBatchAtomicityConsistency(t *testing.T) {
 		e.Flush()
 
 		for _, fn := range findingsFor(ac, "BATCH.ATOMICITY_CONSISTENCY") {
+			if fn.Status == core.Unverifiable && fn.Reason != core.ReasonLoss {
+				t.Errorf("mktdata gap: reason %q, want %q", fn.Reason, core.ReasonLoss)
+			}
 			if fn.Status == core.Violation {
 				t.Errorf("mktdata gap must produce Unverifiable for BATCH.ATOMICITY_CONSISTENCY, got Violation: %s", fn.Detail)
 			}
