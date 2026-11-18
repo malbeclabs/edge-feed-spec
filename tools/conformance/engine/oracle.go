@@ -36,7 +36,9 @@ package engine
 // False-positive guarantees:
 //
 //  1. Only diffs when the log covers K to lastInstrSeq[I] AND gateConsumer holds
-//     (gapless per-instrument history, gapless mktdata channel, refdata ready).
+//     (gapless per-instrument history since a seed, refdata ready). A mktdata gap
+//     that removed no delta of the instrument does not stop the oracle: a lost
+//     delta of the instrument would have cleared bookTrusted.
 //  2. Snapshot group must be structurally valid (no ORDER_SNAPSHOT_ID_MATCH,
 //     SNAPSHOT_ORDER_NO_DUP_ORDER_ID, EMPTY_BOOK_WELL_FORMED,
 //     END_FIELDS_MATCH_BEGIN, or TOTAL_ORDERS_COUNT_MATCH violations). A
@@ -110,7 +112,7 @@ func (e *Engine) runOracleForGroup(ch uint8, snap *openSnapshot, snapPortSeq uin
 	}
 
 	// --- Gate 1: gateConsumer-equivalent check for the oracle.
-	// We need: refdata ready + instrument known + bookTrusted + gapless mktdata.
+	// We need: refdata ready + instrument known + bookTrusted.
 	// We cannot call gateConsumer (which requires a perInstrSeq argument), so
 	// replicate its logic without the perSeq == lastInstrSeq+1 check (handled by
 	// gate 2 below).
@@ -158,11 +160,6 @@ func (e *Engine) runOracleForGroup(ch uint8, snap *openSnapshot, snapPortSeq uin
 			fmt.Sprintf("instrument %d: a late or duplicate delta mutated the book without advancing its seq", instrID))
 		return
 	}
-	if !e.instanceGapless(core.PortMktData, ch) {
-		e.unverifiable(key, snapPortSeq, core.ReasonLoss, "the mktdata port has a sequence gap this era")
-		return
-	}
-
 	// --- Gate 2: the delta book must be at seq K, or past it with every delta
 	// after K in its log. The oracle then compares the delta book with the snapshot
 	// book with those deltas applied (see deltaLog).

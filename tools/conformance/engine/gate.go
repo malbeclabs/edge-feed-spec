@@ -480,10 +480,16 @@ func (e *Engine) snapPortBound(ch uint8) bool {
 //     seeded the book, and every delta since then continued the series
 //     (bookTrusted=true). A prior gap could have carried a missing OrderAdd.
 //  3. The incoming perInstrSeq == lastInstrSeq+1 (no gap immediately before this msg).
-//  4. The instance's mktdata series is gapless (instanceGapless): a datagram gap could
-//     have carried the missing delta.
 //
 // If any condition is false, the anomaly is Unverifiable, never Violation.
+//
+// A gap in the instance's mktdata series is not a condition. A lost datagram that
+// carried a delta of this instrument makes the instrument's next delta jump, which
+// clears bookTrusted (applyDeltaSeq). With conditions 2 and 3 true, the book has
+// every delta of the instrument up to this one, so a lost datagram cannot explain
+// the anomaly. An earlier version also required instanceGapless, which stays false
+// for the rest of the era after one gap: one lost datagram stopped these rules on
+// every instrument for days (malbeclabs/edge-feed-spec#131).
 func (e *Engine) gateConsumer(ch uint8, instrID uint32, perInstrSeq uint32) bool {
 	// Condition 1: refdata ready and instrument known.
 	if e.refdata == nil {
@@ -503,12 +509,9 @@ func (e *Engine) gateConsumer(ch uint8, instrID uint32, perInstrSeq uint32) bool
 		// History has a prior gap (or cold-started mid-stream): book may be incomplete.
 		return false
 	}
-	if perInstrSeq != *t.lastInstrSeq+1 {
-		// There is a per-instrument seq gap: a missing delta could have added the order.
-		return false
-	}
-	// Condition 4: mktdata channel gapless.
-	return e.instanceGapless(core.PortMktData, ch)
+	// Condition 3: there is no per-instrument seq gap: a missing delta could have
+	// added the order.
+	return perInstrSeq == *t.lastInstrSeq+1
 }
 
 // selectMBO points e.mbo at the state of the channel instance in front of the
