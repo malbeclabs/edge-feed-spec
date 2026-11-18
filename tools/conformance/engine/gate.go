@@ -785,11 +785,31 @@ func (e *Engine) checkBatchAtomicityConsistency(ch uint8, frameSeq uint64) {
 		}
 		return cmp.Compare(a.orderID, b.orderID)
 	})
-	gated := e.instanceGapless(core.PortMktData, ch)
+	// An orphan is the publisher's only when the book is the publisher's book: the
+	// instance lost no datagram, a snapshot seeded the book and every delta since
+	// continued its series, and no duplicate delta changed it. A duplicate execute
+	// can take an order to zero in this book while the publisher's order still has
+	// quantity, and a lost delta can leave out the cancel.
+	gapless := e.instanceGapless(core.PortMktData, ch)
 	for _, o := range orphans {
-		e.Emit("BATCH.ATOMICITY_CONSISTENCY", statusFor(gated), core.PortMktData, frameSeq, ch, o.instrID,
-			fmt.Sprintf("instrument %d: live order %d has remaining=0 at BatchBoundary (orphan)",
-				o.instrID, o.orderID))
+		const rule = "BATCH.ATOMICITY_CONSISTENCY"
+		detail := fmt.Sprintf("instrument %d: live order %d has remaining=0 at BatchBoundary (orphan)",
+			o.instrID, o.orderID)
+		t := e.mbo.trackers[instrTrackerKey{ch, o.instrID}]
+		switch {
+		case !gapless:
+			e.Emit(rule, core.Unverifiable, core.PortMktData, frameSeq, ch, o.instrID, detail)
+		case t == nil || !t.bookTrusted:
+			reason := core.ReasonColdStart
+			if t != nil && t.seeded {
+				reason = core.ReasonUntrusted
+			}
+			e.unverified(rule, reason, core.PortMktData, frameSeq, ch, o.instrID, detail)
+		case t.bookCorruptedByDup:
+			e.unverified(rule, core.ReasonReorder, core.PortMktData, frameSeq, ch, o.instrID, detail)
+		default:
+			e.Emit(rule, core.Violation, core.PortMktData, frameSeq, ch, o.instrID, detail)
+		}
 	}
 }
 

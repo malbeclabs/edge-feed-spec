@@ -15,6 +15,8 @@ package engine
 
 import (
 	"testing"
+
+	"github.com/malbeclabs/edge-feed-spec/tools/conformance/core"
 )
 
 // exhaustedCh and exhaustedInstr are the channel and instrument of these tests.
@@ -110,5 +112,39 @@ func TestExecuteToZeroAcrossABoundaryIsInconsistent(t *testing.T) {
 	e.Flush()
 	for _, f := range findingsFor(ac, "REF.OPERATION_AFTER_REMOVAL") {
 		t.Errorf("the cancel after the boundary removes the order: %v: %s", f.Status, f.Detail)
+	}
+}
+
+// TestOrphanOnACorruptedBookIsUnverifiable: a duplicate execute takes the order to
+// zero in this book, while the publisher's order still has 2. The orphan is
+// Unverifiable, reason reorder.
+func TestOrphanOnACorruptedBookIsUnverifiable(t *testing.T) {
+	e, ac := newMBOEngineW1()
+	const id = uint64(245)
+	seq := seedGaplessHistory(e, exhaustedCh, exhaustedInstr, 3, 1)
+	runMktdataSeq(e, buildOrderAddWithQty(exhaustedCh, exhaustedInstr, 4, id, 4), seq)
+	runMktdataSeq(e, buildOrderExecuteWithQty(exhaustedCh, exhaustedInstr, 5, id, 0, 2), seq+1)
+	runMktdataSeq(e, buildOrderExecuteWithQty(exhaustedCh, exhaustedInstr, 5, id, 0, 2), seq+2) // duplicate
+	runMktdataSeq(e, buildBatchBoundaryFrame(exhaustedCh, 1), seq+3)
+	e.Flush()
+	got := findingsFor(ac, "BATCH.ATOMICITY_CONSISTENCY")
+	if len(got) != 1 || got[0].Status != core.Unverifiable || got[0].Reason != core.ReasonReorder {
+		t.Errorf("got %v, want one Unverifiable, reason reorder", got)
+	}
+}
+
+// TestOrphanOnAnUntrustedBookIsUnverifiable: delta 5 is missing, so the book is not
+// trusted, and delta 5 could have cancelled the order. The orphan is Unverifiable.
+func TestOrphanOnAnUntrustedBookIsUnverifiable(t *testing.T) {
+	e, ac := newMBOEngineW1()
+	const id = uint64(246)
+	seq := seedGaplessHistory(e, exhaustedCh, exhaustedInstr, 3, 1)
+	runMktdataSeq(e, buildOrderAddWithQty(exhaustedCh, exhaustedInstr, 4, id, 2), seq)
+	runMktdataSeq(e, buildOrderExecuteWithQty(exhaustedCh, exhaustedInstr, 6, id, 0, 2), seq+1) // delta 5 is missing
+	runMktdataSeq(e, buildBatchBoundaryFrame(exhaustedCh, 1), seq+2)
+	e.Flush()
+	got := findingsFor(ac, "BATCH.ATOMICITY_CONSISTENCY")
+	if len(got) != 1 || got[0].Status != core.Unverifiable || got[0].Reason != core.ReasonUntrusted {
+		t.Errorf("got %v, want one Unverifiable, reason untrusted", got)
 	}
 }
