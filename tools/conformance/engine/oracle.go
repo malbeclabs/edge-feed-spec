@@ -26,16 +26,17 @@ package engine
 // As-of-K correctness:
 //
 //	The oracle compares the snapshot (taken at per-instrument seq K) against the
-//	delta book. Comparing is only provably correct when the delta book's
-//	lastInstrSeq == K at the time the group completes (the common idle/paused
-//	case). If lastInstrSeq != K (book advanced past K, or is behind K), or if
-//	any gating condition fails (gateConsumer, bookTrusted, refdata), the oracle
-//	emits "unverifiable" — never a mismatch.
+//	delta book. When the delta book's lastInstrSeq is K, it compares the two
+//	books. When the delta book is past K and its delta log holds every delta
+//	after K (deltaLog), it compares the delta book with the snapshot book with
+//	those deltas applied. If the book is behind K, the log lacks a delta after
+//	K, or any gating condition fails (gateConsumer, bookTrusted, refdata), the
+//	oracle emits "unverifiable" — never a mismatch.
 //
 // False-positive guarantees:
 //
-//  1. Only diffs when lastInstrSeq[I] == K AND gateConsumer holds (gapless
-//     per-instrument history, gapless mktdata channel, refdata ready).
+//  1. Only diffs when the log covers K to lastInstrSeq[I] AND gateConsumer holds
+//     (gapless per-instrument history, gapless mktdata channel, refdata ready).
 //  2. Snapshot group must be structurally valid (no ORDER_SNAPSHOT_ID_MATCH,
 //     SNAPSHOT_ORDER_NO_DUP_ORDER_ID, EMPTY_BOOK_WELL_FORMED,
 //     END_FIELDS_MATCH_BEGIN, or TOTAL_ORDERS_COUNT_MATCH violations). A
@@ -133,10 +134,10 @@ func (e *Engine) runOracleForGroup(ch uint8, snap *openSnapshot, snapPortSeq uin
 				fmt.Sprintf("instrument %d: this snapshot group seeds the book, so there is no book to compare it with", instrID))
 			return
 		}
-		// No group has seeded the book yet: on a busy instrument the tracker is often
-		// past K when a group ends, so the wait can last several cycles. That is the
-		// state the check reads not being established yet, which is cold_start and
-		// routine, and not a fault upstream.
+		// No group has seeded the book yet: no group was complete and clean, or a
+		// per-instrument gap after K kept a group from seeding. That is the state the
+		// check reads not being established yet, which is cold_start and routine, and
+		// not a fault upstream.
 		if !dt.seeded {
 			e.unverifiable(key, snapPortSeq, core.ReasonColdStart,
 				fmt.Sprintf("instrument %d: no snapshot group has seeded the book yet, so there is no book to compare", instrID))
@@ -162,18 +163,27 @@ func (e *Engine) runOracleForGroup(ch uint8, snap *openSnapshot, snapPortSeq uin
 		return
 	}
 
-	// --- Gate 2: delta book must be exactly at seq K.
-	// If lastInstrSeq is nil (no deltas ever seen) or != K, we cannot compare.
+	// --- Gate 2: the delta book must be at seq K, or past it with every delta
+	// after K in its log. The oracle then compares the delta book with the snapshot
+	// book with those deltas applied (see deltaLog).
 	K := snap.lastInstrSeqK
 	if dt.lastInstrSeq == nil {
 		e.unverifiable(key, snapPortSeq, core.ReasonColdStart,
 			fmt.Sprintf("instrument %d: no delta seen yet, so there is no book to compare", instrID))
 		return
 	}
-	if *dt.lastInstrSeq != K {
+	last := *dt.lastInstrSeq
+	bk := e.mbo.book.book(ch, instrID)
+	if last < K {
 		e.unverifiable(key, snapPortSeq, core.ReasonPending,
-			fmt.Sprintf("instrument %d: book is at per-instrument seq %d, the snapshot was taken at %d",
-				instrID, *dt.lastInstrSeq, K))
+			fmt.Sprintf("instrument %d: book is at per-instrument seq %d, behind the snapshot taken at %d",
+				instrID, last, K))
+		return
+	}
+	if !bk.log.covers(K, last) {
+		e.unverifiable(key, snapPortSeq, core.ReasonPending,
+			fmt.Sprintf("instrument %d: book is at per-instrument seq %d, the snapshot was taken at %d, "+
+				"and the delta log does not hold every delta between them", instrID, last, K))
 		return
 	}
 
@@ -187,8 +197,14 @@ func (e *Engine) runOracleForGroup(ch uint8, snap *openSnapshot, snapPortSeq uin
 	}
 
 	// --- Diff the two books ---
-	deltaBook := e.mbo.book.book(ch, instrID).Orders() // snapshot copy
-	diffs := diffBooks(snap.orders, deltaBook)
+	expected, at := snap.orders, fmt.Sprintf("at per-instrument seq %d", K)
+	if last > K {
+		expected = replayedSnapshot(snap.orders, K, &bk.log)
+		at = fmt.Sprintf("at per-instrument seq %d (the snapshot at %d with the %d logged deltas after it)",
+			last, K, last-K)
+	}
+	deltaBook := bk.Orders() // snapshot copy
+	diffs := diffBooks(expected, deltaBook)
 
 	if len(diffs) == 0 {
 		// Books agree: clear any suspect state for this instrument.
@@ -198,8 +214,8 @@ func (e *Engine) runOracleForGroup(ch uint8, snap *openSnapshot, snapPortSeq uin
 		// the positive claim the oracle exists to make, and the rule's `pass` series is
 		// the only place an operator can read it per rule.
 		e.passed("SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT", core.PortSnapshot, snapPortSeq, ch, instrID,
-			fmt.Sprintf("instrument %d: delta book matches the snapshot at per-instrument seq %d (%d order(s))",
-				instrID, K, len(deltaBook)))
+			fmt.Sprintf("instrument %d: delta book matches the snapshot %s (%d order(s))",
+				instrID, at, len(deltaBook)))
 		return
 	}
 
@@ -231,9 +247,9 @@ func (e *Engine) runOracleForGroup(ch uint8, snap *openSnapshot, snapPortSeq uin
 		// Promoted to confirmed mismatch.
 		e.rep.SnapshotAudit("mismatch_confirmed")
 		e.Emit("SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT", statusFor(true), core.PortSnapshot, snapPortSeq, ch, instrID,
-			fmt.Sprintf("instrument %d: snapshot book diverges from delta book at per-instrument seq %d "+
+			fmt.Sprintf("instrument %d: snapshot book diverges from delta book %s "+
 				"(confirmed across %d cycle(s)): %s",
-				instrID, K, suspect.count, sig))
+				instrID, at, suspect.count, sig))
 		// Keep suspect.count so the next divergence will also fire immediately
 		// (i.e. a persistent bug keeps emitting confirmed each cycle).
 	} else {
@@ -245,10 +261,28 @@ func (e *Engine) runOracleForGroup(ch uint8, snap *openSnapshot, snapPortSeq uin
 		// existed in core and no engine path ever produced it — a divergence awaiting
 		// confirmation was visible only in the rule-less audit counter.
 		e.Emit("SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT", core.Suspected, core.PortSnapshot, snapPortSeq, ch, instrID,
-			fmt.Sprintf("instrument %d: snapshot book diverges from delta book at per-instrument seq %d "+
+			fmt.Sprintf("instrument %d: snapshot book diverges from delta book %s "+
 				"(%d of %d cycle(s) needed to confirm): %s",
-				instrID, K, suspect.count, confirmCycles, sig))
+				instrID, at, suspect.count, confirmCycles, sig))
 	}
+}
+
+// replayedSnapshot returns the book that a snapshot group taken at per-instrument
+// seq k and the logged deltas after k make, as snapshot records. The hidden
+// orders of the snapshot stay in it, as diffBooks expects of a snapshot book.
+func replayedSnapshot(orders map[uint64]snapOrderRecord, k uint32, log *deltaLog) map[uint64]snapOrderRecord {
+	scratch := newInstrBook()
+	scratch.seedAndReplay(orders, k, log)
+	out := make(map[uint64]snapOrderRecord, len(scratch.live))
+	for id, o := range orders {
+		if isHidden(o.orderFlags) {
+			out[id] = o
+		}
+	}
+	for id, lo := range scratch.live {
+		out[id] = snapOrderRecord{side: lo.side, orderFlags: lo.orderFlags, enterTS: lo.enterTS, price: lo.price, qty: lo.remaining}
+	}
+	return out
 }
 
 // diffBooks compares the snapshot book (from the completed group) against the

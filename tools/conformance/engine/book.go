@@ -49,6 +49,8 @@ import (
 	"errors"
 	"maps"
 	"slices"
+
+	"github.com/malbeclabs/edge-feed-spec/tools/conformance/wire"
 )
 
 // The per-instrument limits of the idWindow sets. A full window costs about 68
@@ -153,6 +155,10 @@ type instrBook struct {
 	// execTradeIDs holds the most recent maxExecTradeIDs Trade IDs seen in
 	// OrderExecute messages. Used by TRADE.EXEC_GROUPING.
 	execTradeIDs *idWindow
+	// log holds the deltas this book applied in per-instrument seq order, so
+	// that a snapshot group can seed or audit the book after the book moved past
+	// the group's Last Instrument Seq (see deltaLog).
+	log deltaLog
 }
 
 func newInstrBook() *instrBook {
@@ -363,4 +369,161 @@ func isHidden(orderFlags uint8) bool {
 // isFullFill returns true when ExecFlags bit 0 is set (full fill / last partial).
 func isFullFill(execFlags uint8) bool {
 	return execFlags&0x01 != 0
+}
+
+// applyDelta changes the book as one OrderAdd, OrderCancel or OrderExecute
+// changes it. checkMBORef applies each delta with it, and a seed or an audit
+// applies the logged deltas after a snapshot with it, so both change a book in
+// the same way.
+//
+// An OrderExecute or an OrderCancel for an order that is not live changes
+// nothing. The referential checks report it.
+func (bk *instrBook) applyDelta(m wire.Message) error {
+	switch m.Type {
+	case wire.TypeOrderAdd:
+		return bk.applyOrderAddFull(orderAddOrderID(m), orderAddSourceID(m), orderAddSide(m),
+			orderAddPrice(m), orderAddQuantity(m), orderAddOrderFlags(m), orderAddEnterTimestamp(m))
+	case wire.TypeOrderCancel:
+		return bk.applyOrderCancel(orderCancelOrderID(m))
+	case wire.TypeOrderExecute:
+		id := orderExecuteOrderID(m)
+		if _, live := bk.live[id]; !live {
+			return nil
+		}
+		return bk.applyOrderExecute(id, orderExecuteExecQuantity(m), isFullFill(orderExecuteExecFlags(m)))
+	}
+	return nil
+}
+
+// seedAndReplay replaces the live set with the orders of a snapshot group taken
+// at per-instrument seq k, then applies the logged deltas after k. The result is
+// the book at the last logged delta, built from the snapshot. The caller checks
+// log.covers first.
+func (bk *instrBook) seedAndReplay(orders map[uint64]snapOrderRecord, k uint32, log *deltaLog) {
+	bk.seed(orders)
+	for _, d := range log.after(k) {
+		_ = bk.applyDelta(d.message())
+	}
+}
+
+// maxDeltaLog limits the deltas that the log of one instrument keeps. A group
+// close removes the deltas at or below its Last Instrument Seq, so the log of
+// an instrument holds the deltas since its last snapshot group, and only a busy
+// instrument reaches the limit. An entry is 60 bytes, so a full log is 240 KiB,
+// and its array is at most twice that. Measured on a 30-minute capture of two
+// busy feeds, 68,277 groups: when a group closed, the book was at most 1,878
+// deltas past its Last Instrument Seq, 200 to 342 at the 99th percentile. It is
+// a variable so that tests can use a small limit.
+var maxDeltaLog = 4096
+
+// maxLoggedBody is the largest delta body: an OrderExecute is 56 bytes, 52
+// after its message header.
+const maxLoggedBody = 52
+
+// loggedDelta is one delta of a deltaLog: the message, and its per-instrument
+// seq.
+type loggedDelta struct {
+	seq    uint32
+	typ    uint8
+	length uint8
+	n      uint8
+	body   [maxLoggedBody]byte
+}
+
+func (d *loggedDelta) message() wire.Message {
+	return wire.Message{Type: d.typ, Length: d.length, Body: d.body[:d.n]}
+}
+
+// deltaLog keeps the most recent deltas of one instrument, with contiguous
+// per-instrument seqs. market-by-order/spec.md, Cold Start steps 5 and 6, has a
+// subscriber apply a snapshot group, then the deltas after its Last Instrument
+// Seq (K). The engine applies deltas as they arrive, so on a busy instrument the
+// book is past K when the group closes. The log keeps the deltas after K, and a
+// seed or an audit applies them to the snapshot book.
+//
+// A delta with a seq that does not follow the last entry is not one more step of
+// the same history. A later seq (a jump) starts a new log. An earlier or equal
+// seq (a duplicate or a late delta) is not logged.
+type deltaLog struct {
+	// entries[off:] are the logged deltas, oldest first.
+	entries []loggedDelta
+	off     int
+}
+
+func (l *deltaLog) live() []loggedDelta { return l.entries[l.off:] }
+
+// record logs delta m with per-instrument seq seq.
+func (l *deltaLog) record(seq uint32, m wire.Message) {
+	if len(m.Body) > maxLoggedBody {
+		l.clear()
+		return
+	}
+	if live := l.live(); len(live) > 0 {
+		last := live[len(live)-1].seq
+		if seq <= last {
+			return
+		}
+		if seq != last+1 {
+			l.clear()
+		}
+	}
+	d := loggedDelta{seq: seq, typ: m.Type, length: m.Length, n: uint8(len(m.Body))}
+	copy(d.body[:], m.Body)
+	l.entries = append(l.entries, d)
+	if len(l.entries)-l.off > maxDeltaLog {
+		l.off++
+		l.compact()
+	}
+}
+
+// covers reports whether the log holds every delta from k+1 to last, the
+// per-instrument seq of the book. A book at k needs no delta.
+func (l *deltaLog) covers(k, last uint32) bool {
+	if last == k {
+		return true
+	}
+	live := l.live()
+	return last > k && len(live) > 0 && live[0].seq <= k+1 && live[len(live)-1].seq == last
+}
+
+// after returns the logged deltas with a seq above k, oldest first.
+func (l *deltaLog) after(k uint32) []loggedDelta {
+	live := l.live()
+	if len(live) == 0 || live[len(live)-1].seq <= k {
+		return nil
+	}
+	if live[0].seq > k {
+		return live
+	}
+	return live[k-live[0].seq+1:]
+}
+
+// trimThrough removes the deltas at or below k. A later snapshot group of the
+// instrument has a Last Instrument Seq of at least k, so it does not need them.
+func (l *deltaLog) trimThrough(k uint32) {
+	live := l.live()
+	if len(live) == 0 || live[0].seq > k {
+		return
+	}
+	if live[len(live)-1].seq <= k {
+		l.clear()
+		return
+	}
+	l.off += int(k - live[0].seq + 1)
+	l.compact()
+}
+
+func (l *deltaLog) clear() {
+	l.entries = l.entries[:0]
+	l.off = 0
+}
+
+// compact moves the live entries to the start of the array when the removed
+// ones are at least half of it, so the array stays at most twice the live size.
+func (l *deltaLog) compact() {
+	if l.off > 0 && l.off*2 >= len(l.entries) {
+		n := copy(l.entries, l.entries[l.off:])
+		l.entries = l.entries[:n]
+		l.off = 0
+	}
 }

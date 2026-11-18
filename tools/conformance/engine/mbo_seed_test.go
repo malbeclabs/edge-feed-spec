@@ -135,21 +135,22 @@ func TestJoinMidStreamQuietInstrumentSeedsAtK(t *testing.T) {
 	}
 }
 
-// TestSnapshotThatCannotSeed: a group seeds nothing when the tracker is already
-// past its K, or when the group is incomplete. A cancel of an unknown order then
-// stays Unverifiable.
+// TestSnapshotThatCannotSeed: a group seeds nothing when the tracker is past its
+// K and a delta after K is missing, or when the group is incomplete. A cancel of
+// an unknown order then stays Unverifiable. A tracker past K with every delta
+// after K seeds: see mbo_replay_test.go.
 func TestSnapshotThatCannotSeed(t *testing.T) {
-	t.Run("tracker past K", func(t *testing.T) {
+	t.Run("tracker past K, delta after K missing", func(t *testing.T) {
 		e, ac, a := readyPub(t)
 		a.add(e, 50, 7)
-		a.add(e, 51, 8)
+		a.add(e, 52, 8) // delta 51 is missing
 		e.Flush()
 		a.group(e, 0, 7, 50, 7)
 		e.Flush()
-		a.cancel(e, 52, 999)
+		a.cancel(e, 53, 999)
 		e.Flush()
 		if v, _ := danglingCancels(ac); v != 0 {
-			t.Errorf("got %d violations, want 0: deltas after K are already in the book%s", v, describe(ac.findings))
+			t.Errorf("got %d violations, want 0: delta 51 could have added order 999%s", v, describe(ac.findings))
 		}
 	})
 	t.Run("group under-counts", func(t *testing.T) {
@@ -330,24 +331,24 @@ func TestUnseededWaitIsColdStart(t *testing.T) {
 		return got[0].Reason
 	}
 	a.add(e, 50, 7)
-	a.add(e, 51, 8)
+	a.add(e, 52, 8) // delta 51 is missing
 	e.Flush()
 	clearFindings(ac)
-	a.group(e, 0, 7, 50, 7) // the tracker is past K
+	a.group(e, 0, 7, 50, 7) // the tracker is past K, without delta 51
 	e.Flush()
 	if r := oracleReason(); r != core.ReasonColdStart {
 		t.Errorf("never seeded: reason %q, want %q", r, core.ReasonColdStart)
 	}
-	a.group(e, 0, 8, 51, 7, 8) // lines up: seeds
+	a.group(e, 0, 8, 52, 7, 8) // lines up: seeds
 	e.Flush()
 	if r := oracleReason(); r != core.ReasonColdStart {
 		t.Errorf("seeding group: reason %q, want %q", r, core.ReasonColdStart)
 	}
-	a.add(e, 53, 9) // a per-instrument gap
-	a.add(e, 54, 10)
+	a.add(e, 54, 9) // a per-instrument gap: delta 53 is missing
+	a.add(e, 55, 10)
 	e.Flush()
 	clearFindings(ac)
-	a.group(e, 0, 9, 53, 7, 8, 9) // the tracker is past K
+	a.group(e, 0, 9, 52, 7, 8) // the tracker is past K, without delta 53
 	e.Flush()
 	if r := oracleReason(); r != core.ReasonUntrusted {
 		t.Errorf("seeded, then a gap: reason %q, want %q", r, core.ReasonUntrusted)

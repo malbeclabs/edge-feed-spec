@@ -685,6 +685,9 @@ func (e *Engine) checkMBO(f *wire.Frame, ch uint8) {
 			e.applyDeltaSeq(ch, instrID, perSeq, frameSeq, m)
 			// Referential-integrity checks (Task 20).
 			e.checkMBORef(ch, instrID, gated, frameSeq, m)
+			// Log the delta, so that a snapshot group can seed or audit the book
+			// after the book moved past the group's Last Instrument Seq.
+			e.mbo.book.book(ch, instrID).log.record(perSeq, m)
 
 		case wire.TypeTrade:
 			if m.Length != expectedMsgLen(e.cfg.Feed, f.Header.SchemaVersion, m.Type) {
@@ -1313,6 +1316,10 @@ func (e *Engine) handleSnapEnd(m wire.Message, ch uint8, snapPortSeq uint64) {
 	// never compares a book with the snapshot it was seeded from.
 	e.seedBookFromSnapshot(ch, open)
 
+	// A later group of the instrument has a Last Instrument Seq of at least this
+	// one, so it needs no logged delta at or below it.
+	e.mbo.book.book(ch, open.instrID).log.trimThrough(open.lastInstrSeqK)
+
 	// Close the group.
 	delete(e.mbo.openSnaps, ch)
 }
@@ -1330,10 +1337,15 @@ func (e *Engine) handleSnapEnd(m wire.Message, ch uint8, snapPortSeq uint64) {
 // loss since it opened. Otherwise the snapshot book can be missing orders.
 //
 // The book is as of the group's Last Instrument Seq K. The engine applies deltas
-// as they arrive and does not buffer them, so it seeds only where the delta
-// history lines up with K:
+// as they arrive, and the book's delta log (deltaLog) keeps the deltas after K,
+// so it seeds where the delta history lines up with K:
 //
 //   - The tracker is at K. Every delta up to K was applied, and none after it.
+//   - The tracker is past K, and the delta log holds every delta from K+1 to the
+//     tracker. The book is the snapshot book with those deltas applied, as
+//     market-by-order/spec.md, Cold Start steps 5 and 6, prescribes. On a busy
+//     instrument this is the usual case: the deltas after K arrive while the
+//     group is on the snapshot port.
 //   - The tracker has no delta, and K is 0. No delta of the era came before the
 //     snapshot. The first delta must then be 1.
 //   - The tracker has no delta, and the group is the recovery snapshot of an
@@ -1350,8 +1362,9 @@ func (e *Engine) handleSnapEnd(m wire.Message, ch uint8, snapPortSeq uint64) {
 //     restart), a delta after K can be one it never saw, and moving to K would
 //     make the next delta a false DELTA.PERINSTR_DENSITY violation.
 //
-// When the tracker is past K, the deltas after K are already in the book, and the
-// book stays untrusted until a later group lines up.
+// When the tracker is past K and the log does not reach back to K+1 (a
+// per-instrument gap after K, or more deltas than maxDeltaLog), the book stays
+// untrusted until a later group lines up.
 func (e *Engine) seedBookFromSnapshot(ch uint8, snap *openSnapshot) {
 	ok, moveToK := e.seedPlan(ch, snap)
 	if !ok {
@@ -1362,7 +1375,8 @@ func (e *Engine) seedBookFromSnapshot(ch uint8, snap *openSnapshot) {
 		k := snap.lastInstrSeqK
 		dt.lastInstrSeq = &k
 	}
-	e.mbo.book.book(ch, snap.instrID).seed(snap.orders)
+	bk := e.mbo.book.book(ch, snap.instrID)
+	bk.seedAndReplay(snap.orders, snap.lastInstrSeqK, &bk.log)
 	dt.bookTrusted = true
 	dt.seeded = true
 	dt.bookCorruptedByDup = false
@@ -1383,7 +1397,7 @@ func (e *Engine) seedPlan(ch uint8, snap *openSnapshot) (ok, moveToK bool) {
 	k := snap.lastInstrSeqK
 	switch {
 	case dt.lastInstrSeq != nil:
-		return *dt.lastInstrSeq == k, false
+		return e.mbo.book.book(ch, snap.instrID).log.covers(k, *dt.lastInstrSeq), false
 	case k == 0 || dt.recoveryKSet:
 		// The first delta grades the seed: see applyDeltaSeq.
 		return true, false
@@ -1837,11 +1851,6 @@ func statusFor(gated bool) core.Status {
 func (e *Engine) checkOrderAdd(ch uint8, instrID uint32, gated bool, frameSeq uint64, m wire.Message, bk *instrBook) {
 	orderID := orderAddOrderID(m)
 	flags := orderAddOrderFlags(m)
-	side := orderAddSide(m)
-	sourceID := orderAddSourceID(m)
-	price := orderAddPrice(m)
-	qty := orderAddQuantity(m)
-	enterTS := orderAddEnterTimestamp(m)
 
 	// Hidden orders (OrderFlags bit 2) share ID slots by spec.
 	// Do not track hidden orders in the live set: they are exempt from duplicate
@@ -1850,7 +1859,7 @@ func (e *Engine) checkOrderAdd(ch uint8, instrID uint32, gated bool, frameSeq ui
 	// applyOrderAddFull records the ID in hiddenIDs (via the isHidden branch) so
 	// that execute/cancel messages for this ID are not falsely reported as dangling.
 	if isHidden(flags) {
-		_ = bk.applyOrderAddFull(orderID, sourceID, side, price, qty, flags, enterTS)
+		_ = bk.applyDelta(m)
 		return
 	}
 
@@ -1861,7 +1870,7 @@ func (e *Engine) checkOrderAdd(ch uint8, instrID uint32, gated bool, frameSeq ui
 	}
 
 	// Insert into the live set via the book builder; clears any prior removed entry.
-	_ = bk.applyOrderAddFull(orderID, sourceID, side, price, qty, flags, enterTS)
+	_ = bk.applyDelta(m)
 }
 
 // checkOrderCancel processes REF.CANCEL_DANGLING_ORDER, REF.OPERATION_AFTER_REMOVAL,
@@ -1878,7 +1887,7 @@ func (e *Engine) checkOrderCancel(ch uint8, instrID uint32, gated bool, frameSeq
 					instrID, sourceID, lo.sourceID, orderID))
 		}
 		// Move to removed set via book builder.
-		_ = bk.applyOrderCancel(orderID)
+		_ = bk.applyDelta(m)
 		return
 	}
 
@@ -1921,7 +1930,6 @@ func (e *Engine) checkOrderCancel(ch uint8, instrID uint32, gated bool, frameSeq
 func (e *Engine) checkOrderExecute(ch uint8, instrID uint32, gated bool, frameSeq uint64, m wire.Message, bk *instrBook) {
 	orderID := orderExecuteOrderID(m)
 	aggressorSide := orderExecuteAggressorSide(m)
-	execFlags := orderExecuteExecFlags(m)
 	sourceID := orderExecuteSourceID(m)
 	tradeID := orderExecuteTradeID(m)
 
@@ -1957,7 +1965,7 @@ func (e *Engine) checkOrderExecute(ch uint8, instrID uint32, gated bool, frameSe
 		// Apply the book-builder mutation (quantity decrement + removal on full-fill or
 		// zero remaining). Map typed errors to quantity-conservation findings.
 		execQty := orderExecuteExecQuantity(m)
-		err := bk.applyOrderExecute(orderID, execQty, isFullFill(execFlags))
+		err := bk.applyDelta(m)
 		switch {
 		case errors.Is(err, errOverfill):
 			e.Emit("REF.EXEC_OVERFILL", statusFor(gated), core.PortMktData, frameSeq, ch, instrID,

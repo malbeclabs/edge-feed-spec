@@ -13,7 +13,7 @@ package engine
 //  3. Loss before K (mktdata gap, bookTrusted=false) → "unverifiable", never Violation.
 //  4. --oracle-confirm-cycles=1 confirms on the first cycle.
 //  5. Hidden orders excluded from the diff's qty comparison.
-//  6. lastInstrSeq != K (book advanced past snapshot) → "unverifiable".
+//  6. Book past K, and the delta log lacks a delta after K → "unverifiable".
 //  7. Dirty snapshot group → "unverifiable".
 //  8. Different divergence on second cycle → suspect resets, no confirm.
 //  9. Match after suspect clears the suspect state.
@@ -239,14 +239,14 @@ func TestOracleMismatchSuspectedThenConfirmed(t *testing.T) {
 	endRaw2 := buildSnapEndFull(ch, instrID, 2, 11)
 	runStream(e, []streamEntry{{port: core.PortSnapshot, raw: endRaw2, seq: 6}})
 
-	// After feeding perSeq=3, lastInstrSeq=3 != K=2, so cycle 2 must be unverifiable
-	// (cannot rewind the delta book to K=2 without an undo log).
-	if oc.lastAudit() != "unverifiable" {
-		t.Errorf("cycle 2: after advancing past K, expected 'unverifiable', got %q (all: %v)",
+	// The book is at perSeq=3, past K=2. The delta log holds delta 3, so the oracle
+	// compares the delta book with the snapshot plus delta 3: the same divergence.
+	if oc.lastAudit() != "mismatch_confirmed" {
+		t.Errorf("cycle 2: expected 'mismatch_confirmed', got %q (all: %v)",
 			oc.lastAudit(), oc.auditResults)
 	}
-	if hasViolation(&oc.allCapture, "SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT") {
-		t.Error("cycle 2: must not emit Violation when book is ahead of K")
+	if !hasViolation(&oc.allCapture, "SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT") {
+		t.Error("cycle 2: the confirmed divergence must be a Violation")
 	}
 }
 
@@ -413,12 +413,17 @@ func TestOracleHiddenOrdersExcluded(t *testing.T) {
 	}
 }
 
-// --- Test 6: lastInstrSeq != K → unverifiable ---
+// --- Test 6: book past K without every delta after K → unverifiable ---
 
-// TestOracleUnverifiableBookAheadOfK: if the delta book has advanced past K,
-// the oracle emits "unverifiable" (cannot rewind).
+// TestOracleUnverifiableBookAheadOfK: if the delta book has advanced past K and
+// the delta log does not hold every delta after K, the oracle emits
+// "unverifiable".
 func TestOracleUnverifiableBookAheadOfK(t *testing.T) {
 	const ch, instrID = uint8(1), uint32(306)
+
+	// The delta log keeps one delta, so it does not hold delta 2 when the book is
+	// at 3. With delta 2 in the log the oracle compares: see mbo_replay_test.go.
+	withDeltaLogLimit(t, 1)
 
 	e, oc := newOracleEngine(1)
 
@@ -426,15 +431,16 @@ func TestOracleUnverifiableBookAheadOfK(t *testing.T) {
 	reachedReadyMBO(e, ch, instrID, 0, 1)
 	seedEmptyBooks(e, ch, instrID)
 
-	// Feed perSeq=1 and perSeq=2 (delta book at K=2 after flush).
+	// Feed perSeq=1 to 3 (delta book at 3 after flush).
 	runMktdataSeq(e, buildOrderAddExact(ch, instrID, 1, 80001, 0, 0, 1000, 100, 10), 1)
 	runMktdataSeq(e, buildOrderAddExact(ch, instrID, 2, 80002, 0, 0, 2000, 200, 5), 2)
+	runMktdataSeq(e, buildOrderAddExact(ch, instrID, 3, 80003, 0, 0, 3000, 300, 5), 3)
 	e.Flush()
 	clearFindings(&oc.allCapture)
 	oc.auditResults = nil
 
-	// Snapshot claims K=1, but lastInstrSeq=2 (book is ahead of K).
-	beginRaw := buildSnapBeginFull(ch, instrID, 1, 0, 60, 1 /*K=1, but lastInstrSeq=2*/)
+	// Snapshot claims K=1, but lastInstrSeq=3 (book is ahead of K).
+	beginRaw := buildSnapBeginFull(ch, instrID, 1, 0, 60, 1 /*K=1, but lastInstrSeq=3*/)
 	runStream(e, []streamEntry{{port: core.PortSnapshot, raw: beginRaw, seq: 1}})
 	endRaw := buildSnapEndFull(ch, instrID, 1, 60)
 	runStream(e, []streamEntry{{port: core.PortSnapshot, raw: endRaw, seq: 2}})
