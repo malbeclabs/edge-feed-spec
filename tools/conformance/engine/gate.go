@@ -234,15 +234,24 @@ type mboState struct {
 	// snapTrackers holds per-(channel, instrument) snapshot counters.
 	snapTrackers map[instrTrackerKey]*snapTracker
 	// pastJoinGroup is true once the subscriber is past the snapshot group it can
-	// have joined inside: this state saw a SnapshotBegin or a SnapshotEnd, or a
-	// snapshot datagram with Sequence Number 0, the start of the series
-	// (market-by-order/spec.md, Frame Header). Before that, a SnapshotOrder or
-	// SnapshotEnd with no open group is the tail of a group whose SnapshotBegin went
-	// out before the subscriber listened: its cold start, not a publisher fault. The
-	// first SnapshotEnd closes that group, so an orphan after it is graded. A Reset
-	// Count change does not clear it: the subscriber is past its join, and a new era
-	// starts with a SnapshotBegin.
+	// have joined inside: this state saw a SnapshotBegin or a SnapshotEnd, a
+	// snapshot datagram with Sequence Number 0 (the start of the series,
+	// market-by-order/spec.md, Frame Header), or an orphan of a second Snapshot ID.
+	// Before that, a SnapshotOrder or SnapshotEnd with no open group is the tail of
+	// a group whose SnapshotBegin went out before the subscriber listened: its cold
+	// start, not a publisher fault. That is one group, with one Snapshot ID, and its
+	// SnapshotEnd closes it, so an orphan after it is graded. A Reset Count change
+	// does not clear it: the subscriber is past its join, and a new era starts with a
+	// SnapshotBegin.
 	pastJoinGroup bool
+	// joinSnapID is the Snapshot ID of the first orphan before pastJoinGroup, the
+	// group the subscriber joined inside, when joinSnapIDSet.
+	joinSnapID    uint32
+	joinSnapIDSet bool
+	// oldEra is true on the state of an old era's stragglers (mboStraggler). The
+	// Reset Count change discarded that era's open groups, so an orphan here is
+	// the tail of one of them: Unverifiable, reason transition, not a join.
+	oldEra bool
 	// openSnaps holds at most one in-progress snapshot group per channel instance.
 	// Keyed by channelID, which is the instance's own; nil value means no open group.
 	openSnaps map[uint8]*openSnapshot
@@ -581,6 +590,7 @@ func (e *Engine) selectMBOForDatagram(ch uint8) *mboState {
 		if s.straggler == nil || s.stragglerPos != e.curEraPos {
 			e.closeStraggler(s)
 			s.straggler, s.stragglerPos = newMBOState(), e.curEraPos
+			s.straggler.oldEra = true
 		}
 		e.mbo = s.straggler
 	}
@@ -1156,10 +1166,10 @@ func (e *Engine) handleSnapOrder(m wire.Message, ch uint8, snapPortSeq uint64) {
 
 	// SNAP.BEGIN_ORDER_END_GROUPING: order arrived without a preceding Begin.
 	if open == nil {
-		if !e.mbo.pastJoinGroup {
-			detail := fmt.Sprintf("SnapshotOrder (snapshot id %d) before the first SnapshotBegin seen from this publisher: the subscriber joined inside the group", snapID)
-			e.unverified("SNAP.BEGIN_ORDER_END_GROUPING", core.ReasonColdStart, core.PortSnapshot, snapPortSeq, ch, 0, detail)
-			e.unverified("SNAP.ORDER_PRICE_BOUND", core.ReasonColdStart, core.PortSnapshot, snapPortSeq, ch, 0, detail)
+		if reason, why, ok := e.orphanAllowance(snapID); ok {
+			detail := fmt.Sprintf("SnapshotOrder (snapshot id %d) %s", snapID, why)
+			e.unverified("SNAP.BEGIN_ORDER_END_GROUPING", reason, core.PortSnapshot, snapPortSeq, ch, 0, detail)
+			e.unverified("SNAP.ORDER_PRICE_BOUND", reason, core.PortSnapshot, snapPortSeq, ch, 0, detail)
 			return
 		}
 		st := core.Violation
@@ -1275,10 +1285,9 @@ func (e *Engine) handleSnapEnd(m wire.Message, ch uint8, snapPortSeq uint64) {
 
 	// SNAP.BEGIN_ORDER_END_GROUPING: End arrived without a preceding Begin.
 	if open == nil {
-		if !e.mbo.pastJoinGroup {
-			e.unverified("SNAP.BEGIN_ORDER_END_GROUPING", core.ReasonColdStart, core.PortSnapshot, snapPortSeq, ch, endInstrID,
-				fmt.Sprintf("instrument %d: SnapshotEnd (snapshot id %d) before the first SnapshotBegin seen from this publisher: the subscriber joined inside the group",
-					endInstrID, endSnapID))
+		if reason, why, ok := e.orphanAllowance(endSnapID); ok {
+			e.unverified("SNAP.BEGIN_ORDER_END_GROUPING", reason, core.PortSnapshot, snapPortSeq, ch, endInstrID,
+				fmt.Sprintf("instrument %d: SnapshotEnd (snapshot id %d) %s", endInstrID, endSnapID, why))
 			// This End closes the group the subscriber joined inside.
 			e.mbo.pastJoinGroup = true
 			return
@@ -1354,6 +1363,32 @@ func (e *Engine) handleSnapEnd(m wire.Message, ch uint8, snapPortSeq uint64) {
 
 	// Close the group.
 	delete(e.mbo.openSnaps, ch)
+}
+
+// orphanAllowance decides whether a SnapshotOrder or SnapshotEnd with no open
+// group, of Snapshot ID snapID, is a fault of the channel instance. It is not, and
+// ok is true with the reason and the reason's words, in two cases:
+//
+//   - The state is an old era's (oldEra): the Reset Count change discarded the
+//     group's SnapshotBegin. Reason transition.
+//   - The subscriber can be inside the group it joined (pastJoinGroup false), and
+//     the orphan has that group's Snapshot ID, the first one an orphan had. Reason
+//     cold_start. An orphan of another Snapshot ID is of a later group, so the
+//     subscriber is past the join.
+func (e *Engine) orphanAllowance(snapID uint32) (reason, why string, ok bool) {
+	s := e.mbo
+	if s.oldEra {
+		return core.ReasonTransition, "of an era that a Reset Count change ended, which discarded its SnapshotBegin", true
+	}
+	if s.pastJoinGroup {
+		return "", "", false
+	}
+	if s.joinSnapIDSet && snapID != s.joinSnapID {
+		s.pastJoinGroup = true
+		return "", "", false
+	}
+	s.joinSnapID, s.joinSnapIDSet = snapID, true
+	return core.ReasonColdStart, "before the first SnapshotBegin seen from this channel instance: the subscriber joined inside the group", true
 }
 
 // seedBookFromSnapshot builds the book of an instrument from a complete snapshot
