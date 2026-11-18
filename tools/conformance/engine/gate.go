@@ -746,17 +746,14 @@ func (e *Engine) checkBatchIDMonotonic(ch uint8, frameSeq uint64, m wire.Message
 
 // checkBatchAtomicityConsistency implements BATCH.ATOMICITY_CONSISTENCY: at a
 // BatchBoundary (0x13) the reconstructed book must be internally consistent.
-// It reads the orders each book recorded as left at zero remaining (zeroed),
-// not every live order: with seeded books a channel holds tens of thousands of
-// live orders, and a walk of all of them at each BatchBoundary was half of the
-// validator's CPU time. An orphan that stays is recorded again, so it is
-// reported at each BatchBoundary, as before.
 // Specifically, no live resting order may have remaining == 0; such an order is
 // an orphan that should have been removed by a prior full-fill or zero-remaining
-// execute but was not (impossible state). The book builder's applyOrderExecute
-// removes on remaining==0 during normal operation, so this is a defensive
-// boundary checkpoint — the check is non-redundant only when the book state has
-// been corrupted by an extraordinary sequence.
+// execute but was not. An OrderAdd with Quantity 0 makes one.
+// The check reads the orders each book recorded as left at zero remaining
+// (zeroed), not every live order: with seeded books a channel holds tens of
+// thousands of live orders, and a walk of all of them at each BatchBoundary was
+// half of the validator's CPU time. An orphan that stays is recorded again, so
+// it is reported at each BatchBoundary.
 //
 // BATCH.ATOMICITY_CONSISTENCY is evaluated only at BatchBoundary, not at every
 // intermediate delta, to keep the check precise and false-positive-free.
