@@ -65,7 +65,7 @@ import (
 // book and the delta (delta-derived) book.
 type oracleDiff struct {
 	orderID uint64
-	field   string // "missing_in_delta", "extra_in_delta", "qty", "side", "price", "flags", "enterTS"
+	field   string // "missing_in_delta", "extra_in_delta", "missing_in_snapshot", "extra_in_snapshot", "qty", "side", "price", "flags", "enterTS"
 }
 
 // unverifiable is a helper that clears suspect state (Finding 2: unverifiable
@@ -198,13 +198,14 @@ func (e *Engine) runOracleForGroup(ch uint8, snap *openSnapshot, snapPortSeq uin
 
 	// --- Diff the two books ---
 	expected, at := snap.orders, fmt.Sprintf("at per-instrument seq %d", K)
+	var replayDiffs []oracleDiff
 	if last > K {
-		expected = replayedSnapshot(snap.orders, K, &bk.log)
+		expected, replayDiffs = replayedSnapshot(snap.orders, K, &bk.log)
 		at = fmt.Sprintf("at per-instrument seq %d (the snapshot at %d with the %d logged deltas after it)",
 			last, K, last-K)
 	}
 	deltaBook := bk.Orders() // snapshot copy
-	diffs := diffBooks(expected, deltaBook)
+	diffs := append(diffBooks(expected, deltaBook), replayDiffs...)
 
 	if len(diffs) == 0 {
 		// Books agree: clear any suspect state for this instrument.
@@ -270,9 +271,29 @@ func (e *Engine) runOracleForGroup(ch uint8, snap *openSnapshot, snapPortSeq uin
 // replayedSnapshot returns the book that a snapshot group taken at per-instrument
 // seq k and the logged deltas after k make, as snapshot records. The hidden
 // orders of the snapshot stay in it, as diffBooks expects of a snapshot book.
-func replayedSnapshot(orders map[uint64]snapOrderRecord, k uint32, log *deltaLog) map[uint64]snapOrderRecord {
+//
+// A delta after k can remove the evidence of a snapshot defect: if the snapshot
+// omits order 7 and a later delta cancels it, both books end without order 7.
+// So it also returns a diff for each logged delta whose order is in one book and
+// not the other when the delta applies: "missing_in_snapshot" when the delta book
+// had the order and the snapshot book did not, "extra_in_snapshot" for the
+// reverse.
+func replayedSnapshot(orders map[uint64]snapOrderRecord, k uint32, log *deltaLog) (map[uint64]snapOrderRecord, []oracleDiff) {
 	scratch := newInstrBook()
-	scratch.seedAndReplay(orders, k, log)
+	scratch.seed(orders)
+	var diffs []oracleDiff
+	log.eachAfter(k, func(d *loggedDelta) {
+		m := d.message()
+		id := deltaOrderID(m)
+		if _, inSnap := scratch.live[id]; inSnap != d.found {
+			field := "missing_in_snapshot"
+			if inSnap {
+				field = "extra_in_snapshot"
+			}
+			diffs = append(diffs, oracleDiff{orderID: id, field: field})
+		}
+		_ = scratch.applyDelta(m)
+	})
 	out := make(map[uint64]snapOrderRecord, len(scratch.live))
 	for id, o := range orders {
 		if isHidden(o.orderFlags) {
@@ -282,7 +303,7 @@ func replayedSnapshot(orders map[uint64]snapOrderRecord, k uint32, log *deltaLog
 	for id, lo := range scratch.live {
 		out[id] = snapOrderRecord{side: lo.side, orderFlags: lo.orderFlags, enterTS: lo.enterTS, price: lo.price, qty: lo.remaining}
 	}
-	return out
+	return out, diffs
 }
 
 // diffBooks compares the snapshot book (from the completed group) against the

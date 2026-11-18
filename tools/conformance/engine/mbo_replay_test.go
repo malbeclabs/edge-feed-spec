@@ -27,12 +27,12 @@ func withDeltaLogLimit(t *testing.T, n int) {
 	t.Cleanup(func() { maxDeltaLog = old })
 }
 
-// deltaMsg decodes the one message of a frame.
+// deltaMsg decodes the one message of a datagram.
 func deltaMsg(t *testing.T, raw []byte) wire.Message {
 	t.Helper()
 	f, _ := wire.Decode(raw, wire.MagicMBO)
 	if len(f.Messages) != 1 {
-		t.Fatalf("frame has %d messages, want 1", len(f.Messages))
+		t.Fatalf("datagram has %d messages, want 1", len(f.Messages))
 	}
 	return f.Messages[0]
 }
@@ -51,7 +51,7 @@ func TestDeltaLog(t *testing.T) {
 	}
 	record := func(l *deltaLog, seqs ...uint32) {
 		for _, s := range seqs {
-			l.record(s, cancel(s))
+			l.record(s, cancel(s), false)
 		}
 	}
 
@@ -126,11 +126,13 @@ func TestDeltaLog(t *testing.T) {
 // snapshot and are not applied again.
 func TestSeedAndReplay(t *testing.T) {
 	var l deltaLog
-	l.record(10, deltaMsg(t, buildOrderExecuteWithQty(instCh, instInstr, 10, 1, 0, 2))) // in the snapshot already
-	l.record(11, deltaMsg(t, buildOrderExecuteWithQty(instCh, instInstr, 11, 1, 0, 3))) // 10 → 7
-	l.record(12, deltaMsg(t, buildOrderAddWithQty(instCh, instInstr, 12, 2, 4)))
-	l.record(13, deltaMsg(t, buildOrderCancelFull(instCh, instInstr, 13, 3, 0)))
-	l.record(14, deltaMsg(t, buildOrderExecuteWithQty(instCh, instInstr, 14, 9, 0, 1))) // not live: no change
+	// The found flags are wrong on purpose: the book was not trusted when these
+	// deltas arrived. The seed records them again from the seeded book.
+	l.record(10, deltaMsg(t, buildOrderExecuteWithQty(instCh, instInstr, 10, 1, 0, 2)), false) // in the snapshot already
+	l.record(11, deltaMsg(t, buildOrderExecuteWithQty(instCh, instInstr, 11, 1, 0, 3)), false) // 10 → 7
+	l.record(12, deltaMsg(t, buildOrderAddWithQty(instCh, instInstr, 12, 2, 4)), true)
+	l.record(13, deltaMsg(t, buildOrderCancelFull(instCh, instInstr, 13, 3, 0)), false)
+	l.record(14, deltaMsg(t, buildOrderExecuteWithQty(instCh, instInstr, 14, 9, 0, 1)), true) // not live: no change
 
 	bk := newInstrBook()
 	bk.seedAndReplay(map[uint64]snapOrderRecord{1: {qty: 10}, 3: {qty: 5}}, 10, &l)
@@ -143,6 +145,11 @@ func TestSeedAndReplay(t *testing.T) {
 	}
 	if !bk.removed.has(3) {
 		t.Error("the cancel after K must move order 3 to removed")
+	}
+	var found []bool
+	l.eachAfter(10, func(d *loggedDelta) { found = append(found, d.found) })
+	if !slices.Equal(found, []bool{true, false, true, false}) {
+		t.Errorf("found flags after the seed %v, want [true false true false]", found)
 	}
 }
 
@@ -181,7 +188,7 @@ func TestBusyBookSeedsFromLoggedDeltas(t *testing.T) {
 	}
 }
 
-// TestSeedNeedsTheLogToReachK: the same stream seeds with a log that reaches back
+// TestSeedNeedsTheLogToReachK: the same feed seeds with a log that reaches back
 // to K+1, and does not seed with a log that does not.
 func TestSeedNeedsTheLogToReachK(t *testing.T) {
 	run := func(t *testing.T, limit, wantViolations int) {
@@ -254,5 +261,41 @@ func TestDeltaLogFollowsTheTracker(t *testing.T) {
 	tr := e.mbo.tracker(instCh, instInstr)
 	if got := logSeqs(&e.mbo.book.book(instCh, instInstr).log); !slices.Equal(got, []uint32{7, 8}) || *tr.lastInstrSeq != 8 {
 		t.Errorf("log %v with the tracker at %d, want [7 8] at 8", got, *tr.lastInstrSeq)
+	}
+}
+
+// TestOracleFindsADefectThatALaterDeltaHides: a delta after K can remove the
+// evidence of a snapshot defect. The delta book had order 80002 at K, and delta 3
+// cancels it. A snapshot at K without 80002 replays to the same book as the delta
+// book, but delta 3 found its order in one book and not the other. In the same
+// way, a snapshot at K with order 80003, which delta 3 adds, is wrong.
+func TestOracleFindsADefectThatALaterDeltaHides(t *testing.T) {
+	const ch, instrID = uint8(1), uint32(321)
+	run := func(delta3 []byte, snapOrders ...[]byte) string {
+		e, oc := newOracleEngine(2)
+		reachedReadyMBO(e, ch, instrID, 0, 1)
+		seedEmptyBooks(e, ch, instrID)
+		runMktdataSeq(e, buildOrderAddExact(ch, instrID, 1, 80001, 0, 0, 1000, 100, 10), 1)
+		runMktdataSeq(e, buildOrderAddExact(ch, instrID, 2, 80002, 1, 0, 2000, 200, 5), 2)
+		runMktdataSeq(e, delta3, 3)
+		e.Flush()
+		oc.auditResults = nil
+		completeSnapshot(e, ch, instrID, 2, 10, 2 /* K: the book is at 3 */, snapOrders, 1)
+		return oc.lastAudit()
+	}
+	o1 := buildSnapOrderFields(ch, 10, 80001, 0, 0, 1000, 100, 10)
+	o2 := buildSnapOrderFields(ch, 10, 80002, 1, 0, 2000, 200, 5)
+	o3 := buildSnapOrderFields(ch, 10, 80003, 1, 0, 3000, 300, 5)
+	cancel2 := buildOrderCancelFull(ch, instrID, 3, 80002, 0)
+	add3 := buildOrderAddExact(ch, instrID, 3, 80003, 1, 0, 3000, 300, 5)
+
+	if got := run(cancel2, o1, o2); got != "match" {
+		t.Errorf("correct snapshot, then cancel 80002: audit %q, want match", got)
+	}
+	if got := run(cancel2, o1); got != "mismatch_suspected" {
+		t.Errorf("snapshot without 80002, then cancel 80002: audit %q, want mismatch_suspected", got)
+	}
+	if got := run(add3, o1, o2, o3); got != "mismatch_suspected" {
+		t.Errorf("snapshot with 80003, then add 80003: audit %q, want mismatch_suspected", got)
 	}
 }

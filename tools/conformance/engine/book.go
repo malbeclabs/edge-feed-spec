@@ -410,9 +410,17 @@ func (bk *instrBook) applyDelta(m wire.Message) error {
 // at per-instrument seq k, then applies the logged deltas after k. The result is
 // the book at the last logged delta, built from the snapshot. The caller checks
 // log.covers first.
+//
+// A seed also records, in each logged delta, whether its order is in the seeded
+// book. The book was not trusted when the delta first arrived, so the record of
+// that time can be wrong, and the oracle reads it (replayedSnapshot).
 func (bk *instrBook) seedAndReplay(orders map[uint64]snapOrderRecord, k uint32, log *deltaLog) {
 	bk.seed(orders)
-	log.eachAfter(k, func(d *loggedDelta) { _ = bk.applyDelta(d.message()) })
+	log.eachAfter(k, func(d *loggedDelta) {
+		m := d.message()
+		_, d.found = bk.live[deltaOrderID(m)]
+		_ = bk.applyDelta(m)
+	})
 }
 
 // maxDeltaLog limits the deltas that the log of one instrument keeps. A group
@@ -428,13 +436,14 @@ var maxDeltaLog = 4096
 // after its message header.
 const maxLoggedBody = 52
 
-// loggedDelta is one delta of a deltaLog: the message, and its per-instrument
-// seq.
+// loggedDelta is one delta of a deltaLog: the message, its per-instrument seq,
+// and whether its order was live in the book before the delta.
 type loggedDelta struct {
 	seq    uint32
 	typ    uint8
 	length uint8
 	n      uint8
+	found  bool
 	body   [maxLoggedBody]byte
 }
 
@@ -463,8 +472,9 @@ type deltaLog struct {
 
 func (l *deltaLog) at(i int) *loggedDelta { return &l.buf[(l.start+i)%len(l.buf)] }
 
-// record logs delta m with per-instrument seq seq.
-func (l *deltaLog) record(seq uint32, m wire.Message) {
+// record logs delta m with per-instrument seq seq. found is whether its order
+// was live in the book before m.
+func (l *deltaLog) record(seq uint32, m wire.Message, found bool) {
 	if len(m.Body) > maxLoggedBody {
 		l.clear()
 		return
@@ -487,7 +497,7 @@ func (l *deltaLog) record(seq uint32, m wire.Message) {
 		}
 	}
 	d := l.at(l.n)
-	*d = loggedDelta{seq: seq, typ: m.Type, length: m.Length, n: uint8(len(m.Body))}
+	*d = loggedDelta{seq: seq, typ: m.Type, length: m.Length, n: uint8(len(m.Body)), found: found}
 	copy(d.body[:], m.Body)
 	l.n++
 }

@@ -683,11 +683,14 @@ func (e *Engine) checkMBO(f *wire.Frame, ch uint8) {
 			// once applyDeltaSeq runs, lastInstrSeq == perSeq so we'd lose that info.
 			gated := e.gateConsumer(ch, instrID, perSeq)
 			e.applyDeltaSeq(ch, instrID, perSeq, frameSeq, m)
+			bk := e.mbo.book.book(ch, instrID)
+			_, found := bk.live[deltaOrderID(m)]
 			// Referential-integrity checks (Task 20).
 			e.checkMBORef(ch, instrID, gated, frameSeq, m)
-			// Log the delta, so that a snapshot group can seed or audit the book
-			// after the book moved past the group's Last Instrument Seq.
-			e.mbo.book.book(ch, instrID).log.record(perSeq, m)
+			// Log the delta, and whether its order was in the book, so that a
+			// snapshot group can seed or audit the book after the book moved past
+			// the group's Last Instrument Seq.
+			bk.log.record(perSeq, m, found)
 
 		case wire.TypeTrade:
 			if m.Length != expectedMsgLen(e.cfg.Feed, f.Header.SchemaVersion, m.Type) {

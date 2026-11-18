@@ -46,12 +46,14 @@ func heartbeatChannelID(m wire.Message) uint8 { return bodyU8(m, 0) }
 // --- MBO delta shared fields (OrderAdd 0x10, OrderCancel 0x11, OrderExecute 0x12) ---
 //
 // These three delta types share the same layout for the two fields used by the
-// per-instrument seq tracker:
+// per-instrument seq tracker, and for the Order ID:
 //
 //	spec offset  4 = Instrument ID (u32 LE); Body[0]
 //	spec offset 12 = Per-Instrument Seq (u32 LE); Body[8]
+//	spec offset 16 = Order ID (u64 LE); Body[12]
 func deltaInstrumentID(m wire.Message) uint32     { return bodyU32LE(m, 0) }
 func deltaPerInstrumentSeq(m wire.Message) uint32 { return bodyU32LE(m, 8) }
+func deltaOrderID(m wire.Message) uint64          { return bodyU64LE(m, 12) }
 
 // instrResetInstrumentID returns the Instrument ID from an InstrumentReset (0x14).
 // spec offset 4 = Instrument ID (u32 LE); Body[0]
