@@ -65,7 +65,7 @@ import (
 // book and the delta (delta-derived) book.
 type oracleDiff struct {
 	orderID uint64
-	field   string // "missing_in_delta", "extra_in_delta", "missing_in_snapshot", "extra_in_snapshot", "qty", "side", "price", "flags", "enterTS"
+	field   string // "missing_in_delta", "extra_in_delta", "qty", "side", "price", "flags", "enterTS", "fields"
 }
 
 // unverifiable is a helper that clears suspect state (Finding 2: unverifiable
@@ -205,7 +205,7 @@ func (e *Engine) runOracleForGroup(ch uint8, snap *openSnapshot, snapPortSeq uin
 			last, K, last-K)
 	}
 	deltaBook := bk.Orders() // snapshot copy
-	diffs := append(diffBooks(expected, deltaBook), replayDiffs...)
+	diffs := mergeReplayDiffs(diffBooks(expected, deltaBook), replayDiffs)
 
 	if len(diffs) == 0 {
 		// Books agree: clear any suspect state for this instrument.
@@ -273,11 +273,12 @@ func (e *Engine) runOracleForGroup(ch uint8, snap *openSnapshot, snapPortSeq uin
 // orders of the snapshot stay in it, as diffBooks expects of a snapshot book.
 //
 // A delta after k can remove the evidence of a snapshot defect: if the snapshot
-// omits order 7 and a later delta cancels it, both books end without order 7.
-// So it also returns a diff for each logged delta whose order is in one book and
-// not the other when the delta applies: "missing_in_snapshot" when the delta book
-// had the order and the snapshot book did not, "extra_in_snapshot" for the
-// reverse.
+// omits order 7, or holds it with a wrong quantity, and a later delta cancels it,
+// both books end the same. So it also returns a diff for each logged delta whose
+// order differs between the books when the delta applies, with the labels of
+// diffBooks: "extra_in_delta" when the delta book had the order and the snapshot
+// book did not, "missing_in_delta" for the reverse, and "fields" when both had it
+// with other fields.
 func replayedSnapshot(orders map[uint64]snapOrderRecord, k uint32, log *deltaLog) (map[uint64]snapOrderRecord, []oracleDiff) {
 	scratch := newInstrBook()
 	scratch.seed(orders)
@@ -285,12 +286,14 @@ func replayedSnapshot(orders map[uint64]snapOrderRecord, k uint32, log *deltaLog
 	log.eachAfter(k, func(d *loggedDelta) {
 		m := d.message()
 		id := deltaOrderID(m)
-		if _, inSnap := scratch.live[id]; inSnap != d.found {
-			field := "missing_in_snapshot"
-			if inSnap {
-				field = "extra_in_snapshot"
-			}
-			diffs = append(diffs, oracleDiff{orderID: id, field: field})
+		so, inSnap := scratch.live[id]
+		switch {
+		case d.found && !inSnap:
+			diffs = append(diffs, oracleDiff{orderID: id, field: "extra_in_delta"})
+		case !d.found && inSnap:
+			diffs = append(diffs, oracleDiff{orderID: id, field: "missing_in_delta"})
+		case d.found && orderFieldsHash(so) != d.fields:
+			diffs = append(diffs, oracleDiff{orderID: id, field: "fields"})
 		}
 		_ = scratch.applyDelta(m)
 	})
@@ -304,6 +307,26 @@ func replayedSnapshot(orders map[uint64]snapOrderRecord, k uint32, log *deltaLog
 		out[id] = snapOrderRecord{side: lo.side, orderFlags: lo.orderFlags, enterTS: lo.enterTS, price: lo.price, qty: lo.remaining}
 	}
 	return out, diffs
+}
+
+// mergeReplayDiffs adds to diffs the replay diffs of orders that diffs does not
+// name, one per order. A defect that persists then has one signature in every
+// cycle, whether or not a delta after K touched its order, because the end-state
+// diff names it; and an order that many deltas touch adds one diff, not one per
+// delta. Without that, the signature changed with the deltas, and the defect
+// never confirmed.
+func mergeReplayDiffs(diffs, replay []oracleDiff) []oracleDiff {
+	named := make(map[uint64]bool, len(diffs)+len(replay))
+	for _, d := range diffs {
+		named[d.orderID] = true
+	}
+	for _, d := range replay {
+		if !named[d.orderID] {
+			named[d.orderID] = true
+			diffs = append(diffs, d)
+		}
+	}
+	return diffs
 }
 
 // diffBooks compares the snapshot book (from the completed group) against the

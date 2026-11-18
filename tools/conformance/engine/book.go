@@ -418,15 +418,29 @@ func (bk *instrBook) seedAndReplay(orders map[uint64]snapOrderRecord, k uint32, 
 	bk.seed(orders)
 	log.eachAfter(k, func(d *loggedDelta) {
 		m := d.message()
-		_, d.found = bk.live[deltaOrderID(m)]
+		lo, found := bk.live[deltaOrderID(m)]
+		d.found, d.fields = found, orderFieldsHash(lo)
 		_ = bk.applyDelta(m)
 	})
+}
+
+// orderFieldsHash hashes the fields of a live order that a snapshot also carries
+// (side, price, remaining, flags, enter timestamp), so that a logged delta can
+// record the order it found in a few bytes. The zero order has a hash too, which
+// a delta that found no order records and nothing reads.
+func orderFieldsHash(o liveOrder) uint64 {
+	h := uint64(14695981039346656037) // FNV-1a offset basis
+	for _, v := range [...]uint64{uint64(o.side), uint64(o.price), o.remaining, uint64(o.orderFlags), o.enterTS} {
+		h ^= v
+		h *= 1099511628211 // FNV-1a prime
+	}
+	return h
 }
 
 // maxDeltaLog limits the deltas that the log of one instrument keeps. A group
 // close removes the deltas at or below its Last Instrument Seq, so the log of
 // an instrument holds the deltas since its last snapshot group, and only a busy
-// instrument reaches the limit. An entry is 60 bytes, so a full log is 240 KiB. Measured on a 30-minute capture of two
+// instrument reaches the limit. An entry is 72 bytes, so a full log is 288 KiB. Measured on a 30-minute capture of two
 // busy feeds, 68,277 groups: when a group closed, the book was at most 1,878
 // deltas past its Last Instrument Seq, 200 to 342 at the 99th percentile. It is
 // a variable so that tests can use a small limit.
@@ -437,8 +451,10 @@ var maxDeltaLog = 4096
 const maxLoggedBody = 52
 
 // loggedDelta is one delta of a deltaLog: the message, its per-instrument seq,
-// and whether its order was live in the book before the delta.
+// whether its order was live in the book before the delta, and if so the hash of
+// that order's fields (orderFieldsHash).
 type loggedDelta struct {
+	fields uint64
 	seq    uint32
 	typ    uint8
 	length uint8
@@ -473,8 +489,8 @@ type deltaLog struct {
 func (l *deltaLog) at(i int) *loggedDelta { return &l.buf[(l.start+i)%len(l.buf)] }
 
 // record logs delta m with per-instrument seq seq. found is whether its order
-// was live in the book before m.
-func (l *deltaLog) record(seq uint32, m wire.Message, found bool) {
+// was live in the book before m, and fields the hash of that order.
+func (l *deltaLog) record(seq uint32, m wire.Message, found bool, fields uint64) {
 	if len(m.Body) > maxLoggedBody {
 		l.clear()
 		return
@@ -497,7 +513,7 @@ func (l *deltaLog) record(seq uint32, m wire.Message, found bool) {
 		}
 	}
 	d := l.at(l.n)
-	*d = loggedDelta{seq: seq, typ: m.Type, length: m.Length, n: uint8(len(m.Body)), found: found}
+	*d = loggedDelta{seq: seq, typ: m.Type, length: m.Length, n: uint8(len(m.Body)), found: found, fields: fields}
 	copy(d.body[:], m.Body)
 	l.n++
 }

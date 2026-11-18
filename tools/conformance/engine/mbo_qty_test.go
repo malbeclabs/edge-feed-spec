@@ -355,7 +355,7 @@ func TestBatchAtomicityConsistency(t *testing.T) {
 		e.curSrc = srcA
 		e.selectMBO(ch)
 		bk := e.mbo.book.book(ch, instrID)
-		// Directly inject a zero-remaining live order (impossible via normal applies).
+		// Directly inject a zero-remaining live order.
 		_ = bk.applyOrderAddFull(orderID, 0, 1, 0, 0 /* qty */, 0, 0) // orphan: should have been removed
 
 		// BatchBoundary should detect the orphan and emit BATCH.ATOMICITY_CONSISTENCY.

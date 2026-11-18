@@ -684,13 +684,16 @@ func (e *Engine) checkMBO(f *wire.Frame, ch uint8) {
 			gated := e.gateConsumer(ch, instrID, perSeq)
 			e.applyDeltaSeq(ch, instrID, perSeq, frameSeq, m)
 			bk := e.mbo.book.book(ch, instrID)
-			_, found := bk.live[deltaOrderID(m)]
+			lo, found := bk.live[deltaOrderID(m)]
 			// Referential-integrity checks (Task 20).
 			e.checkMBORef(ch, instrID, gated, frameSeq, m)
-			// Log the delta, and whether its order was in the book, so that a
-			// snapshot group can seed or audit the book after the book moved past
-			// the group's Last Instrument Seq.
-			bk.log.record(perSeq, m, found)
+			// Log the delta, and the order it found in the book, so that a snapshot
+			// group can seed or audit the book after the book moved past the
+			// group's Last Instrument Seq. Without a snapshot port no group reads
+			// the log.
+			if !e.cfg.NoSnapshotPort {
+				bk.log.record(perSeq, m, found, orderFieldsHash(lo))
+			}
 
 		case wire.TypeTrade:
 			if m.Length != expectedMsgLen(e.cfg.Feed, f.Header.SchemaVersion, m.Type) {
@@ -1324,8 +1327,12 @@ func (e *Engine) handleSnapEnd(m wire.Message, ch uint8, snapPortSeq uint64) {
 	e.seedBookFromSnapshot(ch, open)
 
 	// A later group of the instrument has a Last Instrument Seq of at least this
-	// one, so it needs no logged delta at or below it.
-	e.mbo.book.book(ch, open.instrID).log.trimThrough(open.lastInstrSeqK)
+	// one, so it needs no logged delta at or below it. A structurally invalid group
+	// does not trim: its K can be wrong, and a K far ahead would empty the log that
+	// the next valid group needs.
+	if !open.structuralViolation {
+		e.mbo.book.book(ch, open.instrID).log.trimThrough(open.lastInstrSeqK)
+	}
 
 	// Close the group.
 	delete(e.mbo.openSnaps, ch)

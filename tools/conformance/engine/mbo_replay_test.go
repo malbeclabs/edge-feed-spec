@@ -13,7 +13,9 @@ package engine
 import (
 	"maps"
 	"slices"
+	"strings"
 	"testing"
+	"unsafe"
 
 	"github.com/malbeclabs/edge-feed-spec/tools/conformance/core"
 	"github.com/malbeclabs/edge-feed-spec/tools/conformance/wire"
@@ -51,10 +53,16 @@ func TestDeltaLog(t *testing.T) {
 	}
 	record := func(l *deltaLog, seqs ...uint32) {
 		for _, s := range seqs {
-			l.record(s, cancel(s), false)
+			l.record(s, cancel(s), false, 0)
 		}
 	}
 
+	t.Run("entry size", func(t *testing.T) {
+		// maxDeltaLog's comment sizes a full log from this.
+		if got := unsafe.Sizeof(loggedDelta{}); got != 72 {
+			t.Errorf("loggedDelta is %d bytes, the comment on maxDeltaLog says 72", got)
+		}
+	})
 	t.Run("contiguous", func(t *testing.T) {
 		var l deltaLog
 		record(&l, 5, 6, 7)
@@ -128,11 +136,11 @@ func TestSeedAndReplay(t *testing.T) {
 	var l deltaLog
 	// The found flags are wrong on purpose: the book was not trusted when these
 	// deltas arrived. The seed records them again from the seeded book.
-	l.record(10, deltaMsg(t, buildOrderExecuteWithQty(instCh, instInstr, 10, 1, 0, 2)), false) // in the snapshot already
-	l.record(11, deltaMsg(t, buildOrderExecuteWithQty(instCh, instInstr, 11, 1, 0, 3)), false) // 10 → 7
-	l.record(12, deltaMsg(t, buildOrderAddWithQty(instCh, instInstr, 12, 2, 4)), true)
-	l.record(13, deltaMsg(t, buildOrderCancelFull(instCh, instInstr, 13, 3, 0)), false)
-	l.record(14, deltaMsg(t, buildOrderExecuteWithQty(instCh, instInstr, 14, 9, 0, 1)), true) // not live: no change
+	l.record(10, deltaMsg(t, buildOrderExecuteWithQty(instCh, instInstr, 10, 1, 0, 2)), false, 0) // in the snapshot already
+	l.record(11, deltaMsg(t, buildOrderExecuteWithQty(instCh, instInstr, 11, 1, 0, 3)), false, 0) // 10 → 7
+	l.record(12, deltaMsg(t, buildOrderAddWithQty(instCh, instInstr, 12, 2, 4)), true, 0)
+	l.record(13, deltaMsg(t, buildOrderCancelFull(instCh, instInstr, 13, 3, 0)), false, 0)
+	l.record(14, deltaMsg(t, buildOrderExecuteWithQty(instCh, instInstr, 14, 9, 0, 1)), true, 0) // not live: no change
 
 	bk := newInstrBook()
 	bk.seedAndReplay(map[uint64]snapOrderRecord{1: {qty: 10}, 3: {qty: 5}}, 10, &l)
@@ -150,6 +158,13 @@ func TestSeedAndReplay(t *testing.T) {
 	l.eachAfter(10, func(d *loggedDelta) { found = append(found, d.found) })
 	if !slices.Equal(found, []bool{true, false, true, false}) {
 		t.Errorf("found flags after the seed %v, want [true false true false]", found)
+	}
+	// And the fields of the order each delta found in the seeded book: order 1 at
+	// 10 before delta 11, order 3 at 5 before delta 13.
+	var fields []uint64
+	l.eachAfter(10, func(d *loggedDelta) { fields = append(fields, d.fields) })
+	if fields[0] != orderFieldsHash(liveOrder{remaining: 10}) || fields[2] != orderFieldsHash(liveOrder{remaining: 5}) {
+		t.Error("the seed must record the fields of the order each delta finds in the seeded book")
 	}
 }
 
@@ -265,13 +280,14 @@ func TestDeltaLogFollowsTheTracker(t *testing.T) {
 }
 
 // TestOracleFindsADefectThatALaterDeltaHides: a delta after K can remove the
-// evidence of a snapshot defect. The delta book had order 80002 at K, and delta 3
+// evidence of a snapshot defect. The delta book has order 80002 at K, and delta 3
 // cancels it. A snapshot at K without 80002 replays to the same book as the delta
-// book, but delta 3 found its order in one book and not the other. In the same
-// way, a snapshot at K with order 80003, which delta 3 adds, is wrong.
+// book, but delta 3 found its order in one book and not the other; so does a
+// snapshot with 80002 at a wrong quantity, and a snapshot with order 80003, which
+// delta 3 adds. The diff has the label diffBooks gives the same defect.
 func TestOracleFindsADefectThatALaterDeltaHides(t *testing.T) {
 	const ch, instrID = uint8(1), uint32(321)
-	run := func(delta3 []byte, snapOrders ...[]byte) string {
+	run := func(delta3 []byte, snapOrders ...[]byte) (string, string) {
 		e, oc := newOracleEngine(2)
 		reachedReadyMBO(e, ch, instrID, 0, 1)
 		seedEmptyBooks(e, ch, instrID)
@@ -280,22 +296,102 @@ func TestOracleFindsADefectThatALaterDeltaHides(t *testing.T) {
 		runMktdataSeq(e, delta3, 3)
 		e.Flush()
 		oc.auditResults = nil
+		clearFindings(&oc.allCapture)
 		completeSnapshot(e, ch, instrID, 2, 10, 2 /* K: the book is at 3 */, snapOrders, 1)
-		return oc.lastAudit()
+		detail := ""
+		if got := findingsFor(&oc.allCapture, "SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT"); len(got) > 0 {
+			detail = got[len(got)-1].Detail
+		}
+		return oc.lastAudit(), detail
 	}
 	o1 := buildSnapOrderFields(ch, 10, 80001, 0, 0, 1000, 100, 10)
 	o2 := buildSnapOrderFields(ch, 10, 80002, 1, 0, 2000, 200, 5)
+	o2qty := buildSnapOrderFields(ch, 10, 80002, 1, 0, 2000, 200, 7)
 	o3 := buildSnapOrderFields(ch, 10, 80003, 1, 0, 3000, 300, 5)
 	cancel2 := buildOrderCancelFull(ch, instrID, 3, 80002, 0)
 	add3 := buildOrderAddExact(ch, instrID, 3, 80003, 1, 0, 3000, 300, 5)
 
-	if got := run(cancel2, o1, o2); got != "match" {
+	if got, _ := run(cancel2, o1, o2); got != "match" {
 		t.Errorf("correct snapshot, then cancel 80002: audit %q, want match", got)
 	}
-	if got := run(cancel2, o1); got != "mismatch_suspected" {
-		t.Errorf("snapshot without 80002, then cancel 80002: audit %q, want mismatch_suspected", got)
+	for _, c := range []struct {
+		name  string
+		delta []byte
+		snap  [][]byte
+		label string
+	}{
+		{"snapshot without 80002, then cancel 80002", cancel2, [][]byte{o1}, "80002:extra_in_delta"},
+		{"snapshot with 80002 at quantity 7, then cancel 80002", cancel2, [][]byte{o1, o2qty}, "80002:fields"},
+		{"snapshot with 80003, then add 80003", add3, [][]byte{o1, o2, o3}, "80003:missing_in_delta"},
+	} {
+		got, detail := run(c.delta, c.snap...)
+		if got != "mismatch_suspected" || !strings.HasSuffix(detail, c.label) {
+			t.Errorf("%s: audit %q, detail %q, want mismatch_suspected ending in %s", c.name, got, detail, c.label)
+		}
 	}
-	if got := run(add3, o1, o2, o3); got != "mismatch_suspected" {
-		t.Errorf("snapshot with 80003, then add 80003: audit %q, want mismatch_suspected", got)
+}
+
+// TestOracleConfirmsADefectThatDeltasTouch: the snapshot omits order 80002 in two
+// cycles. In the first, two deltas after K execute 80002; in the second, no delta
+// touches it. The divergence has one signature, so the second cycle confirms it.
+func TestOracleConfirmsADefectThatDeltasTouch(t *testing.T) {
+	const ch, instrID = uint8(1), uint32(322)
+	e, oc := newOracleEngine(2)
+	reachedReadyMBO(e, ch, instrID, 0, 1)
+	seedEmptyBooks(e, ch, instrID)
+	runMktdataSeq(e, buildOrderAddExact(ch, instrID, 1, 80001, 0, 0, 1000, 100, 10), 1)
+	runMktdataSeq(e, buildOrderAddExact(ch, instrID, 2, 80002, 1, 0, 2000, 200, 5), 2)
+	runMktdataSeq(e, buildOrderExecuteWithQty(ch, instrID, 3, 80002, 0, 1), 3)
+	runMktdataSeq(e, buildOrderExecuteWithQty(ch, instrID, 4, 80002, 0, 1), 4)
+	e.Flush()
+	oc.auditResults = nil
+	o1 := func(id uint32) []byte { return buildSnapOrderFields(ch, id, 80001, 0, 0, 1000, 100, 10) }
+	snapSeq := completeSnapshot(e, ch, instrID, 2, 10, 2 /* K: the book is at 4 */, [][]byte{o1(10)}, 1)
+	completeSnapshot(e, ch, instrID, 4, 11, 4 /* K: the book is at 4 */, [][]byte{o1(11)}, snapSeq)
+	if got := oc.auditResults; len(got) != 2 || got[0] != "mismatch_suspected" || got[1] != "mismatch_confirmed" {
+		t.Errorf("audits %v, want [mismatch_suspected mismatch_confirmed]", got)
+	}
+}
+
+// TestInvalidGroupDoesNotTrimTheLog: a structurally invalid group can carry a
+// wrong K. A K far ahead must not empty the log that the next valid group needs.
+func TestInvalidGroupDoesNotTrimTheLog(t *testing.T) {
+	const ch, instrID = uint8(1), uint32(323)
+	e, oc := newOracleEngine(1)
+	reachedReadyMBO(e, ch, instrID, 0, 1)
+	seedEmptyBooks(e, ch, instrID)
+	runMktdataSeq(e, buildOrderAddExact(ch, instrID, 1, 80001, 0, 0, 1000, 100, 10), 1)
+	runMktdataSeq(e, buildOrderAddExact(ch, instrID, 2, 80002, 1, 0, 2000, 200, 5), 2)
+	runMktdataSeq(e, buildOrderAddExact(ch, instrID, 3, 80003, 1, 0, 3000, 300, 5), 3)
+	e.Flush()
+	// Total Orders 5 with one SnapshotOrder: an under-count, so a structural violation.
+	runStream(e, []streamEntry{{port: core.PortSnapshot, raw: buildSnapBeginFull(ch, instrID, 2, 5, 10, 1000), seq: 1}})
+	runStream(e, []streamEntry{{port: core.PortSnapshot, raw: buildSnapOrderFields(ch, 10, 80001, 0, 0, 1000, 100, 10), seq: 2}})
+	runStream(e, []streamEntry{{port: core.PortSnapshot, raw: buildSnapEndFull(ch, instrID, 2, 10), seq: 3}})
+	oc.auditResults = nil
+	completeSnapshot(e, ch, instrID, 2, 11, 2 /* K: the book is at 3 */, [][]byte{
+		buildSnapOrderFields(ch, 11, 80001, 0, 0, 1000, 100, 10),
+		buildSnapOrderFields(ch, 11, 80002, 1, 0, 2000, 200, 5),
+	}, 4)
+	if got := oc.lastAudit(); got != "match" {
+		t.Errorf("valid group after an invalid one: audit %q, want match", got)
+	}
+}
+
+// TestNoSnapshotPortKeepsNoLog: a run without a snapshot port has no group to read
+// the log, so the engine keeps none.
+func TestNoSnapshotPortKeepsNoLog(t *testing.T) {
+	ac := &allCapture{}
+	e := New(Config{Feed: core.FeedMBO, ReorderWindow: 1, NoSnapshotPort: true}, ac)
+	a := newMBOPub(srcA, 3)
+	a.ready(e)
+	for s := uint32(1); s <= 5; s++ {
+		a.add(e, s, uint64(s))
+	}
+	e.Flush()
+	e.curSrc = srcA
+	e.selectMBO(instCh)
+	if got := logSeqs(&e.mbo.book.book(instCh, instInstr).log); len(got) != 0 {
+		t.Errorf("log %v, want empty", got)
 	}
 }

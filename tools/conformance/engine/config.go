@@ -27,6 +27,9 @@ type Config struct {
 
 	// SourceRegistry authorises TOB source IDs. May be nil (all allowed).
 	SourceRegistry SourceRegistry
+	// NoSnapshotPort is true when the run binds no snapshot port. No snapshot
+	// group can then read a market-by-order delta log, so the engine keeps none.
+	NoSnapshotPort bool
 }
 
 // Configured reports whether the Conditional rule identified by ruleID has its
