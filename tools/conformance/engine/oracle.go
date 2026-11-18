@@ -37,8 +37,10 @@ package engine
 //
 //  1. Only diffs when the log covers K to lastInstrSeq[I] AND gateConsumer holds
 //     (gapless per-instrument history since a seed, refdata ready). A mktdata gap
-//     that removed no delta of the instrument does not stop the oracle: a lost
-//     delta of the instrument would have cleared bookTrusted.
+//     makes every book untrusted until a snapshot group seeds it again
+//     (syncMktdataGaps). The instance must also have classified mktdata up to the
+//     group's Anchor Seq: a lost InstrumentReset in that range shows only as a
+//     gap, which a later datagram reveals.
 //  2. Snapshot group must be structurally valid (no ORDER_SNAPSHOT_ID_MATCH,
 //     SNAPSHOT_ORDER_NO_DUP_ORDER_ID, EMPTY_BOOK_WELL_FORMED,
 //     END_FIELDS_MATCH_BEGIN, or TOTAL_ORDERS_COUNT_MATCH violations). A
@@ -160,6 +162,16 @@ func (e *Engine) runOracleForGroup(ch uint8, snap *openSnapshot, snapPortSeq uin
 			fmt.Sprintf("instrument %d: a late or duplicate delta mutated the book without advancing its seq", instrID))
 		return
 	}
+	// The mktdata series must reach the group's Anchor Seq. A recovery group
+	// follows its InstrumentReset at once, and when the datagram that carried the
+	// reset is lost, the group can close before a later datagram reveals the gap.
+	// Comparing then would grade the book from before the reset.
+	if !e.mbo.highestMktdataSeqSet || snap.anchorSeq > e.mbo.highestMktdataSeq {
+		e.unverifiable(key, snapPortSeq, core.ReasonPending,
+			fmt.Sprintf("instrument %d: the mktdata series has not reached the group's Anchor Seq %d", instrID, snap.anchorSeq))
+		return
+	}
+
 	// --- Gate 2: the delta book must be at seq K, or past it with every delta
 	// after K in its log. The oracle then compares the delta book with the snapshot
 	// book with those deltas applied (see deltaLog).
