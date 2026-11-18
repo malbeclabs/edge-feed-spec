@@ -21,7 +21,8 @@ import (
 // reason cold_start. The next whole group is graded as usual.
 func TestJoinInsideAGroupIsColdStart(t *testing.T) {
 	e, ac, a := readyPub(t)
-	a.order(e, 9, 11) // the SnapshotBegin of group 9 went out before the join
+	a.skip(core.PortSnapshot, 100) // the validator joins at snapshot datagram 100
+	a.order(e, 9, 11)              // the SnapshotBegin of group 9 went out before the join
 	a.order(e, 9, 12)
 	a.end(e, 0, 9)
 	a.group(e, 0, 10, 0, 21)
@@ -102,5 +103,41 @@ func TestManifestChangeDiscardsOnlyTheGroupOfARemovedInstrument(t *testing.T) {
 				t.Errorf("group open after the new set = %v, want %v", got, tc.wantOpen)
 			}
 		})
+	}
+}
+
+// TestJoinAllowanceEndsAtTheFirstSnapshotEnd: the first SnapshotEnd closes the
+// group that the validator joined inside, so an orphan after it is a violation.
+func TestJoinAllowanceEndsAtTheFirstSnapshotEnd(t *testing.T) {
+	e, ac, a := readyPub(t)
+	a.skip(core.PortSnapshot, 100)
+	a.end(e, 0, 9)     // closes the group of the join: cold_start
+	a.order(e, 10, 21) // no SnapshotBegin of group 10
+	a.end(e, 0, 10)
+	e.Flush()
+	var cold, viol int
+	for _, f := range findingsFor(ac, "SNAP.BEGIN_ORDER_END_GROUPING") {
+		switch {
+		case f.Status == core.Unverifiable && f.Reason == core.ReasonColdStart:
+			cold++
+		case f.Status == core.Violation:
+			viol++
+		}
+	}
+	if cold != 1 || viol != 2 {
+		t.Errorf("got %d cold_start and %d violations, want 1 and 2%s", cold, viol, describe(ac.findings))
+	}
+}
+
+// TestSeriesFromZeroHasNoJoinAllowance: the validator receives the snapshot
+// series from Sequence Number 0, so no group began before it. An orphan is a
+// violation.
+func TestSeriesFromZeroHasNoJoinAllowance(t *testing.T) {
+	e, ac, a := readyPub(t)
+	a.order(e, 9, 11) // snapshot datagram 0
+	a.end(e, 0, 9)
+	e.Flush()
+	if v := len(findingsWithStatus(ac.findings, "SNAP.BEGIN_ORDER_END_GROUPING", core.Violation)); v != 2 {
+		t.Errorf("got %d violations, want 2: the series starts at 0%s", v, describe(ac.findings))
 	}
 }

@@ -233,12 +233,16 @@ type mboState struct {
 	trackers map[instrTrackerKey]*instrTracker
 	// snapTrackers holds per-(channel, instrument) snapshot counters.
 	snapTrackers map[instrTrackerKey]*snapTracker
-	// sawSnapBegin is true once this state has seen a SnapshotBegin. Before that, a
-	// SnapshotOrder or SnapshotEnd with no open group is the tail of a group whose
-	// SnapshotBegin went out before the subscriber listened: its cold start, not a
-	// publisher fault. A Reset Count change does not clear it: the subscriber is past
-	// its join, and a new era starts with a SnapshotBegin.
-	sawSnapBegin bool
+	// pastJoinGroup is true once the subscriber is past the snapshot group it can
+	// have joined inside: this state saw a SnapshotBegin or a SnapshotEnd, or a
+	// snapshot datagram with Sequence Number 0, the start of the series
+	// (market-by-order/spec.md, Frame Header). Before that, a SnapshotOrder or
+	// SnapshotEnd with no open group is the tail of a group whose SnapshotBegin went
+	// out before the subscriber listened: its cold start, not a publisher fault. The
+	// first SnapshotEnd closes that group, so an orphan after it is graded. A Reset
+	// Count change does not clear it: the subscriber is past its join, and a new era
+	// starts with a SnapshotBegin.
+	pastJoinGroup bool
 	// openSnaps holds at most one in-progress snapshot group per channel instance.
 	// Keyed by channelID, which is the instance's own; nil value means no open group.
 	openSnaps map[uint8]*openSnapshot
@@ -1030,6 +1034,12 @@ func (e *Engine) applyDeltaSeq(ch uint8, instrID uint32, perSeq uint32, frameSeq
 func (e *Engine) checkMBOSnapshot(f *wire.Frame, ch uint8, snapPortSeq uint64) {
 	e.selectMBOForDatagram(ch)
 
+	// Sequence Number 0 is the start of the snapshot series: no group began before
+	// it, so the subscriber did not join inside one.
+	if snapPortSeq == 0 {
+		e.mbo.pastJoinGroup = true
+	}
+
 	// Detect intra-group snapshot-port seq gaps by comparing snapPortSeq with
 	// the group's lastSnapPortSeq. This is more precise than the era-wide
 	// dirtyWindow: only gaps that occur DURING the group's lifetime (after its
@@ -1069,7 +1079,7 @@ func (e *Engine) checkMBOSnapshot(f *wire.Frame, ch uint8, snapPortSeq uint64) {
 //   - emits the counter-state Begin rules (ANCHOR_IS_MKTDATA_SEQ etc.)
 //   - opens (or forcibly replaces) the open snapshot group for the channel.
 func (e *Engine) handleSnapBegin(m wire.Message, ch uint8, snapPortSeq uint64) {
-	e.mbo.sawSnapBegin = true
+	e.mbo.pastJoinGroup = true
 	instrID := snapshotBeginInstrumentID(m)
 	anchorSeq := snapshotBeginAnchorSeq(m)
 	snapID := snapshotBeginSnapshotID(m)
@@ -1146,7 +1156,7 @@ func (e *Engine) handleSnapOrder(m wire.Message, ch uint8, snapPortSeq uint64) {
 
 	// SNAP.BEGIN_ORDER_END_GROUPING: order arrived without a preceding Begin.
 	if open == nil {
-		if !e.mbo.sawSnapBegin {
+		if !e.mbo.pastJoinGroup {
 			detail := fmt.Sprintf("SnapshotOrder (snapshot id %d) before the first SnapshotBegin seen from this publisher: the subscriber joined inside the group", snapID)
 			e.unverified("SNAP.BEGIN_ORDER_END_GROUPING", core.ReasonColdStart, core.PortSnapshot, snapPortSeq, ch, 0, detail)
 			e.unverified("SNAP.ORDER_PRICE_BOUND", core.ReasonColdStart, core.PortSnapshot, snapPortSeq, ch, 0, detail)
@@ -1265,10 +1275,12 @@ func (e *Engine) handleSnapEnd(m wire.Message, ch uint8, snapPortSeq uint64) {
 
 	// SNAP.BEGIN_ORDER_END_GROUPING: End arrived without a preceding Begin.
 	if open == nil {
-		if !e.mbo.sawSnapBegin {
+		if !e.mbo.pastJoinGroup {
 			e.unverified("SNAP.BEGIN_ORDER_END_GROUPING", core.ReasonColdStart, core.PortSnapshot, snapPortSeq, ch, endInstrID,
 				fmt.Sprintf("instrument %d: SnapshotEnd (snapshot id %d) before the first SnapshotBegin seen from this publisher: the subscriber joined inside the group",
 					endInstrID, endSnapID))
+			// This End closes the group the subscriber joined inside.
+			e.mbo.pastJoinGroup = true
 			return
 		}
 		st := core.Violation
