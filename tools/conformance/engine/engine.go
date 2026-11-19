@@ -640,6 +640,17 @@ func (e *Engine) snapPortDirty(ch uint8) bool {
 	return !e.instanceGapless(core.PortSnapshot, ch)
 }
 
+// hasTransportFinding reports whether decoding found transport corruption, such
+// as truncation, in the datagram.
+func hasTransportFinding(sf []wire.StructFinding) bool {
+	for _, s := range sf {
+		if s.Transport {
+			return true
+		}
+	}
+	return false
+}
+
 // markCorrupt records one transport corruption finding on a port. ch is the
 // frame's Channel ID, or nil when the header did not decode.
 func (e *Engine) markCorrupt(port core.Port, ruleID string, ch *uint8) {
@@ -928,7 +939,7 @@ func (e *Engine) classify(item *bufferItem, pt *portTracker) {
 		case core.FeedMidpoint:
 			e.checkMidpoint(f, port, f.Header.ChannelID)
 		case core.FeedMBO:
-			e.checkMBO(f, f.Header.ChannelID)
+			e.checkMBO(f, f.Header.ChannelID, hasTransportFinding(sf))
 		case core.FeedMBP:
 			e.checkMBP(f, f.Header.ChannelID)
 		}

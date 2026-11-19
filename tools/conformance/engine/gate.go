@@ -278,6 +278,20 @@ type mboState struct {
 	maxSnapCycle int
 	// oracleSuspects holds per-(channel, instrument) oracle suspect state (Task 26).
 	oracleSuspects map[instrTrackerKey]*oracleSuspect
+	// mktTaints is the taint count of the instance's mktdata port when this state
+	// last read it (syncMktdataGaps).
+	mktTaints uint64
+	// reseedFrom is the lowest Anchor Seq a snapshot group must have to seed a
+	// book after the last mktdata gap (seedPlan). A group anchored below it shows
+	// the book from before a datagram that may have carried an InstrumentReset.
+	//
+	// When a mktdata datagram reveals the gap, it is the last Sequence Number the
+	// gap can have removed: the one before that datagram, or the datagram's own
+	// when transport truncated it. When the snapshot path finds the taint first, it
+	// is the lowest Sequence Number the gap can have removed, one above the highest
+	// classified; a group anchored above that is stopped by the next mktdata
+	// datagram, whose gap check raises the bound before the group can close.
+	reseedFrom uint64
 	// fallbackSet is the definition set this state reads from another instance: the
 	// set it read when selectMBO created it, then the set that
 	// refdataState.notifyMBO last passed to it. Only a state whose address has no
@@ -367,6 +381,7 @@ func (s *mboState) onResetCount() {
 	s.highestMktdataSeq = 0
 	s.highestMktdataSeqSet = false
 	s.firstMktdataSeqSet = false
+	s.reseedFrom = 0
 	s.maxSnapCycle = 0
 	s.book.onResetCount()
 	clear(s.oracleSuspects)
@@ -496,8 +511,9 @@ func (e *Engine) snapPortBound(ch uint8) bool {
 	return ok
 }
 
-// gateConsumer returns true when referential-integrity checks (REF.*, TRADE.*)
-// may be treated as Violations (rather than Unverifiable).
+// gateConsumer returns true when the referential-integrity checks (REF.*) may be
+// treated as Violations (rather than Unverifiable). TRADE.EXEC_GROUPING has a gate
+// of its own, in checkMBO, which reads the instance gap.
 //
 // A referential anomaly is only definitely a publisher fault when ALL of the
 // following hold:
@@ -507,10 +523,15 @@ func (e *Engine) snapPortBound(ch uint8) bool {
 //     seeded the book, and every delta since then continued the series
 //     (bookTrusted=true). A prior gap could have carried a missing OrderAdd.
 //  3. The incoming perInstrSeq == lastInstrSeq+1 (no gap immediately before this msg).
-//  4. The instance's mktdata series is gapless (instanceGapless): a datagram gap could
-//     have carried the missing delta.
 //
 // If any condition is false, the anomaly is Unverifiable, never Violation.
+//
+// A gap in the instance's mktdata series is not a condition of its own. It makes
+// every book of the instance untrusted (syncMktdataGaps), which condition 2
+// reads, until the instrument's next snapshot group seeds the book again. An
+// earlier version required instanceGapless, which stays false for the rest of the
+// era after one gap: one lost datagram stopped these rules on every instrument
+// for days (malbeclabs/edge-feed-spec#131).
 func (e *Engine) gateConsumer(ch uint8, instrID uint32, perInstrSeq uint32) bool {
 	// Condition 1: refdata ready and instrument known.
 	if e.refdata == nil {
@@ -530,12 +551,34 @@ func (e *Engine) gateConsumer(ch uint8, instrID uint32, perInstrSeq uint32) bool
 		// History has a prior gap (or cold-started mid-stream): book may be incomplete.
 		return false
 	}
-	if perInstrSeq != *t.lastInstrSeq+1 {
-		// There is a per-instrument seq gap: a missing delta could have added the order.
-		return false
+	// Condition 3: there is no per-instrument seq gap: a missing delta could have
+	// added the order.
+	return perInstrSeq == *t.lastInstrSeq+1
+}
+
+// syncMktdataGaps makes every book of the instance in front of the engine
+// untrusted when its mktdata series had a gap since the state last read it. A
+// lost datagram can carry an InstrumentReset, and Per-Instrument Seq continues
+// across one (market-by-order/spec.md, Per-Instrument Delta Sequence: it restarts
+// only on a Reset Count change), so the instrument's next delta does not show the
+// loss. The next snapshot group of each instrument seeds its book again
+// (seedBookFromSnapshot), so the order rules and the oracle stop for at most one
+// snapshot cycle after a gap, not for the rest of the era.
+//
+// lostTo is the last mktdata Sequence Number the gap can have removed. A group
+// anchored below it must not seed (reseedFrom): spec option (a) for an
+// InstrumentReset during a snapshot lets the publisher finish the group in
+// flight, and that group shows the book from before the reset.
+func (e *Engine) syncMktdataGaps(ch uint8, lostTo uint64) {
+	pt, ok := e.ports[instanceKey{src: e.curSrc, port: core.PortMktData, ch: ch}]
+	if !ok || pt.taints == e.mbo.mktTaints {
+		return
 	}
-	// Condition 4: mktdata channel gapless.
-	return e.instanceGapless(core.PortMktData, ch)
+	e.mbo.mktTaints = pt.taints
+	e.mbo.reseedFrom = max(e.mbo.reseedFrom, lostTo)
+	for _, t := range e.mbo.trackers {
+		t.bookTrusted = false
+	}
 }
 
 // selectMBO points e.mbo at the state of the channel instance in front of the
@@ -675,8 +718,18 @@ func (e *Engine) eachMBOInstance(fn func(k refdataKey, s *mboState)) {
 //     first post-reset delta must carry per-instrument seq == recoveryK+1.
 //
 // InstrumentReset (0x14) messages call onInstrumentReset to wipe the tracker.
-func (e *Engine) checkMBO(f *wire.Frame, ch uint8) {
+//
+// corrupt is true when transport truncated or corrupted the datagram: then the
+// datagram's own messages can be the ones lost.
+func (e *Engine) checkMBO(f *wire.Frame, ch uint8, corrupt bool) {
 	e.selectMBOForDatagram(ch)
+	// The datagrams a gap before this one removed are below its Sequence Number. A
+	// truncated datagram lost its own tail, which can be an InstrumentReset.
+	lostTo := f.Header.Sequence - min(f.Header.Sequence, 1)
+	if corrupt {
+		lostTo = f.Header.Sequence
+	}
+	e.syncMktdataGaps(ch, lostTo)
 	frameSeq := f.Header.Sequence
 
 	// Track the first and the highest mktdata-port datagram Sequence of the era, for
@@ -1078,6 +1131,15 @@ func (e *Engine) applyDeltaSeq(ch uint8, instrID uint32, perSeq uint32, frameSeq
 //   - SNAP.ORDER_PRICE_BOUND
 func (e *Engine) checkMBOSnapshot(f *wire.Frame, ch uint8, snapPortSeq uint64) {
 	e.selectMBOForDatagram(ch)
+	// No mktdata datagram after the gap is classified yet, so the lowest Sequence
+	// Number the gap can have removed is the one above the highest classified. The
+	// next mktdata datagram's gap check raises the bound to the last one
+	// (reseedFrom).
+	from := uint64(0)
+	if e.mbo.highestMktdataSeqSet {
+		from = e.mbo.highestMktdataSeq + 1
+	}
+	e.syncMktdataGaps(ch, from)
 
 	// Sequence Number 0 is the start of the snapshot series: no group began before
 	// it, so the subscriber did not join inside one.
@@ -1502,6 +1564,11 @@ func (e *Engine) seedPlan(ch uint8, snap *openSnapshot) (ok, moveToK bool) {
 	}
 	dt := e.mbo.tracker(ch, snap.instrID)
 	if dt.bookTrusted {
+		return false, false
+	}
+	// A group anchored before the last mktdata gap can show the book from before
+	// a lost InstrumentReset (syncMktdataGaps).
+	if snap.anchorSeq < e.mbo.reseedFrom {
 		return false, false
 	}
 	k := snap.lastInstrSeqK

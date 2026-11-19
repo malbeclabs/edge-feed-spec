@@ -203,9 +203,9 @@ func TestSeedingGroupIsNotCompared(t *testing.T) {
 	}
 
 	clearFindings(ac)
-	a.add(e, 1, 12)
+	a.add(e, 1, 12) // mktdata datagram 0
 	e.Flush()
-	a.group(e, 1, 2, 1, 11, 12)
+	a.group(e, 0, 2, 1, 11, 12) // Anchor Seq 0: after the add's datagram
 	e.Flush()
 	got = findingsFor(ac, "SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT")
 	if len(got) != 1 || got[0].Status != core.Pass {

@@ -36,7 +36,11 @@ package engine
 // False-positive guarantees:
 //
 //  1. Only diffs when the log covers K to lastInstrSeq[I] AND gateConsumer holds
-//     (gapless per-instrument history, gapless mktdata channel, refdata ready).
+//     (gapless per-instrument history since a seed, refdata ready). A mktdata gap
+//     makes every book untrusted until a snapshot group seeds it again
+//     (syncMktdataGaps). The instance must also have classified mktdata up to the
+//     group's Anchor Seq: a lost InstrumentReset in that range shows only as a
+//     gap, which a later datagram reveals.
 //  2. Snapshot group must be structurally valid (no ORDER_SNAPSHOT_ID_MATCH,
 //     SNAPSHOT_ORDER_NO_DUP_ORDER_ID, EMPTY_BOOK_WELL_FORMED,
 //     END_FIELDS_MATCH_BEGIN, or TOTAL_ORDERS_COUNT_MATCH violations). A
@@ -110,7 +114,7 @@ func (e *Engine) runOracleForGroup(ch uint8, snap *openSnapshot, snapPortSeq uin
 	}
 
 	// --- Gate 1: gateConsumer-equivalent check for the oracle.
-	// We need: refdata ready + instrument known + bookTrusted + gapless mktdata.
+	// We need: refdata ready + instrument known + bookTrusted.
 	// We cannot call gateConsumer (which requires a perInstrSeq argument), so
 	// replicate its logic without the perSeq == lastInstrSeq+1 check (handled by
 	// gate 2 below).
@@ -143,9 +147,10 @@ func (e *Engine) runOracleForGroup(ch uint8, snap *openSnapshot, snapPortSeq uin
 				fmt.Sprintf("instrument %d: no snapshot group has seeded the book yet, so there is no book to compare", instrID))
 			return
 		}
-		// The book was seeded, and a per-instrument gap cleared its trust.
+		// The book was seeded, and a gap cleared its trust: a per-instrument gap
+		// (applyDeltaSeq) or a gap in the mktdata series (syncMktdataGaps).
 		e.unverifiable(key, snapPortSeq, core.ReasonUntrusted,
-			fmt.Sprintf("instrument %d: a per-instrument gap cleared the trust of the book a snapshot seeded", instrID))
+			fmt.Sprintf("instrument %d: a gap cleared the trust of the book a snapshot seeded, in its per-instrument seq or in the mktdata series", instrID))
 		return
 	}
 	if dt.bookCorruptedByDup {
@@ -158,8 +163,13 @@ func (e *Engine) runOracleForGroup(ch uint8, snap *openSnapshot, snapPortSeq uin
 			fmt.Sprintf("instrument %d: a late or duplicate delta mutated the book without advancing its seq", instrID))
 		return
 	}
-	if !e.instanceGapless(core.PortMktData, ch) {
-		e.unverifiable(key, snapPortSeq, core.ReasonLoss, "the mktdata port has a sequence gap this era")
+	// The mktdata series must reach the group's Anchor Seq. A recovery group
+	// follows its InstrumentReset at once, and when the datagram that carried the
+	// reset is lost, the group can close before a later datagram reveals the gap.
+	// Comparing then would grade the book from before the reset.
+	if !e.mbo.highestMktdataSeqSet || snap.anchorSeq > e.mbo.highestMktdataSeq {
+		e.unverifiable(key, snapPortSeq, core.ReasonPending,
+			fmt.Sprintf("instrument %d: the mktdata series has not reached the group's Anchor Seq %d", instrID, snap.anchorSeq))
 		return
 	}
 

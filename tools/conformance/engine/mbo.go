@@ -7,7 +7,7 @@ package engine
 // Engine.classify via the per-feed dispatch switch:
 //
 //	case core.FeedMBO:
-//	    e.checkMBO(f, f.Header.ChannelID)
+//	    e.checkMBO(f, f.Header.ChannelID, hasTransportFinding(sf))
 //
 // Snapshot-port frames are routed via:
 //
