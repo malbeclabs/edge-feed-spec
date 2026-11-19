@@ -40,8 +40,12 @@ jobs:
             echo "run=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          if ! changed=$(git diff --name-only --no-renames "$BASE...$HEAD" -- "${paths[@]}"); then
-            echo "::warning::diff $BASE...$HEAD failed; running every job"
+          # A push compares the two tips: after a force push back to an ancestor, the merge
+          # base a three-dot diff uses is the new tip itself, so the diff would come back empty.
+          range="$BASE...$HEAD"
+          [[ "$GITHUB_EVENT_NAME" == pull_request ]] || range="$BASE..$HEAD"
+          if ! changed=$(git diff --name-only --no-renames "$range" -- "${paths[@]}"); then
+            echo "::warning::diff $range failed; running every job"
             echo "run=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
