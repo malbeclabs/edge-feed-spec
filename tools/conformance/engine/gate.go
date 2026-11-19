@@ -720,7 +720,7 @@ func (e *Engine) checkMBO(f *wire.Frame, ch uint8) {
 			// group's Last Instrument Seq. Without a snapshot port no group reads
 			// the log.
 			if !e.cfg.NoSnapshotPort {
-				bk.log.record(perSeq, m, found, orderFieldsHash(lo))
+				bk.log.record(perSeq, m, found, lo)
 			}
 
 		case wire.TypeTrade:
@@ -2008,6 +2008,19 @@ func (e *Engine) checkOrderCancel(ch uint8, instrID uint32, gated bool, frameSeq
 	// live) ensures visible live-order lifecycle is unaffected while preventing
 	// false REF.OPERATION_AFTER_REMOVAL and REF.CANCEL_DANGLING_ORDER.
 	if bk.hiddenIDs.has(orderID) {
+		return
+	}
+
+	// The seed dropped this order at zero remaining, because a snapshot cannot
+	// carry it (seedDroppedZeros). The cancel can be the publisher's removal of it,
+	// so neither rule can decide. The order is removed from here on.
+	if _, dropped := bk.seedDroppedZeros[orderID]; dropped {
+		delete(bk.seedDroppedZeros, orderID)
+		bk.removed.add(orderID)
+		detail := fmt.Sprintf("instrument %d: OrderCancel for order id %d, which an execute left at zero before "+
+			"the snapshot that seeded the book; a SnapshotOrder cannot carry an order at zero", instrID, orderID)
+		e.unverified("REF.CANCEL_DANGLING_ORDER", core.ReasonColdStart, core.PortMktData, frameSeq, ch, instrID, detail)
+		e.unverified("REF.OPERATION_AFTER_REMOVAL", core.ReasonColdStart, core.PortMktData, frameSeq, ch, instrID, detail)
 		return
 	}
 

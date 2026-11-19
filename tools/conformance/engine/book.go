@@ -171,6 +171,11 @@ type instrBook struct {
 	// that a snapshot group can seed or audit the book after the book moved past
 	// the group's Last Instrument Seq (see deltaLog).
 	log deltaLog
+	// seedDroppedZeros holds the IDs of orders at zero remaining that the last seed
+	// dropped from the book. A SnapshotOrder has Quantity > 0, so a snapshot taken
+	// between an execute to zero and its OrderCancel leaves the order out. The
+	// publisher's cancel of such an order is not dangling (checkOrderCancel).
+	seedDroppedZeros map[uint64]struct{}
 }
 
 func newInstrBook() *instrBook {
@@ -423,12 +428,24 @@ func (bk *instrBook) applyDelta(m wire.Message) error {
 // A seed also records, in each logged delta, whether its order is in the seeded
 // book. The book was not trusted when the delta first arrived, so the record of
 // that time can be wrong, and the oracle reads it (replayedSnapshot).
+//
+// An order the book holds at zero remaining, which the snapshot does not hold, is
+// recorded in seedDroppedZeros: its cancel can follow the seed.
 func (bk *instrBook) seedAndReplay(orders map[uint64]snapOrderRecord, k uint32, log *deltaLog) {
+	clear(bk.seedDroppedZeros)
+	for id, lo := range bk.live {
+		if _, inSnap := orders[id]; !inSnap && lo.remaining == 0 && !isHidden(lo.orderFlags) {
+			if bk.seedDroppedZeros == nil {
+				bk.seedDroppedZeros = make(map[uint64]struct{})
+			}
+			bk.seedDroppedZeros[id] = struct{}{}
+		}
+	}
 	bk.seed(orders)
 	log.eachAfter(k, func(d *loggedDelta) {
 		m := d.message()
 		lo, found := bk.live[deltaOrderID(m)]
-		d.found, d.fields = found, orderFieldsHash(lo)
+		d.setFound(found, lo)
 		_ = bk.applyDelta(m)
 	})
 }
@@ -460,8 +477,8 @@ var maxDeltaLog = 4096
 const maxLoggedBody = 52
 
 // loggedDelta is one delta of a deltaLog: the message, its per-instrument seq,
-// whether its order was live in the book before the delta, and if so the hash of
-// that order's fields (orderFieldsHash).
+// whether its order was live in the book before the delta, and if so whether it
+// was at zero remaining and the hash of its fields (orderFieldsHash).
 type loggedDelta struct {
 	fields uint64
 	seq    uint32
@@ -469,7 +486,13 @@ type loggedDelta struct {
 	length uint8
 	n      uint8
 	found  bool
+	zero   bool
 	body   [maxLoggedBody]byte
+}
+
+// setFound records the order the delta found in the book: found, and lo if found.
+func (d *loggedDelta) setFound(found bool, lo liveOrder) {
+	d.found, d.zero, d.fields = found, found && lo.remaining == 0, orderFieldsHash(lo)
 }
 
 func (d *loggedDelta) message() wire.Message {
@@ -498,8 +521,8 @@ type deltaLog struct {
 func (l *deltaLog) at(i int) *loggedDelta { return &l.buf[(l.start+i)%len(l.buf)] }
 
 // record logs delta m with per-instrument seq seq. found is whether its order
-// was live in the book before m, and fields the hash of that order.
-func (l *deltaLog) record(seq uint32, m wire.Message, found bool, fields uint64) {
+// was live in the book before m, and lo that order.
+func (l *deltaLog) record(seq uint32, m wire.Message, found bool, lo liveOrder) {
 	if len(m.Body) > maxLoggedBody {
 		l.clear()
 		return
@@ -522,7 +545,8 @@ func (l *deltaLog) record(seq uint32, m wire.Message, found bool, fields uint64)
 		}
 	}
 	d := l.at(l.n)
-	*d = loggedDelta{seq: seq, typ: m.Type, length: m.Length, n: uint8(len(m.Body)), found: found, fields: fields}
+	*d = loggedDelta{seq: seq, typ: m.Type, length: m.Length, n: uint8(len(m.Body))}
+	d.setFound(found, lo)
 	copy(d.body[:], m.Body)
 	l.n++
 }

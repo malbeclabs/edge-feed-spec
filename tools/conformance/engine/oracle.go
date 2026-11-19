@@ -286,6 +286,13 @@ func replayedSnapshot(orders map[uint64]snapOrderRecord, k uint32, log *deltaLog
 	log.eachAfter(k, func(d *loggedDelta) {
 		m := d.message()
 		id := deltaOrderID(m)
+		// An order at zero remaining stays in the delta book until its OrderCancel,
+		// but a snapshot leaves it out, because a SnapshotOrder has Quantity > 0.
+		// Its presence decides nothing, as in diffBooks.
+		if d.zero {
+			_ = scratch.applyDelta(m)
+			return
+		}
 		so, inSnap := scratch.live[id]
 		switch {
 		case d.found && !inSnap:

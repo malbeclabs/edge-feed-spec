@@ -53,7 +53,7 @@ func TestDeltaLog(t *testing.T) {
 	}
 	record := func(l *deltaLog, seqs ...uint32) {
 		for _, s := range seqs {
-			l.record(s, cancel(s), false, 0)
+			l.record(s, cancel(s), false, liveOrder{})
 		}
 	}
 
@@ -136,11 +136,11 @@ func TestSeedAndReplay(t *testing.T) {
 	var l deltaLog
 	// The found flags are wrong on purpose: the book was not trusted when these
 	// deltas arrived. The seed records them again from the seeded book.
-	l.record(10, deltaMsg(t, buildOrderExecuteWithQty(instCh, instInstr, 10, 1, 0, 2)), false, 0) // in the snapshot already
-	l.record(11, deltaMsg(t, buildOrderExecuteWithQty(instCh, instInstr, 11, 1, 0, 3)), false, 0) // 10 → 7
-	l.record(12, deltaMsg(t, buildOrderAddWithQty(instCh, instInstr, 12, 2, 4)), true, 0)
-	l.record(13, deltaMsg(t, buildOrderCancelFull(instCh, instInstr, 13, 3, 0)), false, 0)
-	l.record(14, deltaMsg(t, buildOrderExecuteWithQty(instCh, instInstr, 14, 9, 0, 1)), true, 0) // not live: no change
+	l.record(10, deltaMsg(t, buildOrderExecuteWithQty(instCh, instInstr, 10, 1, 0, 2)), false, liveOrder{}) // in the snapshot already
+	l.record(11, deltaMsg(t, buildOrderExecuteWithQty(instCh, instInstr, 11, 1, 0, 3)), false, liveOrder{}) // 10 → 7
+	l.record(12, deltaMsg(t, buildOrderAddWithQty(instCh, instInstr, 12, 2, 4)), true, liveOrder{})
+	l.record(13, deltaMsg(t, buildOrderCancelFull(instCh, instInstr, 13, 3, 0)), false, liveOrder{})
+	l.record(14, deltaMsg(t, buildOrderExecuteWithQty(instCh, instInstr, 14, 9, 0, 1)), true, liveOrder{}) // not live: no change
 
 	bk := newInstrBook()
 	bk.seedAndReplay(map[uint64]snapOrderRecord{1: {qty: 10}, 3: {qty: 5}}, 10, &l)
@@ -393,5 +393,54 @@ func TestNoSnapshotPortKeepsNoLog(t *testing.T) {
 	e.selectMBO(instCh)
 	if got := logSeqs(&e.mbo.book.book(instCh, instInstr).log); len(got) != 0 {
 		t.Errorf("log %v, want empty", got)
+	}
+}
+
+// TestReplaySkipsACancelOfAnOrderAtZero (from review): an execute leaves order
+// 80002 at zero, the snapshot leaves it out, because a SnapshotOrder has Quantity
+// > 0, and the cancel after K removes it. The cancel found the order in the delta
+// book and not in the snapshot book; that decides nothing, as in diffBooks.
+func TestReplaySkipsACancelOfAnOrderAtZero(t *testing.T) {
+	const ch, instrID = uint8(1), uint32(324)
+	e, oc := newOracleEngine(1)
+	reachedReadyMBO(e, ch, instrID, 0, 1)
+	seedEmptyBooks(e, ch, instrID)
+	runMktdataSeq(e, buildOrderAddExact(ch, instrID, 1, 80001, 0, 0, 1000, 100, 10), 1)
+	runMktdataSeq(e, buildOrderAddExact(ch, instrID, 2, 80002, 1, 0, 2000, 200, 5), 2)
+	runMktdataSeq(e, buildOrderExecuteWithQty(ch, instrID, 3, 80002, 0, 5), 3) // 80002 at zero
+	runMktdataSeq(e, buildOrderCancelFull(ch, instrID, 4, 80002, 0), 4)
+	e.Flush()
+	oc.auditResults = nil
+	completeSnapshot(e, ch, instrID, 3, 10, 3 /* K: the book is at 4 */, [][]byte{
+		buildSnapOrderFields(ch, 10, 80001, 0, 0, 1000, 100, 10),
+	}, 1)
+	if got := oc.lastAudit(); got != "match" {
+		t.Errorf("snapshot between the execute to zero and its cancel: audit %q, want match", got)
+	}
+}
+
+// TestCancelOfAnOrderTheSeedDroppedAtZero (from review): the snapshot that seeds
+// the book is taken between an execute to zero and its cancel, so it leaves the
+// order out. The publisher's cancel after the seed is not a dangling cancel. A
+// second cancel is an operation after removal.
+func TestCancelOfAnOrderTheSeedDroppedAtZero(t *testing.T) {
+	e, ac, a := readyPub(t)
+	a.send(e, core.PortMktData, buildOrderAddWithQty(instCh, instInstr, 1, 7, 4))        // datagram 0
+	a.send(e, core.PortMktData, buildOrderExecuteWithQty(instCh, instInstr, 2, 7, 0, 4)) // datagram 1: order 7 at zero
+	e.Flush()
+	a.group(e, 1, 1, 2) // seeds at K = 2: the snapshot cannot carry order 7
+	e.Flush()
+	clearFindings(ac)
+	a.cancel(e, 3, 7)
+	e.Flush()
+	got := findingsFor(ac, "REF.CANCEL_DANGLING_ORDER")
+	if len(got) != 1 || got[0].Status != core.Unverifiable || got[0].Reason != core.ReasonColdStart {
+		t.Errorf("cancel of the dropped order: got %v, want one Unverifiable, reason cold_start", got)
+	}
+	clearFindings(ac)
+	a.cancel(e, 4, 7)
+	e.Flush()
+	if !hasViolation(ac, "REF.OPERATION_AFTER_REMOVAL") {
+		t.Errorf("a second cancel must be REF.OPERATION_AFTER_REMOVAL%s", describe(ac.findings))
 	}
 }
