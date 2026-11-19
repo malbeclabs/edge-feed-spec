@@ -882,10 +882,21 @@ func (e *Engine) classify(item *bufferItem, pt *portTracker) {
 	// a publisher violation. A plain forward gap is transport loss (not a violation).
 	// res.gapBefore is true for forward gaps; backward motion (seq < lastSeq)
 	// without an era change is flagged here.
+	//
+	// Unless a gap of this era counted the datagram as lost. Then it arrived after
+	// the reorder window had moved past it: the publisher sent it in order and the
+	// path delayed it, longer than the window holds (on a long path, a few
+	// milliseconds can be more than the window's datagrams). That is reordering.
 	if pt.lastSeq != nil && f.Header.Sequence < *pt.lastSeq {
-		e.Emit("FRAME.SEQ_RESET_GAP", core.Violation, port, f.Header.Sequence, f.Header.ChannelID, 0,
-			fmt.Sprintf("seq %d < last %d without reset-count change (era %d)",
-				f.Header.Sequence, *pt.lastSeq, pt.era))
+		if pt.wasLost(f.Header.Sequence) {
+			e.Emit("FRAME.SEQ_RESET_GAP", core.Unverifiable, port, f.Header.Sequence, f.Header.ChannelID, 0,
+				fmt.Sprintf("seq %d arrived after %d, past the reorder window; a gap had counted it as lost (era %d)",
+					f.Header.Sequence, *pt.lastSeq, pt.era), core.ReasonReorder)
+		} else {
+			e.Emit("FRAME.SEQ_RESET_GAP", core.Violation, port, f.Header.Sequence, f.Header.ChannelID, 0,
+				fmt.Sprintf("seq %d < last %d without reset-count change (era %d)",
+					f.Header.Sequence, *pt.lastSeq, pt.era))
+		}
 	}
 
 	// Forward gap: transport loss.

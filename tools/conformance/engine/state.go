@@ -185,6 +185,12 @@ type portTracker struct {
 	hashRingCap  int
 	hashRingPos  int
 	hashRingSize int // number of valid entries currently in the ring (≤ cap)
+	// lost holds the Sequence Number ranges that the latest forward gaps of this era
+	// counted as transport loss, oldest first, at most maxLostRanges. A datagram
+	// from one of them that arrives after the reorder window has moved past it is
+	// late: the path delayed it, and the publisher did not move its series
+	// backward (see Engine.classify).
+	lost []seqRange
 	// buf is the bounded reorder buffer for this series.
 	buf portBuffer
 	// unclassified holds the items a drain has already taken out of buf and has not
@@ -268,6 +274,31 @@ func hashRaw(b []byte) uint64 {
 	return h.Sum64()
 }
 
+// seqRange is an inclusive range of Sequence Numbers.
+type seqRange struct{ lo, hi uint64 }
+
+// maxLostRanges bounds portTracker.lost. A late datagram whose gap is older than
+// the last maxLostRanges gaps of its era is graded as backward motion again.
+const maxLostRanges = 64
+
+// noteLost records that a gap counted lo..hi as transport loss.
+func (t *portTracker) noteLost(lo, hi uint64) {
+	if len(t.lost) == maxLostRanges {
+		t.lost = append(t.lost[:0], t.lost[1:]...)
+	}
+	t.lost = append(t.lost, seqRange{lo, hi})
+}
+
+// wasLost reports whether a gap of this era counted seq as transport loss.
+func (t *portTracker) wasLost(seq uint64) bool {
+	for _, r := range t.lost {
+		if seq >= r.lo && seq <= r.hi {
+			return true
+		}
+	}
+	return false
+}
+
 // observeResult is the outcome of observe().
 type observeResult struct {
 	isDup          bool // same (era,seq), identical bytes → silent drop
@@ -330,6 +361,7 @@ func (t *portTracker) observe(seq uint64, sendTS uint64, raw []byte, era uint8) 
 		if seq > last && seq-last > 1 {
 			gap = true
 			missing = seq - last - 1
+			t.noteLost(last+1, seq-1)
 		}
 		// seq <= last → backward motion; handled by caller (FRAME.SEQ_RESET_GAP).
 	}
@@ -368,6 +400,8 @@ func (t *portTracker) advanceEra(newEra uint8) {
 	clear(t.hashRing)
 	t.hashRingPos = 0
 	t.hashRingSize = 0
+	// The gaps of the old era say nothing about the Sequence Numbers of the new one.
+	t.lost = t.lost[:0]
 	// Clear the dirty-window flag: the new era starts with a clean observation
 	// window.  The refdata state machine (Task 14) reads this flag to decide
 	// whether to downgrade a Violation to Unverifiable; resetting it here
