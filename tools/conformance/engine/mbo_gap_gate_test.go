@@ -172,3 +172,49 @@ func TestGroupAnchoredBeforeAGapDoesNotSeed(t *testing.T) {
 		t.Errorf("the last group must match the book the recovery group seeded%s", describe(ac.findings))
 	}
 }
+
+// TestTruncatedDatagramBoundsTheReseed (from review): transport truncates the
+// datagram that carried an InstrumentReset. The datagram arrives at its own
+// Sequence Number, so no Sequence Number is missing, but its reset is lost. A
+// group anchored one below it shows the book from before the reset and must not
+// seed; the recovery group, anchored at the truncated datagram, seeds.
+func TestTruncatedDatagramBoundsTheReseed(t *testing.T) {
+	ac := &allCapture{}
+	e := New(Config{Feed: core.FeedMBO, ReorderWindow: 1, OracleConfirmCycles: 1}, ac)
+	a := newMBOPub(srcA, 3)
+	a.ready(e)
+	a.group(e, 0, 1, 0) // seeds an empty book at K = 0
+	e.Flush()
+	a.add(e, 1, 7)                                                                  // datagram 0
+	a.add(e, 2, 8)                                                                  // datagram 1
+	a.send(e, core.PortSnapshot, buildSnapBeginFull(instCh, instInstr, 1, 2, 9, 2)) // group 9, Anchor Seq 1, in flight
+	reset := buildInstrumentResetFrame(instCh, instInstr, 2)
+	a.send(e, core.PortMktData, reset[:len(reset)-4]) // datagram 2, truncated: its InstrumentReset is lost
+	a.add(e, 3, 11)                                   // datagram 3
+	e.Flush()
+	clearFindings(ac)
+	a.order(e, 9, 7)
+	a.order(e, 9, 8)
+	a.end(e, 1, 9) // group 9 completes after the reset
+	e.Flush()
+	got := findingsFor(ac, "SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT")
+	if len(got) != 1 || got[0].Reason != core.ReasonUntrusted {
+		t.Errorf("group 9: got %v, want one Unverifiable, reason untrusted: it must not seed", got)
+	}
+	a.group(e, 2, 10, 2) // the recovery group, at the truncated datagram: empty
+	e.Flush()
+	a.cancel(e, 4, 11)   // datagram 4
+	a.group(e, 4, 11, 4) // the next group: empty
+	e.Flush()
+	if v := violations(ac, "REF."); len(v) != 0 {
+		t.Errorf("got %d REF.* violations, want 0%s", len(v), describe(v))
+	}
+	for _, f := range findingsFor(ac, "SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT") {
+		if f.Status == core.Violation || f.Status == core.Suspected {
+			t.Errorf("oracle %v: %s", f.Status, f.Detail)
+		}
+	}
+	if !hasPass(ac, "SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT") {
+		t.Errorf("the last group must match the book the recovery group seeded%s", describe(ac.findings))
+	}
+}

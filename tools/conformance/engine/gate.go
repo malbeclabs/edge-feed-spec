@@ -282,9 +282,15 @@ type mboState struct {
 	// last read it (syncMktdataGaps).
 	mktTaints uint64
 	// reseedFrom is the lowest Anchor Seq a snapshot group must have to seed a
-	// book after the last mktdata gap: the last mktdata Sequence Number the gap
-	// can have removed. A group anchored below it shows the book from before a
-	// datagram that may have carried an InstrumentReset (seedPlan).
+	// book after the last mktdata gap (seedPlan). A group anchored below it shows
+	// the book from before a datagram that may have carried an InstrumentReset.
+	//
+	// When a mktdata datagram reveals the gap, it is the last Sequence Number the
+	// gap can have removed: the one before that datagram, or the datagram's own
+	// when transport truncated it. When the snapshot path finds the taint first, it
+	// is the lowest Sequence Number the gap can have removed, one above the highest
+	// classified; a group anchored above that is stopped by the next mktdata
+	// datagram, whose gap check raises the bound before the group can close.
 	reseedFrom uint64
 	// fallbackSet is the definition set this state reads from another instance: the
 	// set it read when selectMBO created it, then the set that
@@ -712,10 +718,18 @@ func (e *Engine) eachMBOInstance(fn func(k refdataKey, s *mboState)) {
 //     first post-reset delta must carry per-instrument seq == recoveryK+1.
 //
 // InstrumentReset (0x14) messages call onInstrumentReset to wipe the tracker.
-func (e *Engine) checkMBO(f *wire.Frame, ch uint8) {
+//
+// corrupt is true when transport truncated or corrupted the datagram: then the
+// datagram's own messages can be the ones lost.
+func (e *Engine) checkMBO(f *wire.Frame, ch uint8, corrupt bool) {
 	e.selectMBOForDatagram(ch)
-	// The datagrams a gap before this one removed are below its Sequence Number.
-	e.syncMktdataGaps(ch, f.Header.Sequence-min(f.Header.Sequence, 1))
+	// The datagrams a gap before this one removed are below its Sequence Number. A
+	// truncated datagram lost its own tail, which can be an InstrumentReset.
+	lostTo := f.Header.Sequence - min(f.Header.Sequence, 1)
+	if corrupt {
+		lostTo = f.Header.Sequence
+	}
+	e.syncMktdataGaps(ch, lostTo)
 	frameSeq := f.Header.Sequence
 
 	// Track the first and the highest mktdata-port datagram Sequence of the era, for
@@ -1117,8 +1131,10 @@ func (e *Engine) applyDeltaSeq(ch uint8, instrID uint32, perSeq uint32, frameSeq
 //   - SNAP.ORDER_PRICE_BOUND
 func (e *Engine) checkMBOSnapshot(f *wire.Frame, ch uint8, snapPortSeq uint64) {
 	e.selectMBOForDatagram(ch)
-	// No mktdata datagram after the gap is classified yet, so the gap can have
-	// removed any Sequence Number above the highest classified one.
+	// No mktdata datagram after the gap is classified yet, so the lowest Sequence
+	// Number the gap can have removed is the one above the highest classified. The
+	// next mktdata datagram's gap check raises the bound to the last one
+	// (reseedFrom).
 	from := uint64(0)
 	if e.mbo.highestMktdataSeqSet {
 		from = e.mbo.highestMktdataSeq + 1
