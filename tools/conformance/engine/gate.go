@@ -771,12 +771,11 @@ func (e *Engine) checkBatchIDMonotonic(ch uint8, frameSeq uint64, m wire.Message
 
 // checkBatchAtomicityConsistency implements BATCH.ATOMICITY_CONSISTENCY: at a
 // BatchBoundary (0x13) the reconstructed book must be internally consistent.
-// Specifically, no live resting order may have remaining == 0; such an order is
-// an orphan that should have been removed by a prior full-fill or zero-remaining
-// execute but was not (impossible state). The book builder's applyOrderExecute
-// removes on remaining==0 during normal operation, so this is a defensive
-// boundary checkpoint — the check is non-redundant only when the book state has
-// been corrupted by an extraordinary sequence.
+// Specifically, no live resting order may have remaining == 0. An execute
+// without the full-fill flag that leaves an order at zero does not remove it
+// (see the lifecycle in book.go); the publisher removes it with an OrderCancel.
+// An order still at zero at the boundary is one whose batch ended before its
+// removal.
 //
 // BATCH.ATOMICITY_CONSISTENCY is evaluated only at BatchBoundary, not at every
 // intermediate delta, to keep the check precise and false-positive-free.
@@ -814,11 +813,31 @@ func (e *Engine) checkBatchAtomicityConsistency(ch uint8, frameSeq uint64) {
 		}
 		return cmp.Compare(a.orderID, b.orderID)
 	})
-	gated := e.instanceGapless(core.PortMktData, ch)
+	// An orphan is the publisher's only when the book is the publisher's book: the
+	// instance lost no datagram, a snapshot seeded the book and every delta since
+	// continued its series, and no duplicate delta changed it. A duplicate execute
+	// can take an order to zero in this book while the publisher's order still has
+	// quantity, and a lost delta can leave out the cancel.
+	gapless := e.instanceGapless(core.PortMktData, ch)
 	for _, o := range orphans {
-		e.Emit("BATCH.ATOMICITY_CONSISTENCY", statusFor(gated), core.PortMktData, frameSeq, ch, o.instrID,
-			fmt.Sprintf("instrument %d: live order %d has remaining=0 at BatchBoundary (orphan)",
-				o.instrID, o.orderID))
+		const rule = "BATCH.ATOMICITY_CONSISTENCY"
+		detail := fmt.Sprintf("instrument %d: live order %d has remaining=0 at BatchBoundary (orphan)",
+			o.instrID, o.orderID)
+		t := e.mbo.trackers[instrTrackerKey{ch, o.instrID}]
+		switch {
+		case !gapless:
+			e.unverified(rule, core.ReasonLoss, core.PortMktData, frameSeq, ch, o.instrID, detail)
+		case t == nil || !t.bookTrusted:
+			reason := core.ReasonColdStart
+			if t != nil && t.seeded {
+				reason = core.ReasonUntrusted
+			}
+			e.unverified(rule, reason, core.PortMktData, frameSeq, ch, o.instrID, detail)
+		case t.bookCorruptedByDup:
+			e.unverified(rule, core.ReasonReorder, core.PortMktData, frameSeq, ch, o.instrID, detail)
+		default:
+			e.Emit(rule, core.Violation, core.PortMktData, frameSeq, ch, o.instrID, detail)
+		}
 	}
 }
 
@@ -2028,8 +2047,8 @@ func (e *Engine) checkOrderExecute(ch uint8, instrID uint32, gated bool, frameSe
 			}
 		}
 
-		// Apply the book-builder mutation (quantity decrement + removal on full-fill or
-		// zero remaining). Map typed errors to quantity-conservation findings.
+		// Apply the book-builder mutation (quantity decrement + removal on full-fill).
+		// Map typed errors to quantity-conservation findings.
 		execQty := orderExecuteExecQuantity(m)
 		err := bk.applyOrderExecute(orderID, execQty, isFullFill(execFlags))
 		switch {

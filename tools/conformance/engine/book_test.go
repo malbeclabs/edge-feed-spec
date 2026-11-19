@@ -210,9 +210,9 @@ func TestBookFullFillDisagreementRemovesOrder(t *testing.T) {
 	}
 }
 
-// TestBookRemoveOnZeroRemaining: execute exactly remaining without fullFill=true
-// should still remove the order (remaining hits 0).
-func TestBookRemoveOnZeroRemaining(t *testing.T) {
+// TestBookExecuteToZeroKeepsTheOrder: execute exactly remaining without
+// fullFill=true leaves the order live at remaining 0, until its OrderCancel.
+func TestBookExecuteToZeroKeepsTheOrder(t *testing.T) {
 	bk := makeBook()
 
 	if err := bk.applyOrderAdd(3, 0, 50, 4, 0, 0); err != nil {
@@ -225,7 +225,13 @@ func TestBookRemoveOnZeroRemaining(t *testing.T) {
 	}
 
 	snap := bk.Orders()
-	if _, present := snap[3]; present {
-		t.Error("order id=3 should be removed when remaining reaches 0")
+	if ro, present := snap[3]; !present || ro.remaining != 0 {
+		t.Errorf("order id=3 got %+v (present %v), want live at remaining 0", ro, present)
+	}
+	if err := bk.applyOrderCancel(3); err != nil {
+		t.Fatalf("applyOrderCancel: unexpected error: %v", err)
+	}
+	if _, present := bk.Orders()[3]; present || !bk.removed.has(3) {
+		t.Error("the cancel should move order id=3 to removed")
 	}
 }
