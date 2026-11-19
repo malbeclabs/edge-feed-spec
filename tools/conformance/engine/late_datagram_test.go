@@ -94,3 +94,36 @@ func TestOnlyTheLastGapsAreKept(t *testing.T) {
 		t.Errorf("got %+v, want a violation for seq 1 and an Unverifiable for seq %d", got, seq-1)
 	}
 }
+
+// TestMergedSeriesStayBackwardMotion: two series far apart on one key, as when
+// the checker merged two publishers. The jump from 101 to 5000 is not a gap a
+// late datagram can come from, so each jump back is still a violation.
+func TestMergedSeriesStayBackwardMotion(t *testing.T) {
+	c := &captureAll{}
+	eng := New(Config{Feed: core.FeedTOB, ReorderWindow: 1}, c)
+	processSeqs(eng, 0, 100, 5000, 101, 5001, 102, 5002, 103)
+	eng.Flush()
+
+	if n := c.violationsFor("FRAME.SEQ_RESET_GAP"); n == 0 {
+		t.Errorf("got no FRAME.SEQ_RESET_GAP violations for two merged series: the merge must stay loud")
+	}
+	for _, f := range c.findingsFor("FRAME.SEQ_RESET_GAP") {
+		if f.Status == core.Unverifiable {
+			t.Errorf("a jump back between merged series was graded as reorder: %s", f.Detail)
+		}
+	}
+}
+
+// TestLateDatagramFromAGapAtTheBound: a gap of exactly maxLateGap still excuses
+// a late datagram from it.
+func TestLateDatagramFromAGapAtTheBound(t *testing.T) {
+	c := &captureAll{}
+	eng := New(Config{Feed: core.FeedTOB, ReorderWindow: 1}, c)
+	processSeqs(eng, 0, 1, 2, 3+maxLateGap, 4+maxLateGap, 5+maxLateGap)
+	processSeqs(eng, 0, 3)
+	eng.Flush()
+
+	if n := c.violationsFor("FRAME.SEQ_RESET_GAP"); n != 0 {
+		t.Errorf("got %d violations, want 0: the gap before %d counted seq 3 as lost", n, 3+maxLateGap)
+	}
+}

@@ -186,7 +186,8 @@ type portTracker struct {
 	hashRingPos  int
 	hashRingSize int // number of valid entries currently in the ring (≤ cap)
 	// lost holds the Sequence Number ranges that the latest forward gaps of this era
-	// counted as transport loss, oldest first, at most maxLostRanges. A datagram
+	// counted as transport loss, oldest first, at most maxLostRanges, each at most
+	// maxLateGap long. A datagram
 	// from one of them that arrives after the reorder window has moved past it is
 	// late: the path delayed it, and the publisher did not move its series
 	// backward (see Engine.classify).
@@ -281,6 +282,13 @@ type seqRange struct{ lo, hi uint64 }
 // the last maxLostRanges gaps of its era is graded as backward motion again.
 const maxLostRanges = 64
 
+// maxLateGap is the largest gap whose Sequence Numbers a late datagram can come
+// from. Reordering delays a few datagrams, so its gaps are small: a delayed
+// datagram on a live intercontinental path was 2 to 28 behind. Two series merged
+// into one (see README, "Sequencing keys on the channel instance") jump between
+// counters that are far apart, and each jump back must stay backward motion.
+const maxLateGap = 256
+
 // noteLost records that a gap counted lo..hi as transport loss.
 func (t *portTracker) noteLost(lo, hi uint64) {
 	if len(t.lost) == maxLostRanges {
@@ -361,7 +369,9 @@ func (t *portTracker) observe(seq uint64, sendTS uint64, raw []byte, era uint8) 
 		if seq > last && seq-last > 1 {
 			gap = true
 			missing = seq - last - 1
-			t.noteLost(last+1, seq-1)
+			if missing <= maxLateGap {
+				t.noteLost(last+1, seq-1)
+			}
 		}
 		// seq <= last → backward motion; handled by caller (FRAME.SEQ_RESET_GAP).
 	}
