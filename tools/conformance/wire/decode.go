@@ -84,6 +84,15 @@ func (f *Frame) walkMessages() []StructFinding {
 	// truncated is true only when the declared length is valid but exceeds the received
 	// datagram — the walker was stopped by the receive buffer, not a publisher error.
 	truncated := validDecl && end < frameLen
+	if count := int(f.Header.MsgCount); count > 0 && end > FrameHeaderLen {
+		maxPossible := (end - FrameHeaderLen) / MsgHeaderLen
+		if count > maxPossible {
+			count = maxPossible
+		}
+		if count > 0 {
+			f.Messages = make([]Message, 0, count)
+		}
+	}
 	off := FrameHeaderLen
 	for off < end {
 		if off+MsgHeaderLen > end {
