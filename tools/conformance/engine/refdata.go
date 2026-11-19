@@ -384,7 +384,7 @@ func (rs *refdataState) drop(k refdataKey) {
 
 // notifyMBO passes a newly frozen definition set to the MBO per-instrument states
 // that read it, which prune the trackers of instruments that left the set and
-// discard their open snapshot group.
+// discard an open snapshot group whose instrument left it.
 //
 //   - The MBO state of the same instance always reads it.
 //   - An MBO state at an address with no refdata instance of its own reads the set
@@ -392,9 +392,8 @@ func (rs *refdataState) drop(k refdataKey) {
 //     recently, which is this one while it freezes. It gets the set only when the
 //     set differs from the one it reads (fallbackSet: the set it read when it was
 //     created, then the last set it got). Two paths that serve one channel freeze
-//     the same set, and the second freeze is not a change: passing it on would
-//     discard the open snapshot group, and the rest of that group would read as
-//     SNAP.BEGIN_ORDER_END_GROUPING violations.
+//     the same set, and the second freeze is not a change, so there is nothing to
+//     prune.
 //   - An MBO state at an address with its own refdata instance reads only that, so
 //     another instance's set does not touch it.
 func (rs *refdataState) notifyMBO(k refdataKey, set map[uint32]struct{}) {

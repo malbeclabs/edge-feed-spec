@@ -303,7 +303,8 @@ func TestMBOInstanceSnapshotLossGatesOnlyItsOwnRules(t *testing.T) {
 			b.emptyGroup(e, instInstr, 400000)
 			b.skip(core.PortSnapshot, 5)
 			b.emptyGroup(e, instInstr, 400001)
-			a.end(e, 0, 10) // no SnapshotBegin on A
+			a.emptyGroup(e, instInstr, 9) // A is past its join
+			a.end(e, 0, 10)               // no SnapshotBegin on A
 			e.Flush()
 
 			if got := violations(ac, "SNAP.BEGIN_ORDER_END_GROUPING"); len(got) != 1 {
