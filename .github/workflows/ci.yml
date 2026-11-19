@@ -2,22 +2,61 @@ name: conformance ci
 
 on:
   pull_request:
-    paths:
-      - "tools/conformance/**"
-      - ".github/workflows/ci.yml"
   push:
     branches:
       - main
-    paths:
-      - "tools/conformance/**"
-      - ".github/workflows/ci.yml"
 
 permissions:
   contents: read
 
 jobs:
+  # Always runs, so the required `ci-ok` always reports. It decides whether
+  # the jobs below run, and on any doubt it says yes.
+  changes:
+    name: changes
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.diff.outputs.run }}
+    steps:
+      - name: checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: diff against the base
+        id: diff
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          paths=(
+            ':(glob)tools/conformance/**'
+            ':(glob).github/workflows/ci.yml'
+          )
+          # No base on a branch's first push; an unknown commit (a force push) fails the
+          # diff. Either way, run everything rather than skip on a guess.
+          if [[ -z "$BASE" || "$BASE" =~ ^0+$ ]]; then
+            echo "no base commit to diff against; running every job"
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! changed=$(git diff --name-only --no-renames "$BASE...$HEAD" -- "${paths[@]}"); then
+            echo "::warning::diff $BASE...$HEAD failed; running every job"
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [[ -n "$changed" ]]; then
+            printf 'changed:\n%s\n' "$changed"
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "no listed path changed; skipping"
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
   lint:
     name: lint
+    needs: changes
+    if: needs.changes.outputs.run == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: checkout
@@ -39,6 +78,8 @@ jobs:
 
   test:
     name: test
+    needs: changes
+    if: needs.changes.outputs.run == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: checkout
@@ -64,6 +105,8 @@ jobs:
   # rules parse and unit-tests both properties.
   alerts:
     name: alert rules
+    needs: changes
+    if: needs.changes.outputs.run == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: checkout
@@ -78,3 +121,21 @@ jobs:
             prom/prometheus:v3.6.0 check rules /p/alerts/conformance.yml
           docker run --rm --entrypoint promtool -v "$PWD/prometheus:/p" \
             prom/prometheus:v3.6.0 test rules /p/rule_tests/conformance_test.yml
+
+  # The one check to require from this workflow. `changes` is listed too: if it
+  # failed, every job above would be skipped, and a skip alone must not pass.
+  ci-ok:
+    name: ci-ok
+    if: always()
+    needs: [changes, lint, test, alerts]
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: every needed job passed or was skipped
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "results: $RESULTS"
+          for r in $RESULTS; do
+            case "$r" in success|skipped) ;; *) exit 1 ;; esac
+          done
