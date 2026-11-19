@@ -245,6 +245,7 @@ var snapshotDriven = map[string]struct{}{
 // snapshotDriven and are not reported as NA. But no run without the port can pass
 // or fail them, so reportStarvedRules names them too.
 var seedGated = map[string]struct{}{
+	"BATCH.ATOMICITY_CONSISTENCY":    {},
 	"FIELD.SOURCE_ID_CONSISTENCY":    {},
 	"REF.CANCEL_DANGLING_ORDER":      {},
 	"REF.DUPLICATE_LIVE_ORDERADD":    {},

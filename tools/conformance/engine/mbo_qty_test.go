@@ -310,10 +310,9 @@ func TestFullFillFlagDisagreement(t *testing.T) {
 
 // TestBatchAtomicityConsistency: orphan live order (remaining==0) at BatchBoundary.
 //
-// The book builder's applyOrderExecute always removes an order when remaining
-// reaches zero during normal operation. This check is therefore a defensive
-// boundary assertion; the only way to trigger it in unit tests is to directly
-// inject a zero-remaining live order into the book state before the boundary.
+// These subtests inject the zero-remaining order into the book state. The
+// deltas that leave one there, an execute to zero without the full-fill flag
+// and no cancel before the boundary, are in mbo_exhausted_test.go.
 func TestBatchAtomicityConsistency(t *testing.T) {
 	const ch, instrID = uint8(1), uint32(220)
 	const orderID = uint64(221)
@@ -343,10 +342,7 @@ func TestBatchAtomicityConsistency(t *testing.T) {
 	})
 
 	t.Run("violation_orphan_zero_remaining", func(t *testing.T) {
-		// Inject a zero-remaining live order directly into the book state to simulate
-		// the impossible state that BATCH.ATOMICITY_CONSISTENCY guards against.
-		// (This state cannot occur through normal apply calls; it represents a
-		// corrupted or externally-modified book.)
+		// Inject a zero-remaining live order directly into the book state.
 		e, ac := newMBOEngineW1()
 		seq := seedGaplessHistory(e, ch, instrID, 3, 1)
 		clearFindings(ac)
@@ -418,6 +414,9 @@ func TestBatchAtomicityConsistency(t *testing.T) {
 		e.Flush()
 
 		for _, fn := range findingsFor(ac, "BATCH.ATOMICITY_CONSISTENCY") {
+			if fn.Status == core.Unverifiable && fn.Reason != core.ReasonLoss {
+				t.Errorf("mktdata gap: reason %q, want %q", fn.Reason, core.ReasonLoss)
+			}
 			if fn.Status == core.Violation {
 				t.Errorf("mktdata gap must produce Unverifiable for BATCH.ATOMICITY_CONSISTENCY, got Violation: %s", fn.Detail)
 			}

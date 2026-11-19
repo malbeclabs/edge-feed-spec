@@ -121,7 +121,7 @@ var ruleDocs = map[string]RuleDoc{
 
 	// --- MBO quantity conservation (full book) ---
 	"REF.EXEC_OVERFILL":              {"Execute Quantity ≤ resting remaining; cumulative fills ≤ entry quantity (hidden orders exempt)."},
-	"REF.FULLFILL_FLAG_DISAGREEMENT": {"The full-fill flag is set exactly when an execute drives remaining quantity to zero (hidden exempt)."},
+	"REF.FULLFILL_FLAG_DISAGREEMENT": {"An execute with the full-fill flag takes remaining quantity to exactly zero (hidden exempt). An execute to zero without the flag leaves the order for its OrderCancel."},
 	"FIELD.ORDERADD_PRICE_BOUND":     {"OrderAdd.Price respects the instrument's Price Bound (e.g. [0,1] for binary outcomes)."},
 	"REF.EXEC_PRICE_BOUND":           {"OrderExecute.Exec Price respects the instrument's Price Bound."},
 	"BATCH.ATOMICITY_CONSISTENCY":    {"At each BatchBoundary the reconstructed book has no negative-remaining or orphaned orders."},
