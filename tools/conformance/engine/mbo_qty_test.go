@@ -352,10 +352,7 @@ func TestBatchAtomicityConsistency(t *testing.T) {
 		e.selectMBO(ch)
 		bk := e.mbo.book.book(ch, instrID)
 		// Directly inject a zero-remaining live order.
-		bk.live[orderID] = liveOrder{
-			side:      1,
-			remaining: 0, // orphan: should have been removed
-		}
+		_ = bk.applyOrderAddFull(orderID, 0, 1, 0, 0 /* qty */, 0, 0) // orphan: should have been removed
 
 		// BatchBoundary should detect the orphan and emit BATCH.ATOMICITY_CONSISTENCY.
 		runMktdataSeq(e, buildBatchBoundaryFrame(ch, 1), seq)
@@ -377,7 +374,7 @@ func TestBatchAtomicityConsistency(t *testing.T) {
 		e.curSrc = srcA
 		e.selectMBO(ch)
 		bk := e.mbo.book.book(ch, instrID)
-		bk.live[orderID] = liveOrder{side: 0, remaining: 0}
+		_ = bk.applyOrderAddFull(orderID, 0, 0, 0, 0 /* qty */, 0, 0)
 
 		// Send an OrderAdd delta (not a boundary) — must NOT trigger BATCH.ATOMICITY_CONSISTENCY.
 		const orderID3 = uint64(223)
@@ -408,7 +405,7 @@ func TestBatchAtomicityConsistency(t *testing.T) {
 		e.curSrc = srcA
 		e.selectMBO(ch)
 		bk := e.mbo.book.book(ch, instrID)
-		bk.live[orderID] = liveOrder{side: 1, remaining: 0}
+		_ = bk.applyOrderAddFull(orderID, 0, 1, 0, 0 /* qty */, 0, 0)
 
 		// Create a mktdata channel gap (skip seq=2, send seq=3 → dirtyWindow=true).
 		runMktdataSeq(e, buildOrderAddWithQty(ch, instrID, 1, 90001, 10), 1)
@@ -425,4 +422,30 @@ func TestBatchAtomicityConsistency(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestBatchAtomicityOrphanLifetime: the check reads the orders that a delta left
+// at zero remaining. An orphan that stays is reported at each BatchBoundary, and
+// one that a cancel removed is not.
+func TestBatchAtomicityOrphanLifetime(t *testing.T) {
+	const ch, instrID = uint8(1), uint32(230)
+	count := func(ac *allCapture) int { return len(findingsFor(ac, "BATCH.ATOMICITY_CONSISTENCY")) }
+
+	e, ac := newMBOEngineW1()
+	seq := seedGaplessHistory(e, ch, instrID, 3, 1)
+	runMktdataSeq(e, buildOrderAddWithQty(ch, instrID, 4, 231, 0), seq) // Quantity 0
+	runMktdataSeq(e, buildBatchBoundaryFrame(ch, 1), seq+1)
+	runMktdataSeq(e, buildBatchBoundaryFrame(ch, 2), seq+2)
+	e.Flush()
+	if n := count(ac); n != 2 {
+		t.Errorf("an orphan that stays: %d findings at two BatchBoundaries, want 2", n)
+	}
+
+	clearFindings(ac)
+	runMktdataSeq(e, buildOrderCancelFull(ch, instrID, 5, 231, 0), seq+3)
+	runMktdataSeq(e, buildBatchBoundaryFrame(ch, 3), seq+4)
+	e.Flush()
+	if n := count(ac); n != 0 {
+		t.Errorf("after its cancel: %d findings, want 0", n)
+	}
 }

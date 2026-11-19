@@ -57,6 +57,8 @@ import (
 	"errors"
 	"maps"
 	"slices"
+
+	"github.com/malbeclabs/edge-feed-spec/tools/conformance/wire"
 )
 
 // The per-instrument limits of the idWindow sets. A full window costs about 68
@@ -161,6 +163,19 @@ type instrBook struct {
 	// execTradeIDs holds the most recent maxExecTradeIDs Trade IDs seen in
 	// OrderExecute messages. Used by TRADE.EXEC_GROUPING.
 	execTradeIDs *idWindow
+	// zeroed holds the IDs of live orders that an OrderAdd or an OrderExecute left
+	// at zero remaining. Only those two can, so BATCH.ATOMICITY_CONSISTENCY reads
+	// these IDs at a BatchBoundary instead of every live order of every book.
+	zeroed []uint64
+	// log holds the deltas this book applied in per-instrument seq order, so
+	// that a snapshot group can seed or audit the book after the book moved past
+	// the group's Last Instrument Seq (see deltaLog).
+	log deltaLog
+	// seedDroppedZeros holds the IDs of orders at zero remaining that the last seed
+	// dropped from the book. A SnapshotOrder has Quantity > 0, so a snapshot taken
+	// between an execute to zero and its OrderCancel leaves the order out. The
+	// publisher's cancel of such an order is not dangling (checkOrderCancel).
+	seedDroppedZeros map[uint64]struct{}
 }
 
 func newInstrBook() *instrBook {
@@ -196,6 +211,9 @@ func (bk *instrBook) applyOrderAddFull(orderID uint64, sourceID uint16, side uin
 		orderFlags: orderFlags,
 		enterTS:    enterTS,
 	}
+	if qty == 0 {
+		bk.zeroed = append(bk.zeroed, orderID)
+	}
 	bk.removed.remove(orderID)
 	return nil
 }
@@ -208,6 +226,7 @@ func (bk *instrBook) applyOrderAddFull(orderID uint64, sourceID uint16, side uin
 // contradict that.
 func (bk *instrBook) seed(orders map[uint64]snapOrderRecord) {
 	clear(bk.live)
+	bk.zeroed = bk.zeroed[:0]
 	for _, id := range slices.Sorted(maps.Keys(orders)) {
 		o := orders[id]
 		_ = bk.applyOrderAddFull(id, 0, o.side, o.price, o.qty, o.orderFlags, o.enterTS)
@@ -279,6 +298,9 @@ func (bk *instrBook) applyOrderExecute(orderID uint64, execQty uint64, fullFill 
 	}
 
 	bk.live[orderID] = lo
+	if lo.remaining == 0 {
+		bk.zeroed = append(bk.zeroed, orderID)
+	}
 	return nil
 }
 
@@ -372,4 +394,201 @@ func isHidden(orderFlags uint8) bool {
 // isFullFill returns true when ExecFlags bit 0 is set (full fill / last partial).
 func isFullFill(execFlags uint8) bool {
 	return execFlags&0x01 != 0
+}
+
+// applyDelta changes the book as one OrderAdd, OrderCancel or OrderExecute
+// changes it. checkMBORef applies each delta with it, and a seed or an audit
+// applies the logged deltas after a snapshot with it, so both change a book in
+// the same way.
+//
+// An OrderExecute or an OrderCancel for an order that is not live changes
+// nothing. The referential checks report it.
+func (bk *instrBook) applyDelta(m wire.Message) error {
+	switch m.Type {
+	case wire.TypeOrderAdd:
+		return bk.applyOrderAddFull(orderAddOrderID(m), orderAddSourceID(m), orderAddSide(m),
+			orderAddPrice(m), orderAddQuantity(m), orderAddOrderFlags(m), orderAddEnterTimestamp(m))
+	case wire.TypeOrderCancel:
+		return bk.applyOrderCancel(orderCancelOrderID(m))
+	case wire.TypeOrderExecute:
+		id := orderExecuteOrderID(m)
+		if _, live := bk.live[id]; !live {
+			return nil
+		}
+		return bk.applyOrderExecute(id, orderExecuteExecQuantity(m), isFullFill(orderExecuteExecFlags(m)))
+	}
+	return nil
+}
+
+// seedAndReplay replaces the live set with the orders of a snapshot group taken
+// at per-instrument seq k, then applies the logged deltas after k. The result is
+// the book at the last logged delta, built from the snapshot. The caller checks
+// log.covers first.
+//
+// A seed also records, in each logged delta, whether its order is in the seeded
+// book. The book was not trusted when the delta first arrived, so the record of
+// that time can be wrong, and the oracle reads it (replayedSnapshot).
+//
+// An order the book holds at zero remaining, which the snapshot does not hold, is
+// recorded in seedDroppedZeros: its cancel can follow the seed.
+func (bk *instrBook) seedAndReplay(orders map[uint64]snapOrderRecord, k uint32, log *deltaLog) {
+	clear(bk.seedDroppedZeros)
+	for id, lo := range bk.live {
+		if _, inSnap := orders[id]; !inSnap && lo.remaining == 0 && !isHidden(lo.orderFlags) {
+			if bk.seedDroppedZeros == nil {
+				bk.seedDroppedZeros = make(map[uint64]struct{})
+			}
+			bk.seedDroppedZeros[id] = struct{}{}
+		}
+	}
+	bk.seed(orders)
+	log.eachAfter(k, func(d *loggedDelta) {
+		m := d.message()
+		lo, found := bk.live[deltaOrderID(m)]
+		d.setFound(found, lo)
+		_ = bk.applyDelta(m)
+	})
+}
+
+// orderFieldsHash hashes the fields of a live order that a snapshot also carries
+// (side, price, remaining, flags, enter timestamp), so that a logged delta can
+// record the order it found in a few bytes. The zero order has a hash too, which
+// a delta that found no order records and nothing reads.
+func orderFieldsHash(o liveOrder) uint64 {
+	h := uint64(14695981039346656037) // FNV-1a offset basis
+	for _, v := range [...]uint64{uint64(o.side), uint64(o.price), o.remaining, uint64(o.orderFlags), o.enterTS} {
+		h ^= v
+		h *= 1099511628211 // FNV-1a prime
+	}
+	return h
+}
+
+// maxDeltaLog limits the deltas that the log of one instrument keeps. A group
+// close removes the deltas at or below its Last Instrument Seq, so the log of
+// an instrument holds the deltas since its last snapshot group, and only a busy
+// instrument reaches the limit. An entry is 72 bytes, so a full log is 288 KiB. Measured on a 30-minute capture of two
+// busy feeds, 68,277 groups: when a group closed, the book was at most 1,878
+// deltas past its Last Instrument Seq, 200 to 342 at the 99th percentile. It is
+// a variable so that tests can use a small limit.
+var maxDeltaLog = 4096
+
+// maxLoggedBody is the largest delta body: an OrderExecute is 56 bytes, 52
+// after its message header.
+const maxLoggedBody = 52
+
+// loggedDelta is one delta of a deltaLog: the message, its per-instrument seq,
+// whether its order was live in the book before the delta, and if so whether it
+// was at zero remaining and the hash of its fields (orderFieldsHash).
+type loggedDelta struct {
+	fields uint64
+	seq    uint32
+	typ    uint8
+	length uint8
+	n      uint8
+	found  bool
+	zero   bool
+	body   [maxLoggedBody]byte
+}
+
+// setFound records the order the delta found in the book: found, and lo if found.
+func (d *loggedDelta) setFound(found bool, lo liveOrder) {
+	d.found, d.zero, d.fields = found, found && lo.remaining == 0, orderFieldsHash(lo)
+}
+
+func (d *loggedDelta) message() wire.Message {
+	return wire.Message{Type: d.typ, Length: d.length, Body: d.body[:d.n]}
+}
+
+// deltaLog keeps the most recent deltas of one instrument, with contiguous
+// per-instrument seqs. market-by-order/spec.md, Cold Start steps 5 and 6, has a
+// subscriber apply a snapshot group, then the deltas after its Last Instrument
+// Seq (K). The engine applies deltas as they arrive, so on a busy instrument the
+// book is past K when the group closes. The log keeps the deltas after K, and a
+// seed or an audit applies them to the snapshot book.
+//
+// A delta with a seq that does not follow the last entry is not one more step of
+// the same history. A later seq (a jump) starts a new log. An earlier or equal
+// seq (a duplicate or a late delta) is not logged.
+//
+// The entries are a ring. It grows to maxDeltaLog entries, then each new entry
+// replaces the oldest.
+type deltaLog struct {
+	buf   []loggedDelta
+	start int // index in buf of the oldest entry
+	n     int // number of entries
+}
+
+func (l *deltaLog) at(i int) *loggedDelta { return &l.buf[(l.start+i)%len(l.buf)] }
+
+// record logs delta m with per-instrument seq seq. found is whether its order
+// was live in the book before m, and lo that order.
+func (l *deltaLog) record(seq uint32, m wire.Message, found bool, lo liveOrder) {
+	if len(m.Body) > maxLoggedBody {
+		l.clear()
+		return
+	}
+	if l.n > 0 {
+		last := l.at(l.n - 1).seq
+		if seq <= last {
+			return
+		}
+		if seq != last+1 {
+			l.clear()
+		}
+	}
+	if l.n == len(l.buf) {
+		if len(l.buf) < maxDeltaLog {
+			l.grow()
+		} else {
+			l.start = (l.start + 1) % len(l.buf)
+			l.n--
+		}
+	}
+	d := l.at(l.n)
+	*d = loggedDelta{seq: seq, typ: m.Type, length: m.Length, n: uint8(len(m.Body))}
+	d.setFound(found, lo)
+	copy(d.body[:], m.Body)
+	l.n++
+}
+
+// grow doubles the ring, up to maxDeltaLog entries, with the entries oldest first.
+func (l *deltaLog) grow() {
+	nb := make([]loggedDelta, min(max(2*len(l.buf), 16), maxDeltaLog))
+	for i := range l.n {
+		nb[i] = *l.at(i)
+	}
+	l.buf, l.start = nb, 0
+}
+
+// covers reports whether the log holds every delta from k+1 to last, the
+// per-instrument seq of the book. A book at k needs no delta.
+func (l *deltaLog) covers(k, last uint32) bool {
+	if last == k {
+		return true
+	}
+	return last > k && l.n > 0 && l.at(0).seq <= k+1 && l.at(l.n-1).seq == last
+}
+
+// eachAfter calls fn for each logged delta with a seq above k, oldest first.
+func (l *deltaLog) eachAfter(k uint32, fn func(*loggedDelta)) {
+	for i := range l.n {
+		if d := l.at(i); d.seq > k {
+			fn(d)
+		}
+	}
+}
+
+// trimThrough removes the deltas at or below k. A later snapshot group of the
+// instrument has a Last Instrument Seq of at least k, so it does not need them.
+func (l *deltaLog) trimThrough(k uint32) {
+	if l.n == 0 || l.at(0).seq > k {
+		return
+	}
+	drop := min(int(k-l.at(0).seq)+1, l.n)
+	l.start = (l.start + drop) % len(l.buf)
+	l.n -= drop
+}
+
+func (l *deltaLog) clear() {
+	l.start, l.n = 0, 0
 }

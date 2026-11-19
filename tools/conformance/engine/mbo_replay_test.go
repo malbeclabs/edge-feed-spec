@@ -1,0 +1,446 @@
+package engine
+
+// mbo_replay_test.go — a snapshot group seeds or audits a book that is past the
+// group's Last Instrument Seq, from the logged deltas after it.
+//
+// market-by-order/spec.md, Cold Start: a subscriber applies a complete snapshot
+// group (step 5), then the deltas after its Last Instrument Seq K (step 6). On a
+// busy instrument the deltas after K arrive while the group is on the snapshot
+// port, so the book is past K when the group closes. malbeclabs/edge-feed-spec#130:
+// the validator seeded only a book at K, so the busiest instruments never
+// seeded, and the oracle compared only a book at K.
+
+import (
+	"maps"
+	"slices"
+	"strings"
+	"testing"
+	"unsafe"
+
+	"github.com/malbeclabs/edge-feed-spec/tools/conformance/core"
+	"github.com/malbeclabs/edge-feed-spec/tools/conformance/wire"
+)
+
+// withDeltaLogLimit sets maxDeltaLog for one test.
+func withDeltaLogLimit(t *testing.T, n int) {
+	t.Helper()
+	old := maxDeltaLog
+	maxDeltaLog = n
+	t.Cleanup(func() { maxDeltaLog = old })
+}
+
+// deltaMsg decodes the one message of a datagram.
+func deltaMsg(t *testing.T, raw []byte) wire.Message {
+	t.Helper()
+	f, _ := wire.Decode(raw, wire.MagicMBO)
+	if len(f.Messages) != 1 {
+		t.Fatalf("datagram has %d messages, want 1", len(f.Messages))
+	}
+	return f.Messages[0]
+}
+
+// logSeqs returns the per-instrument seqs a log holds.
+func logSeqs(l *deltaLog) []uint32 {
+	var out []uint32
+	l.eachAfter(0, func(d *loggedDelta) { out = append(out, d.seq) })
+	return out
+}
+
+// TestDeltaLog: the log keeps the most recent deltas with contiguous seqs.
+func TestDeltaLog(t *testing.T) {
+	cancel := func(seq uint32) wire.Message {
+		return deltaMsg(t, buildOrderCancelFull(instCh, instInstr, seq, uint64(seq), 0))
+	}
+	record := func(l *deltaLog, seqs ...uint32) {
+		for _, s := range seqs {
+			l.record(s, cancel(s), false, liveOrder{})
+		}
+	}
+
+	t.Run("entry size", func(t *testing.T) {
+		// maxDeltaLog's comment sizes a full log from this.
+		if got := unsafe.Sizeof(loggedDelta{}); got != 72 {
+			t.Errorf("loggedDelta is %d bytes, the comment on maxDeltaLog says 72", got)
+		}
+	})
+	t.Run("contiguous", func(t *testing.T) {
+		var l deltaLog
+		record(&l, 5, 6, 7)
+		if !l.covers(4, 7) || !l.covers(6, 7) || l.covers(3, 7) || l.covers(4, 8) {
+			t.Errorf("covers wrong for log %v", logSeqs(&l))
+		}
+		var after []uint32
+		l.eachAfter(5, func(d *loggedDelta) { after = append(after, d.seq) })
+		if !slices.Equal(after, []uint32{6, 7}) {
+			t.Errorf("eachAfter(5) = %v, want [6 7]", after)
+		}
+		if !(&deltaLog{}).covers(9, 9) {
+			t.Error("a book at K needs no delta, so an empty log covers it")
+		}
+	})
+	t.Run("duplicate and late are not logged", func(t *testing.T) {
+		var l deltaLog
+		record(&l, 5, 6, 6, 4, 7)
+		if got := logSeqs(&l); !slices.Equal(got, []uint32{5, 6, 7}) {
+			t.Errorf("log %v, want [5 6 7]", got)
+		}
+	})
+	t.Run("a jump starts a new log", func(t *testing.T) {
+		var l deltaLog
+		record(&l, 5, 6, 8, 9)
+		if got := logSeqs(&l); !slices.Equal(got, []uint32{8, 9}) {
+			t.Errorf("log %v, want [8 9]", got)
+		}
+		if l.covers(5, 9) {
+			t.Error("delta 7 is missing, so the log must not cover 6 to 9")
+		}
+	})
+	t.Run("limit drops the oldest", func(t *testing.T) {
+		withDeltaLogLimit(t, 3)
+		var l deltaLog
+		for s := uint32(1); s <= 1000; s++ {
+			record(&l, s)
+		}
+		if got := logSeqs(&l); !slices.Equal(got, []uint32{998, 999, 1000}) {
+			t.Errorf("log %v, want [998 999 1000]", got)
+		}
+		if len(l.buf) > maxDeltaLog {
+			t.Errorf("ring holds %d entries, limit %d", len(l.buf), maxDeltaLog)
+		}
+		if !l.covers(997, 1000) || l.covers(996, 1000) {
+			t.Error("the log covers 998 to 1000 and nothing before")
+		}
+	})
+	t.Run("trim", func(t *testing.T) {
+		var l deltaLog
+		record(&l, 5, 6, 7, 8)
+		l.trimThrough(6)
+		if got := logSeqs(&l); !slices.Equal(got, []uint32{7, 8}) {
+			t.Errorf("after trimThrough(6): %v, want [7 8]", got)
+		}
+		l.trimThrough(3)
+		if got := logSeqs(&l); !slices.Equal(got, []uint32{7, 8}) {
+			t.Errorf("after trimThrough(3): %v, want [7 8]", got)
+		}
+		l.trimThrough(8)
+		if got := logSeqs(&l); len(got) != 0 {
+			t.Errorf("after trimThrough(8): %v, want empty", got)
+		}
+	})
+}
+
+// TestSeedAndReplay: the snapshot book at K, with the deltas after K applied,
+// is the book at the last delta. Deltas at or below K are already in the
+// snapshot and are not applied again.
+func TestSeedAndReplay(t *testing.T) {
+	var l deltaLog
+	// The found flags are wrong on purpose: the book was not trusted when these
+	// deltas arrived. The seed records them again from the seeded book.
+	l.record(10, deltaMsg(t, buildOrderExecuteWithQty(instCh, instInstr, 10, 1, 0, 2)), false, liveOrder{}) // in the snapshot already
+	l.record(11, deltaMsg(t, buildOrderExecuteWithQty(instCh, instInstr, 11, 1, 0, 3)), false, liveOrder{}) // 10 → 7
+	l.record(12, deltaMsg(t, buildOrderAddWithQty(instCh, instInstr, 12, 2, 4)), true, liveOrder{})
+	l.record(13, deltaMsg(t, buildOrderCancelFull(instCh, instInstr, 13, 3, 0)), false, liveOrder{})
+	l.record(14, deltaMsg(t, buildOrderExecuteWithQty(instCh, instInstr, 14, 9, 0, 1)), true, liveOrder{}) // not live: no change
+
+	bk := newInstrBook()
+	bk.seedAndReplay(map[uint64]snapOrderRecord{1: {qty: 10}, 3: {qty: 5}}, 10, &l)
+	got := bk.Orders()
+	if ids := slices.Sorted(maps.Keys(got)); !slices.Equal(ids, []uint64{1, 2}) {
+		t.Fatalf("live orders %v, want [1 2]", ids)
+	}
+	if got[1].remaining != 7 || got[2].remaining != 4 {
+		t.Errorf("remaining: order 1 %d (want 7), order 2 %d (want 4)", got[1].remaining, got[2].remaining)
+	}
+	if !bk.removed.has(3) {
+		t.Error("the cancel after K must move order 3 to removed")
+	}
+	var found []bool
+	l.eachAfter(10, func(d *loggedDelta) { found = append(found, d.found) })
+	if !slices.Equal(found, []bool{true, false, true, false}) {
+		t.Errorf("found flags after the seed %v, want [true false true false]", found)
+	}
+	// And the fields of the order each delta found in the seeded book: order 1 at
+	// 10 before delta 11, order 3 at 5 before delta 13.
+	var fields []uint64
+	l.eachAfter(10, func(d *loggedDelta) { fields = append(fields, d.fields) })
+	if fields[0] != orderFieldsHash(liveOrder{remaining: 10}) || fields[2] != orderFieldsHash(liveOrder{remaining: 5}) {
+		t.Error("the seed must record the fields of the order each delta finds in the seeded book")
+	}
+}
+
+// TestBusyBookSeedsFromLoggedDeltas: the book is past K when the group closes,
+// and the log holds every delta after K. The group seeds the book, and the
+// deltas after it are graded.
+func TestBusyBookSeedsFromLoggedDeltas(t *testing.T) {
+	e, ac, a := readyPub(t)
+	a.add(e, 50, 7)
+	a.add(e, 51, 8)
+	a.cancel(e, 52, 7)
+	e.Flush()
+	a.group(e, 0, 7, 50, 7) // the snapshot at 50 holds order 7
+	e.Flush()
+
+	e.curSrc = srcA
+	e.selectMBO(instCh)
+	bk := e.mbo.book.book(instCh, instInstr)
+	if ids := slices.Sorted(maps.Keys(bk.Orders())); !slices.Equal(ids, []uint64{8}) {
+		t.Errorf("seeded book %v, want [8]: order 7 from the snapshot, then add 8 and cancel 7", ids)
+	}
+	if got := logSeqs(&bk.log); !slices.Equal(got, []uint32{51, 52}) {
+		t.Errorf("log after the group %v, want [51 52]: the group close trims through K", got)
+	}
+
+	clearFindings(ac)
+	a.cancel(e, 53, 8)   // the replayed add
+	a.cancel(e, 54, 999) // announced by nobody
+	a.cancel(e, 55, 7)   // the replayed cancel removed it
+	e.Flush()
+	if v, _ := danglingCancels(ac); v != 1 {
+		t.Errorf("got %d REF.CANCEL_DANGLING_ORDER violations, want 1 (order 999)%s", v, describe(ac.findings))
+	}
+	if !hasViolation(ac, "REF.OPERATION_AFTER_REMOVAL") {
+		t.Errorf("a cancel of order 7 after its cancel must be REF.OPERATION_AFTER_REMOVAL%s", describe(ac.findings))
+	}
+}
+
+// TestSeedNeedsTheLogToReachK: the same feed seeds with a log that reaches back
+// to K+1, and does not seed with a log that does not.
+func TestSeedNeedsTheLogToReachK(t *testing.T) {
+	run := func(t *testing.T, limit, wantViolations int) {
+		withDeltaLogLimit(t, limit)
+		e, ac, a := readyPub(t)
+		a.add(e, 50, 7)
+		a.add(e, 51, 8)
+		a.add(e, 52, 9)
+		e.Flush()
+		a.group(e, 0, 7, 50, 7)
+		e.Flush()
+		clearFindings(ac)
+		a.cancel(e, 53, 999)
+		e.Flush()
+		if v, _ := danglingCancels(ac); v != wantViolations {
+			t.Errorf("got %d REF.CANCEL_DANGLING_ORDER violations, want %d%s", v, wantViolations, describe(ac.findings))
+		}
+	}
+	t.Run("log holds 51 and 52", func(t *testing.T) { run(t, 2, 1) })
+	t.Run("log holds 52 only", func(t *testing.T) { run(t, 1, 0) })
+}
+
+// TestOracleComparesABookPastK: the book is trusted and past K. The oracle
+// compares it with the snapshot book plus the logged deltas after K: a correct
+// snapshot matches, and a snapshot that omits a resting order does not.
+func TestOracleComparesABookPastK(t *testing.T) {
+	const ch, instrID = uint8(1), uint32(320)
+	run := func(snapIDs ...uint64) *oracleCapture {
+		e, oc := newOracleEngine(2)
+		reachedReadyMBO(e, ch, instrID, 0, 1)
+		seedEmptyBooks(e, ch, instrID)
+		runMktdataSeq(e, buildOrderAddExact(ch, instrID, 1, 80001, 0, 0, 1000, 100, 10), 1)
+		runMktdataSeq(e, buildOrderAddExact(ch, instrID, 2, 80002, 1, 0, 2000, 200, 5), 2)
+		runMktdataSeq(e, buildOrderAddExact(ch, instrID, 3, 80003, 1, 0, 3000, 300, 5), 3)
+		e.Flush()
+		oc.auditResults = nil
+		var orders [][]byte
+		for _, id := range snapIDs {
+			o := map[uint64][]byte{
+				80001: buildSnapOrderFields(ch, 10, 80001, 0, 0, 1000, 100, 10),
+				80002: buildSnapOrderFields(ch, 10, 80002, 1, 0, 2000, 200, 5),
+			}[id]
+			orders = append(orders, o)
+		}
+		completeSnapshot(e, ch, instrID, 2, 10, 2 /* K: the book is at 3 */, orders, 1)
+		return oc
+	}
+	if got := run(80001, 80002).lastAudit(); got != "match" {
+		t.Errorf("correct snapshot at K=2, book at 3: audit %q, want match", got)
+	}
+	if got := run(80001).lastAudit(); got != "mismatch_suspected" {
+		t.Errorf("snapshot without order 80002: audit %q, want mismatch_suspected", got)
+	}
+}
+
+// TestDeltaLogFollowsTheTracker: every delta that moves the tracker forward by
+// one is logged, so the log ends where the tracker is. The seed and the oracle
+// read that.
+func TestDeltaLogFollowsTheTracker(t *testing.T) {
+	e, _, a := readyPub(t)
+	for s := uint32(1); s <= 5; s++ {
+		a.add(e, s, uint64(s))
+	}
+	a.add(e, 7, 7) // a jump
+	a.cancel(e, 8, 7)
+	a.send(e, core.PortMktData, buildOrderCancelFull(instCh, instInstr, 6, 6, 0)) // late
+	e.Flush()
+	e.curSrc = srcA
+	e.selectMBO(instCh)
+	tr := e.mbo.tracker(instCh, instInstr)
+	if got := logSeqs(&e.mbo.book.book(instCh, instInstr).log); !slices.Equal(got, []uint32{7, 8}) || *tr.lastInstrSeq != 8 {
+		t.Errorf("log %v with the tracker at %d, want [7 8] at 8", got, *tr.lastInstrSeq)
+	}
+}
+
+// TestOracleFindsADefectThatALaterDeltaHides: a delta after K can remove the
+// evidence of a snapshot defect. The delta book has order 80002 at K, and delta 3
+// cancels it. A snapshot at K without 80002 replays to the same book as the delta
+// book, but delta 3 found its order in one book and not the other; so does a
+// snapshot with 80002 at a wrong quantity, and a snapshot with order 80003, which
+// delta 3 adds. The diff has the label diffBooks gives the same defect.
+func TestOracleFindsADefectThatALaterDeltaHides(t *testing.T) {
+	const ch, instrID = uint8(1), uint32(321)
+	run := func(delta3 []byte, snapOrders ...[]byte) (string, string) {
+		e, oc := newOracleEngine(2)
+		reachedReadyMBO(e, ch, instrID, 0, 1)
+		seedEmptyBooks(e, ch, instrID)
+		runMktdataSeq(e, buildOrderAddExact(ch, instrID, 1, 80001, 0, 0, 1000, 100, 10), 1)
+		runMktdataSeq(e, buildOrderAddExact(ch, instrID, 2, 80002, 1, 0, 2000, 200, 5), 2)
+		runMktdataSeq(e, delta3, 3)
+		e.Flush()
+		oc.auditResults = nil
+		clearFindings(&oc.allCapture)
+		completeSnapshot(e, ch, instrID, 2, 10, 2 /* K: the book is at 3 */, snapOrders, 1)
+		detail := ""
+		if got := findingsFor(&oc.allCapture, "SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT"); len(got) > 0 {
+			detail = got[len(got)-1].Detail
+		}
+		return oc.lastAudit(), detail
+	}
+	o1 := buildSnapOrderFields(ch, 10, 80001, 0, 0, 1000, 100, 10)
+	o2 := buildSnapOrderFields(ch, 10, 80002, 1, 0, 2000, 200, 5)
+	o2qty := buildSnapOrderFields(ch, 10, 80002, 1, 0, 2000, 200, 7)
+	o3 := buildSnapOrderFields(ch, 10, 80003, 1, 0, 3000, 300, 5)
+	cancel2 := buildOrderCancelFull(ch, instrID, 3, 80002, 0)
+	add3 := buildOrderAddExact(ch, instrID, 3, 80003, 1, 0, 3000, 300, 5)
+
+	if got, _ := run(cancel2, o1, o2); got != "match" {
+		t.Errorf("correct snapshot, then cancel 80002: audit %q, want match", got)
+	}
+	for _, c := range []struct {
+		name  string
+		delta []byte
+		snap  [][]byte
+		label string
+	}{
+		{"snapshot without 80002, then cancel 80002", cancel2, [][]byte{o1}, "80002:extra_in_delta"},
+		{"snapshot with 80002 at quantity 7, then cancel 80002", cancel2, [][]byte{o1, o2qty}, "80002:fields"},
+		{"snapshot with 80003, then add 80003", add3, [][]byte{o1, o2, o3}, "80003:missing_in_delta"},
+	} {
+		got, detail := run(c.delta, c.snap...)
+		if got != "mismatch_suspected" || !strings.HasSuffix(detail, c.label) {
+			t.Errorf("%s: audit %q, detail %q, want mismatch_suspected ending in %s", c.name, got, detail, c.label)
+		}
+	}
+}
+
+// TestOracleConfirmsADefectThatDeltasTouch: the snapshot omits order 80002 in two
+// cycles. In the first, two deltas after K execute 80002; in the second, no delta
+// touches it. The divergence has one signature, so the second cycle confirms it.
+func TestOracleConfirmsADefectThatDeltasTouch(t *testing.T) {
+	const ch, instrID = uint8(1), uint32(322)
+	e, oc := newOracleEngine(2)
+	reachedReadyMBO(e, ch, instrID, 0, 1)
+	seedEmptyBooks(e, ch, instrID)
+	runMktdataSeq(e, buildOrderAddExact(ch, instrID, 1, 80001, 0, 0, 1000, 100, 10), 1)
+	runMktdataSeq(e, buildOrderAddExact(ch, instrID, 2, 80002, 1, 0, 2000, 200, 5), 2)
+	runMktdataSeq(e, buildOrderExecuteWithQty(ch, instrID, 3, 80002, 0, 1), 3)
+	runMktdataSeq(e, buildOrderExecuteWithQty(ch, instrID, 4, 80002, 0, 1), 4)
+	e.Flush()
+	oc.auditResults = nil
+	o1 := func(id uint32) []byte { return buildSnapOrderFields(ch, id, 80001, 0, 0, 1000, 100, 10) }
+	snapSeq := completeSnapshot(e, ch, instrID, 2, 10, 2 /* K: the book is at 4 */, [][]byte{o1(10)}, 1)
+	completeSnapshot(e, ch, instrID, 4, 11, 4 /* K: the book is at 4 */, [][]byte{o1(11)}, snapSeq)
+	if got := oc.auditResults; len(got) != 2 || got[0] != "mismatch_suspected" || got[1] != "mismatch_confirmed" {
+		t.Errorf("audits %v, want [mismatch_suspected mismatch_confirmed]", got)
+	}
+}
+
+// TestInvalidGroupDoesNotTrimTheLog: a structurally invalid group can carry a
+// wrong K. A K far ahead must not empty the log that the next valid group needs.
+func TestInvalidGroupDoesNotTrimTheLog(t *testing.T) {
+	const ch, instrID = uint8(1), uint32(323)
+	e, oc := newOracleEngine(1)
+	reachedReadyMBO(e, ch, instrID, 0, 1)
+	seedEmptyBooks(e, ch, instrID)
+	runMktdataSeq(e, buildOrderAddExact(ch, instrID, 1, 80001, 0, 0, 1000, 100, 10), 1)
+	runMktdataSeq(e, buildOrderAddExact(ch, instrID, 2, 80002, 1, 0, 2000, 200, 5), 2)
+	runMktdataSeq(e, buildOrderAddExact(ch, instrID, 3, 80003, 1, 0, 3000, 300, 5), 3)
+	e.Flush()
+	// Total Orders 5 with one SnapshotOrder: an under-count, so a structural violation.
+	runStream(e, []streamEntry{{port: core.PortSnapshot, raw: buildSnapBeginFull(ch, instrID, 2, 5, 10, 1000), seq: 1}})
+	runStream(e, []streamEntry{{port: core.PortSnapshot, raw: buildSnapOrderFields(ch, 10, 80001, 0, 0, 1000, 100, 10), seq: 2}})
+	runStream(e, []streamEntry{{port: core.PortSnapshot, raw: buildSnapEndFull(ch, instrID, 2, 10), seq: 3}})
+	oc.auditResults = nil
+	completeSnapshot(e, ch, instrID, 2, 11, 2 /* K: the book is at 3 */, [][]byte{
+		buildSnapOrderFields(ch, 11, 80001, 0, 0, 1000, 100, 10),
+		buildSnapOrderFields(ch, 11, 80002, 1, 0, 2000, 200, 5),
+	}, 4)
+	if got := oc.lastAudit(); got != "match" {
+		t.Errorf("valid group after an invalid one: audit %q, want match", got)
+	}
+}
+
+// TestNoSnapshotPortKeepsNoLog: a run without a snapshot port has no group to read
+// the log, so the engine keeps none.
+func TestNoSnapshotPortKeepsNoLog(t *testing.T) {
+	ac := &allCapture{}
+	e := New(Config{Feed: core.FeedMBO, ReorderWindow: 1, NoSnapshotPort: true}, ac)
+	a := newMBOPub(srcA, 3)
+	a.ready(e)
+	for s := uint32(1); s <= 5; s++ {
+		a.add(e, s, uint64(s))
+	}
+	e.Flush()
+	e.curSrc = srcA
+	e.selectMBO(instCh)
+	if got := logSeqs(&e.mbo.book.book(instCh, instInstr).log); len(got) != 0 {
+		t.Errorf("log %v, want empty", got)
+	}
+}
+
+// TestReplaySkipsACancelOfAnOrderAtZero (from review): an execute leaves order
+// 80002 at zero, the snapshot leaves it out, because a SnapshotOrder has Quantity
+// > 0, and the cancel after K removes it. The cancel found the order in the delta
+// book and not in the snapshot book; that decides nothing, as in diffBooks.
+func TestReplaySkipsACancelOfAnOrderAtZero(t *testing.T) {
+	const ch, instrID = uint8(1), uint32(324)
+	e, oc := newOracleEngine(1)
+	reachedReadyMBO(e, ch, instrID, 0, 1)
+	seedEmptyBooks(e, ch, instrID)
+	runMktdataSeq(e, buildOrderAddExact(ch, instrID, 1, 80001, 0, 0, 1000, 100, 10), 1)
+	runMktdataSeq(e, buildOrderAddExact(ch, instrID, 2, 80002, 1, 0, 2000, 200, 5), 2)
+	runMktdataSeq(e, buildOrderExecuteWithQty(ch, instrID, 3, 80002, 0, 5), 3) // 80002 at zero
+	runMktdataSeq(e, buildOrderCancelFull(ch, instrID, 4, 80002, 0), 4)
+	e.Flush()
+	oc.auditResults = nil
+	completeSnapshot(e, ch, instrID, 3, 10, 3 /* K: the book is at 4 */, [][]byte{
+		buildSnapOrderFields(ch, 10, 80001, 0, 0, 1000, 100, 10),
+	}, 1)
+	if got := oc.lastAudit(); got != "match" {
+		t.Errorf("snapshot between the execute to zero and its cancel: audit %q, want match", got)
+	}
+}
+
+// TestCancelOfAnOrderTheSeedDroppedAtZero (from review): the snapshot that seeds
+// the book is taken between an execute to zero and its cancel, so it leaves the
+// order out. The publisher's cancel after the seed is not a dangling cancel. A
+// second cancel is an operation after removal.
+func TestCancelOfAnOrderTheSeedDroppedAtZero(t *testing.T) {
+	e, ac, a := readyPub(t)
+	a.send(e, core.PortMktData, buildOrderAddWithQty(instCh, instInstr, 1, 7, 4))        // datagram 0
+	a.send(e, core.PortMktData, buildOrderExecuteWithQty(instCh, instInstr, 2, 7, 0, 4)) // datagram 1: order 7 at zero
+	e.Flush()
+	a.group(e, 1, 1, 2) // seeds at K = 2: the snapshot cannot carry order 7
+	e.Flush()
+	clearFindings(ac)
+	a.cancel(e, 3, 7)
+	e.Flush()
+	got := findingsFor(ac, "REF.CANCEL_DANGLING_ORDER")
+	if len(got) != 1 || got[0].Status != core.Unverifiable || got[0].Reason != core.ReasonColdStart {
+		t.Errorf("cancel of the dropped order: got %v, want one Unverifiable, reason cold_start", got)
+	}
+	clearFindings(ac)
+	a.cancel(e, 4, 7)
+	e.Flush()
+	if !hasViolation(ac, "REF.OPERATION_AFTER_REMOVAL") {
+		t.Errorf("a second cancel must be REF.OPERATION_AFTER_REMOVAL%s", describe(ac.findings))
+	}
+}

@@ -248,6 +248,7 @@ func Run(opts RunOpts) int {
 	}
 
 	// --- engine ---
+	opts.Cfg.NoSnapshotPort = opts.SnapshotPort == 0
 	eng := engine.New(opts.Cfg, rep)
 
 	// Report, before a single frame is read, the rules this invocation cannot reach.

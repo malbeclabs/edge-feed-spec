@@ -136,12 +136,10 @@ func TestMBOVerdictsCarryTheirOwnEvidence(t *testing.T) {
 		a.group(e, 0, 1, 0)
 		e.Flush()
 		a.add(e, 1, 7)
+		// An orphan: a live order with nothing remaining, from an OrderAdd with
+		// Quantity 0.
+		a.send(e, core.PortMktData, buildOrderAddWithQty(instCh, instInstr, 2, 8, 0))
 		e.Flush()
-		// An orphan no delta can make: a live order with nothing remaining.
-		bk := e.mbos[refdataKey{src: srcA, ch: instCh}].book.book(instCh, instInstr)
-		lo := bk.live[7]
-		lo.remaining = 0
-		bk.live[7] = lo
 		clearFindings(ac)
 		seq := a.seq[core.PortMktData]
 		a.send(e, core.PortMktData, buildBatchBoundaryFrame(instCh, 1))
