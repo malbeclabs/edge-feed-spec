@@ -16,6 +16,7 @@ package engine
 // again (with the delta log, also a busy one).
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/malbeclabs/edge-feed-spec/tools/conformance/core"
@@ -124,5 +125,50 @@ func TestLostInstrumentResetIsNotGradedAgainstTheOldBook(t *testing.T) {
 		if f.Status == core.Suspected {
 			t.Errorf("oracle suspected a mismatch: %s", f.Detail)
 		}
+	}
+}
+
+// TestGroupAnchoredBeforeAGapDoesNotSeed (from review): a group is in flight when
+// the datagram that carried an InstrumentReset is lost. The publisher finishes the
+// group (market-by-order/spec.md, InstrumentReset, option a), so it shows the book
+// from before the reset, and it closes after a later datagram revealed the gap. It
+// must not seed. The recovery group, anchored at the reset, seeds the book.
+func TestGroupAnchoredBeforeAGapDoesNotSeed(t *testing.T) {
+	ac := &allCapture{}
+	e := New(Config{Feed: core.FeedMBO, ReorderWindow: 1, OracleConfirmCycles: 1}, ac)
+	a := newMBOPub(srcA, 3)
+	a.ready(e)
+	a.group(e, 0, 1, 0) // seeds an empty book at K = 0
+	e.Flush()
+	a.add(e, 1, 7)                                                                  // datagram 0
+	a.add(e, 2, 8)                                                                  // datagram 1
+	a.send(e, core.PortSnapshot, buildSnapBeginFull(instCh, instInstr, 1, 2, 9, 2)) // group 9, Anchor Seq 1, in flight
+	a.skip(core.PortMktData, 1)                                                     // datagram 2 carried InstrumentReset: the book is now empty
+	a.add(e, 3, 11)                                                                 // datagram 3: reveals the gap
+	e.Flush()
+	clearFindings(ac)
+	a.order(e, 9, 7)
+	a.order(e, 9, 8)
+	a.end(e, 1, 9) // group 9 completes after the reset
+	e.Flush()
+	got := findingsFor(ac, "SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT")
+	if len(got) != 1 || got[0].Reason != core.ReasonUntrusted || !strings.Contains(got[0].Detail, "mktdata series") {
+		t.Errorf("group 9: got %v, want one Unverifiable, reason untrusted, naming the mktdata series", got)
+	}
+	a.group(e, 2, 10, 2) // the recovery group, at the reset: empty
+	e.Flush()
+	a.cancel(e, 4, 11)   // datagram 4: order 11 is in the recovery book plus delta 3
+	a.group(e, 4, 11, 4) // the next group: empty
+	e.Flush()
+	if v := violations(ac, "REF."); len(v) != 0 {
+		t.Errorf("got %d REF.* violations, want 0%s", len(v), describe(v))
+	}
+	for _, f := range findingsFor(ac, "SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT") {
+		if f.Status == core.Violation || f.Status == core.Suspected {
+			t.Errorf("oracle %v: %s", f.Status, f.Detail)
+		}
+	}
+	if !hasPass(ac, "SNAP.RECONSTRUCTED_BOOK_MATCHES_SNAPSHOT") {
+		t.Errorf("the last group must match the book the recovery group seeded%s", describe(ac.findings))
 	}
 }

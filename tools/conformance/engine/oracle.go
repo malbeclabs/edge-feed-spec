@@ -147,9 +147,10 @@ func (e *Engine) runOracleForGroup(ch uint8, snap *openSnapshot, snapPortSeq uin
 				fmt.Sprintf("instrument %d: no snapshot group has seeded the book yet, so there is no book to compare", instrID))
 			return
 		}
-		// The book was seeded, and a per-instrument gap cleared its trust.
+		// The book was seeded, and a gap cleared its trust: a per-instrument gap
+		// (applyDeltaSeq) or a gap in the mktdata series (syncMktdataGaps).
 		e.unverifiable(key, snapPortSeq, core.ReasonUntrusted,
-			fmt.Sprintf("instrument %d: a per-instrument gap cleared the trust of the book a snapshot seeded", instrID))
+			fmt.Sprintf("instrument %d: a gap cleared the trust of the book a snapshot seeded, in its per-instrument seq or in the mktdata series", instrID))
 		return
 	}
 	if dt.bookCorruptedByDup {
