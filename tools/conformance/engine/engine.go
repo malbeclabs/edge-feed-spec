@@ -883,20 +883,20 @@ func (e *Engine) classify(item *bufferItem, pt *portTracker) {
 	// res.gapBefore is true for forward gaps; backward motion (seq < lastSeq)
 	// without an era change is flagged here.
 	//
-	// Unless a gap of this era counted the datagram as lost. Then it arrived after
-	// the reorder window had moved past it: the publisher sent it in order and the
-	// path delayed it, longer than the window holds (on a long path, a few
-	// milliseconds can be more than the window's datagrams). That is reordering.
+	// When a gap of this era counted the datagram as lost, it is not a regression
+	// of the series: it arrived after the reorder window had moved past it. It is
+	// still a violation, since every datagram after it reached this recorder first,
+	// but the detail says so. Datagrams reordered before the multicast fans out
+	// show the same count on every recorder of the group; reordering on one path
+	// shows on one recorder only.
 	if pt.lastSeq != nil && f.Header.Sequence < *pt.lastSeq {
+		detail := fmt.Sprintf("seq %d < last %d without reset-count change (era %d)",
+			f.Header.Sequence, *pt.lastSeq, pt.era)
 		if pt.wasLost(f.Header.Sequence) {
-			e.Emit("FRAME.SEQ_RESET_GAP", core.Unverifiable, port, f.Header.Sequence, f.Header.ChannelID, 0,
-				fmt.Sprintf("seq %d arrived after %d, past the reorder window; a gap had counted it as lost (era %d)",
-					f.Header.Sequence, *pt.lastSeq, pt.era), core.ReasonReorder)
-		} else {
-			e.Emit("FRAME.SEQ_RESET_GAP", core.Violation, port, f.Header.Sequence, f.Header.ChannelID, 0,
-				fmt.Sprintf("seq %d < last %d without reset-count change (era %d)",
-					f.Header.Sequence, *pt.lastSeq, pt.era))
+			detail = fmt.Sprintf("seq %d arrived after %d, past the reorder window: reordered, not a reset; a gap had counted it as lost (era %d)",
+				f.Header.Sequence, *pt.lastSeq, pt.era)
 		}
+		e.Emit("FRAME.SEQ_RESET_GAP", core.Violation, port, f.Header.Sequence, f.Header.ChannelID, 0, detail)
 	}
 
 	// Forward gap: transport loss.
