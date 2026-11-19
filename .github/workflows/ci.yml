@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - main
+      - nikw9944/adhoc-5049
 
 permissions:
   contents: read
