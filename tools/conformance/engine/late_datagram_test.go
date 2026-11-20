@@ -230,3 +230,19 @@ func TestLateDatagramWithTheSameSendTimestampIsNamedReordered(t *testing.T) {
 		t.Errorf("got %+v, want one violation named as reordered", got)
 	}
 }
+
+// TestLateDatagramFromAnOlderKeptGapIsNamedReordered: two gaps, before 4 and
+// before 7. Seq 3 comes from the older one, which the ring still keeps, so it is
+// named as reordered.
+func TestLateDatagramFromAnOlderKeptGapIsNamedReordered(t *testing.T) {
+	c := &captureAll{}
+	eng := New(Config{Feed: core.FeedTOB, ReorderWindow: 1}, c)
+	processSeqs(eng, 0, 1, 2, 4, 5, 7, 8, 9)
+	processSeqs(eng, 0, 3)
+	eng.Flush()
+
+	got := seqResetGaps(t, c)
+	if len(got) != 1 || !isReordered(got[0]) {
+		t.Errorf("got %+v, want one violation named as reordered", got)
+	}
+}
