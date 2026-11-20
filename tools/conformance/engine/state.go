@@ -185,12 +185,15 @@ type portTracker struct {
 	hashRingCap  int
 	hashRingPos  int
 	hashRingSize int // number of valid entries currently in the ring (≤ cap)
-	// lost holds the Sequence Number ranges that the latest forward gaps of this era
-	// counted as transport loss, oldest first, at most maxLostRanges, each at most
-	// maxLateGap long. A datagram from one of them that arrives after the reorder
-	// window has moved past it was reordered: the publisher did not move its series
-	// backward (see Engine.classify).
-	lost []seqRange
+	// lost holds the Sequence Number ranges that the last maxLostRanges forward
+	// gaps of this era counted as transport loss, each at most maxLateGap long, in
+	// a ring that lostHead and lostLen index. Each range keeps one bit for each
+	// Sequence Number that arrived since. A datagram from a range that has not
+	// arrived yet came after the reorder window moved past it (see
+	// Engine.classify).
+	lost     [maxLostRanges]lostRange
+	lostHead int // the slot the next gap takes
+	lostLen  int // the slots in use
 	// buf is the bounded reorder buffer for this series.
 	buf portBuffer
 	// unclassified holds the items a drain has already taken out of buf and has not
@@ -274,34 +277,51 @@ func hashRaw(b []byte) uint64 {
 	return h.Sum64()
 }
 
-// seqRange is an inclusive range of Sequence Numbers.
-type seqRange struct{ lo, hi uint64 }
+// lostRange is the Sequence Numbers lo .. lo+n-1 that one gap counted as lost,
+// with a bit set in arrived for each one that arrived since.
+type lostRange struct {
+	lo      uint64
+	n       uint64
+	arrived [(maxLateGap + 63) / 64]uint64
+}
 
 // maxLostRanges bounds portTracker.lost. A late datagram whose gap is older than
-// the last maxLostRanges gaps of its era is graded as backward motion again.
+// the last maxLostRanges gaps of its era gets the plain detail.
 const maxLostRanges = 64
 
 // maxLateGap is the largest gap whose Sequence Numbers a late datagram can come
 // from. Reordering delays a few datagrams, so its gaps are small: on the live
-// feeds seen so far a late datagram was 2 to 28 behind. Two series merged
-// into one (see README, "Sequencing keys on the channel instance") jump between
-// counters that are far apart, and each jump back must stay backward motion.
+// feeds seen so far a late datagram was 2 to 99 behind. Two series merged into
+// one (see README, "Sequencing keys on the channel instance") whose counters are
+// further apart than this keep the plain detail.
 const maxLateGap = 256
 
-// noteLost records that a gap counted lo..hi as transport loss.
+// noteLost records that a gap counted lo..hi as transport loss. The caller
+// ensures hi-lo < maxLateGap.
 func (t *portTracker) noteLost(lo, hi uint64) {
-	if len(t.lost) == maxLostRanges {
-		t.lost = append(t.lost[:0], t.lost[1:]...)
+	t.lost[t.lostHead] = lostRange{lo: lo, n: hi - lo + 1}
+	t.lostHead = (t.lostHead + 1) % maxLostRanges
+	if t.lostLen < maxLostRanges {
+		t.lostLen++
 	}
-	t.lost = append(t.lost, seqRange{lo, hi})
 }
 
-// wasLost reports whether a gap of this era counted seq as transport loss.
-func (t *portTracker) wasLost(seq uint64) bool {
-	for _, r := range t.lost {
-		if seq >= r.lo && seq <= r.hi {
-			return true
+// takeLost reports whether a gap of this era counted seq as lost and seq has not
+// arrived since, and marks it arrived. A second copy of the datagram then gets
+// false.
+func (t *portTracker) takeLost(seq uint64) bool {
+	for i := range t.lostLen {
+		r := &t.lost[i]
+		if seq < r.lo || seq-r.lo >= r.n {
+			continue
 		}
+		off := seq - r.lo
+		bit := uint64(1) << (off % 64)
+		if r.arrived[off/64]&bit != 0 {
+			return false
+		}
+		r.arrived[off/64] |= bit
+		return true
 	}
 	return false
 }
@@ -410,7 +430,7 @@ func (t *portTracker) advanceEra(newEra uint8) {
 	t.hashRingPos = 0
 	t.hashRingSize = 0
 	// The gaps of the old era say nothing about the Sequence Numbers of the new one.
-	t.lost = t.lost[:0]
+	t.lostHead, t.lostLen = 0, 0
 	// Clear the dirty-window flag: the new era starts with a clean observation
 	// window.  The refdata state machine (Task 14) reads this flag to decide
 	// whether to downgrade a Violation to Unverifiable; resetting it here

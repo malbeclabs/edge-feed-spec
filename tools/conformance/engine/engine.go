@@ -883,17 +883,20 @@ func (e *Engine) classify(item *bufferItem, pt *portTracker) {
 	// res.gapBefore is true for forward gaps; backward motion (seq < lastSeq)
 	// without an era change is flagged here.
 	//
-	// When a gap of this era counted the datagram as lost, it is not a regression
-	// of the series: it arrived after the reorder window had moved past it. It is
-	// still a violation, since every datagram after it reached this recorder first,
-	// but the detail says so. Datagrams reordered before the multicast fans out
-	// show the same count on every recorder of the group; reordering on one path
-	// shows on one recorder only.
+	// A gap of this era can count the datagram as lost: it arrived after the
+	// reorder window moved past it. If the publisher also sent it no later than
+	// the last datagram of the series (Send Timestamp is non-decreasing with
+	// Sequence Number), the datagrams were reordered and the series did not move
+	// backward. It is still a violation, since every datagram after it reached
+	// this recorder first, but the detail says so. Reordering before the multicast
+	// fans out shows the same count on every recorder of the group; reordering on
+	// one path shows on one recorder only. The gap's transport loss and its taint
+	// stay: the checker already graded the datagrams after it without this one.
 	if pt.lastSeq != nil && f.Header.Sequence < *pt.lastSeq {
 		detail := fmt.Sprintf("seq %d < last %d without reset-count change (era %d)",
 			f.Header.Sequence, *pt.lastSeq, pt.era)
-		if pt.wasLost(f.Header.Sequence) {
-			detail = fmt.Sprintf("seq %d arrived after %d, past the reorder window: reordered, not a reset; a gap had counted it as lost (era %d)",
+		if prevSendTS != nil && f.Header.SendTS <= *prevSendTS && pt.takeLost(f.Header.Sequence) {
+			detail = fmt.Sprintf("seq %d arrived after %d, past the reorder window: reordered, not a reset; a gap counted it as lost (era %d)",
 				f.Header.Sequence, *pt.lastSeq, pt.era)
 		}
 		e.Emit("FRAME.SEQ_RESET_GAP", core.Violation, port, f.Header.Sequence, f.Header.ChannelID, 0, detail)

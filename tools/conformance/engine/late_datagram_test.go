@@ -1,7 +1,8 @@
 package engine
 
-// late_datagram_test.go — a backward datagram that a gap had counted as lost is
-// named as reordered, not as a reset.
+// late_datagram_test.go — a backward datagram that a gap counted as lost, and
+// that the publisher sent before the last one, is named as reordered, not as a
+// reset.
 //
 // The reorder window holds a number of datagrams, not a time. A datagram delayed
 // by more than the window holds is counted as lost by the gap before the
@@ -18,10 +19,20 @@ import (
 	"github.com/malbeclabs/edge-feed-spec/tools/conformance/wire"
 )
 
-// processSeqs sends one heartbeat per Sequence Number on the mktdata port.
+// processSeqs sends one heartbeat per Sequence Number on the mktdata port, with
+// a Send Timestamp that grows with the Sequence Number, as one publisher sends.
 func processSeqs(eng *Engine, era uint8, seqs ...uint64) {
 	for _, s := range seqs {
 		eng.Process(srcA, makeHB(wire.MagicTOB, 1, s, era, 1000+s), core.PortMktData, nil)
+	}
+}
+
+// processInSendOrder sends one heartbeat per Sequence Number on the mktdata port,
+// with a Send Timestamp that grows in the order given, as two publishers merged
+// into one series send.
+func processInSendOrder(eng *Engine, seqs ...uint64) {
+	for i, s := range seqs {
+		eng.Process(srcA, makeHB(wire.MagicTOB, 1, s, 0, uint64(1000+i)), core.PortMktData, nil)
 	}
 }
 
@@ -143,5 +154,61 @@ func TestLateDatagramFromAGapAtTheBound(t *testing.T) {
 	got := seqResetGaps(t, c)
 	if len(got) != 1 || !isReordered(got[0]) {
 		t.Errorf("got %+v, want one violation named as reordered", got)
+	}
+}
+
+// TestLateDatagramFromAGapOverTheBound: a gap of maxLateGap+1 is not one a late
+// datagram can come from, so seq 3 gets the plain detail.
+func TestLateDatagramFromAGapOverTheBound(t *testing.T) {
+	c := &captureAll{}
+	eng := New(Config{Feed: core.FeedTOB, ReorderWindow: 1}, c)
+	processSeqs(eng, 0, 1, 2, 4+maxLateGap, 5+maxLateGap, 6+maxLateGap)
+	processSeqs(eng, 0, 3)
+	eng.Flush()
+
+	got := seqResetGaps(t, c)
+	if len(got) != 1 || isReordered(got[0]) {
+		t.Errorf("got %+v, want one violation not named as reordered", got)
+	}
+}
+
+// TestMergedSeriesWithCloseCountersAreNotNamedReordered: two publishers merged on
+// one key, at 10 and at 100, alternate. The jump from 11 to 100 is a gap of 88,
+// within maxLateGap, so the counters cannot tell the merge from reordering. The
+// Send Timestamps can: each jump back was sent after the datagram before it.
+func TestMergedSeriesWithCloseCountersAreNotNamedReordered(t *testing.T) {
+	c := &captureAll{}
+	eng := New(Config{Feed: core.FeedTOB, ReorderWindow: 1}, c)
+	processInSendOrder(eng, 10, 100, 11, 101, 12, 102, 13, 103)
+	eng.Flush()
+
+	got := seqResetGaps(t, c)
+	if len(got) == 0 {
+		t.Fatal("got no FRAME.SEQ_RESET_GAP violations for two merged series")
+	}
+	for _, f := range got {
+		if isReordered(f) {
+			t.Errorf("a jump back between merged series was named as reordered: %s", f.Detail)
+		}
+	}
+}
+
+// TestSecondCopyOfALateDatagramIsNotNamedReordered: seq 3 arrives late and is
+// named as reordered. After the dedup ring has evicted it, a second copy arrives.
+// No gap counted that copy as lost, so it gets the plain detail.
+func TestSecondCopyOfALateDatagramIsNotNamedReordered(t *testing.T) {
+	c := &captureAll{}
+	eng := New(Config{Feed: core.FeedTOB, ReorderWindow: 1}, c)
+	processSeqs(eng, 0, 1, 2, 4, 5, 6)
+	processSeqs(eng, 0, 3)
+	for s := uint64(7); s < 27; s++ { // more than the 16-entry dedup ring
+		processSeqs(eng, 0, s)
+	}
+	processSeqs(eng, 0, 3)
+	eng.Flush()
+
+	got := seqResetGaps(t, c)
+	if len(got) != 2 || !isReordered(got[0]) || isReordered(got[1]) {
+		t.Errorf("got %+v, want the first copy named as reordered and the second not", got)
 	}
 }
