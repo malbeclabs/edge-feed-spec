@@ -185,6 +185,15 @@ type portTracker struct {
 	hashRingCap  int
 	hashRingPos  int
 	hashRingSize int // number of valid entries currently in the ring (≤ cap)
+	// lost holds the Sequence Number ranges that the last maxLostRanges forward
+	// gaps of this era counted as transport loss, each at most maxLateGap long, in
+	// a ring that lostHead and lostLen index. Each range keeps one bit for each
+	// Sequence Number that arrived since. A datagram from a range that has not
+	// arrived yet came after the reorder window moved past it (see
+	// Engine.classify).
+	lost     [maxLostRanges]lostRange
+	lostHead int // the slot the next gap takes
+	lostLen  int // the slots in use
 	// buf is the bounded reorder buffer for this series.
 	buf portBuffer
 	// unclassified holds the items a drain has already taken out of buf and has not
@@ -268,6 +277,55 @@ func hashRaw(b []byte) uint64 {
 	return h.Sum64()
 }
 
+// lostRange is the Sequence Numbers lo .. lo+n-1 that one gap counted as lost,
+// with a bit set in arrived for each one that arrived since.
+type lostRange struct {
+	lo      uint64
+	n       uint64
+	arrived [(maxLateGap + 63) / 64]uint64
+}
+
+// maxLostRanges bounds portTracker.lost. A late datagram whose gap is older than
+// the last maxLostRanges gaps of its era gets the plain detail.
+const maxLostRanges = 64
+
+// maxLateGap is the largest gap whose Sequence Numbers a late datagram can come
+// from. Reordering delays a few datagrams, so its gaps are small: on the live
+// feeds seen so far a late datagram was 2 to 99 behind. Two series merged into
+// one (see README, "Sequencing keys on the channel instance") whose counters are
+// further apart than this keep the plain detail.
+const maxLateGap = 256
+
+// noteLost records that a gap counted lo..hi as transport loss. The caller
+// ensures hi-lo < maxLateGap.
+func (t *portTracker) noteLost(lo, hi uint64) {
+	t.lost[t.lostHead] = lostRange{lo: lo, n: hi - lo + 1}
+	t.lostHead = (t.lostHead + 1) % maxLostRanges
+	if t.lostLen < maxLostRanges {
+		t.lostLen++
+	}
+}
+
+// takeLost reports whether a gap of this era counted seq as lost and seq has not
+// arrived since, and marks it arrived. A second copy of the datagram then gets
+// false.
+func (t *portTracker) takeLost(seq uint64) bool {
+	for i := range t.lostLen {
+		r := &t.lost[i]
+		if seq < r.lo || seq-r.lo >= r.n {
+			continue
+		}
+		off := seq - r.lo
+		bit := uint64(1) << (off % 64)
+		if r.arrived[off/64]&bit != 0 {
+			return false
+		}
+		r.arrived[off/64] |= bit
+		return true
+	}
+	return false
+}
+
 // observeResult is the outcome of observe().
 type observeResult struct {
 	isDup          bool // same (era,seq), identical bytes → silent drop
@@ -330,6 +388,9 @@ func (t *portTracker) observe(seq uint64, sendTS uint64, raw []byte, era uint8) 
 		if seq > last && seq-last > 1 {
 			gap = true
 			missing = seq - last - 1
+			if missing <= maxLateGap {
+				t.noteLost(last+1, seq-1)
+			}
 		}
 		// seq <= last → backward motion; handled by caller (FRAME.SEQ_RESET_GAP).
 	}
@@ -368,6 +429,8 @@ func (t *portTracker) advanceEra(newEra uint8) {
 	clear(t.hashRing)
 	t.hashRingPos = 0
 	t.hashRingSize = 0
+	// The gaps of the old era say nothing about the Sequence Numbers of the new one.
+	t.lostHead, t.lostLen = 0, 0
 	// Clear the dirty-window flag: the new era starts with a clean observation
 	// window.  The refdata state machine (Task 14) reads this flag to decide
 	// whether to downgrade a Violation to Unverifiable; resetting it here
