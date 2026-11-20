@@ -212,3 +212,21 @@ func TestSecondCopyOfALateDatagramIsNotNamedReordered(t *testing.T) {
 		t.Errorf("got %+v, want the first copy named as reordered and the second not", got)
 	}
 }
+
+// TestLateDatagramWithTheSameSendTimestampIsNamedReordered: Send Timestamp must
+// not decrease, so a publisher can stamp a batch of datagrams with one value.
+// Seq 3 of such a batch arrives late. It was sent no later than the last one,
+// so it is named as reordered.
+func TestLateDatagramWithTheSameSendTimestampIsNamedReordered(t *testing.T) {
+	c := &captureAll{}
+	eng := New(Config{Feed: core.FeedTOB, ReorderWindow: 1}, c)
+	for _, s := range []uint64{1, 2, 4, 5, 6, 3} {
+		eng.Process(srcA, makeHB(wire.MagicTOB, 1, s, 0, 1000), core.PortMktData, nil)
+	}
+	eng.Flush()
+
+	got := seqResetGaps(t, c)
+	if len(got) != 1 || !isReordered(got[0]) {
+		t.Errorf("got %+v, want one violation named as reordered", got)
+	}
+}
