@@ -263,6 +263,16 @@ func (e *Engine) runOracleForGroup(ch uint8, snap *openSnapshot, snapPortSeq uin
 				instrID, at, suspect.count, sig))
 		// Keep suspect.count so the next divergence will also fire immediately
 		// (i.e. a persistent bug keeps emitting confirmed each cycle).
+
+		// The checker cannot tell whether the delta book or the snapshot is wrong,
+		// and the finding above already charges the publisher. Grading the order
+		// rules against a book that the publisher's own snapshot contradicts would
+		// charge it again on every delta, until a mktdata gap happened to untrust
+		// the book (malbeclabs/edge-feed-spec#137). So the book stops being trusted,
+		// and seedBookFromSnapshot, which runs after the oracle, seeds it from this
+		// group. Only a confirmed mismatch does this: a suspected one keeps the book,
+		// so that the next group is compared and a repeating mismatch is confirmed.
+		dt.bookTrusted = false
 	} else {
 		// First (or early) occurrence: suspected, not confirmed.
 		e.rep.SnapshotAudit("mismatch_suspected")

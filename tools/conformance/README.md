@@ -284,7 +284,7 @@ With `--pcap`, the tool replays the capture in order and exits when the file is 
 | `1` | At least one `must` violation; or at least one `should` violation with `--strict` |
 | `2` | Startup/runtime error (bad flags, I/O failure, could not write JSON report). An error that ends a run mid-input is also recorded as `read_error` in the [JSON report](#json-report), so a stored report is never mistaken for a clean pass |
 
-Oracle mismatches on the first occurrence are scored as `mismatch_suspected` in `snapshot_audits_total` and do **not** emit a finding or fail CI. After `--oracle-confirm-cycles` consecutive mismatches with the same signature, a confirmed `Violation` finding is emitted.
+Oracle mismatches on the first occurrence are scored as `mismatch_suspected` in `snapshot_audits_total` and do **not** emit a finding or fail CI. After `--oracle-confirm-cycles` consecutive mismatches with the same signature, a confirmed `Violation` finding is emitted. The confirmed mismatch also stops the instrument's book being trusted, so the group that confirmed it seeds the book again, and the order rules (`REF.*`) grade the deltas after it against the publisher's snapshot rather than against a book that the snapshot contradicts. A suspected mismatch keeps the book, so the next group is compared and a mismatch that repeats is still confirmed.
 
 ## Output
 
