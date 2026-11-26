@@ -137,6 +137,11 @@ type channelRefdataState struct {
 	// REFDATA.VALID_FLAG_WHILE_SERVING.
 	hadNonEmptySet bool
 
+	// heldUnknown holds the undecided TOB.QUOTE.REFDATA_KNOWN verdicts for
+	// Instrument IDs that were not in the ready set, in the order they were held.
+	// See Engine.holdUnknown.
+	heldUnknown []heldUnknown
+
 	// pendingValidZero holds the undecided REFDATA.VALID_FLAG_WHILE_SERVING verdict.
 	// At most one is outstanding: arming it requires hadNonEmptySet, which the same
 	// Valid=0 clears, so the slot cannot be re-armed until the channel re-establishes.
@@ -307,17 +312,26 @@ func (rs *refdataState) channel(k refdataKey) *channelRefdataState {
 // It returns nil when the channel has no refdata instance, and when the address in
 // front of the engine has a refdata tracker whose first datagram is still buffered.
 func (rs *refdataState) forChannel(ch uint8) *channelRefdataState {
+	_, s := rs.forChannelKey(ch)
+	return s
+}
+
+// forChannelKey is forChannel, and it also returns the key of the instance it
+// chose. The key is the zero key when the state is nil.
+func (rs *refdataState) forChannelKey(ch uint8) (refdataKey, *channelRefdataState) {
 	if src := rs.e.curSrc; src.IsValid() {
-		if s, ok := rs.channels[refdataKey{src: src, ch: ch}]; ok {
-			return s
+		k := refdataKey{src: src, ch: ch}
+		if s, ok := rs.channels[k]; ok {
+			return k, s
 		}
 		// The address has a refdata tracker but no state yet: its first refdata
 		// datagram is still in the reorder buffer. That publisher is collecting its
 		// set, so it is not judged against another instance's set either.
 		if _, ok := rs.e.ports[instanceKey{src: src, port: core.PortRefData, ch: ch}]; ok {
-			return nil
+			return refdataKey{}, nil
 		}
 	}
+	var bestKey refdataKey
 	var best *channelRefdataState
 	var bestSeen uint64
 	for k, s := range rs.channels {
@@ -329,10 +343,10 @@ func (rs *refdataState) forChannel(ch uint8) *channelRefdataState {
 			seen = pt.lastSeen
 		}
 		if best == nil || seen > bestSeen {
-			best, bestSeen = s, seen
+			bestKey, best, bestSeen = k, s, seen
 		}
 	}
-	return best
+	return bestKey, best
 }
 
 // keys returns the instance keys ordered by Channel ID then source IP address, so
@@ -378,6 +392,7 @@ func (rs *refdataState) drop(k refdataKey) {
 		s.pendingValidZero = nil
 	}
 	rs.e.decideNeverReachesReady(k, s, 0, true, true)
+	rs.e.dropUnknown(s)
 	delete(rs.channels, k)
 	delete(rs.e.sessionEnd, k)
 }
@@ -420,28 +435,6 @@ func (rs *refdataState) hasInstance(k refdataKey) bool {
 	}
 	_, ok := rs.e.ports[instanceKey{src: k.src, port: core.PortRefData, ch: k.ch}]
 	return ok
-}
-
-// channelKnown returns two booleans: (ready, known).
-//
-//   - ready is true when the channel identified by ch has reached ready() state
-//     (valid=1 and len(defs)==expectedCount).
-//   - known is true when ready is true AND the instrument instrID is present in
-//     the channel's current def set.
-//
-// If the channel has not been seen yet, both return false. The instance that
-// answers is the one forChannel chooses.
-// Used by the TOB validator (tob.go) to gate TOB.QUOTE.REFDATA_KNOWN.
-func (rs *refdataState) channelKnown(ch uint8, instrID uint32) (ready bool, known bool) {
-	s := rs.forChannel(ch)
-	if s == nil {
-		return false, false
-	}
-	if !channelReady(s) {
-		return false, false
-	}
-	_, inDefs := s.defs[instrID]
-	return true, inDefs
 }
 
 // defInfoFor returns the defInfo for an instrument on a channel, plus ok=true
@@ -1260,5 +1253,7 @@ func (e *Engine) processRefdataFrame(f *wire.Frame, pt *portTracker) {
 			s.lastRefdataSendTSSet = true
 		}
 		e.decideNeverReachesReady(k, s, f.Header.Sequence, false, false)
+		// The held TOB.QUOTE.REFDATA_KNOWN verdicts that waited for this datagram.
+		e.releaseUnknown(k, s, 0)
 	}
 }

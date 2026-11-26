@@ -589,8 +589,7 @@ func (e *Engine) refdataUnclassifiedWithin(k refdataKey, periodStartTS, deadline
 	if !ok {
 		return false, false
 	}
-	stopped := pt.lastArrivalSendTSSet && nowTS > pt.lastArrivalSendTS &&
-		nowTS-pt.lastArrivalSendTS > uint64(silence)
+	stopped := pt.stoppedAt(nowTS, silence)
 	for _, items := range [][]*bufferItem{pt.buf, pt.unclassified} {
 		for _, item := range items {
 			ts := item.tuple.frame.Header.SendTS
@@ -604,6 +603,13 @@ func (e *Engine) refdataUnclassifiedWithin(k refdataKey, periodStartTS, deadline
 		}
 	}
 	return pending, stranded
+}
+
+// stoppedAt reports whether the path sent nothing for longer than silence before
+// nowTS, counted on arrival. See refdataUnclassifiedWithin.
+func (pt *portTracker) stoppedAt(nowTS uint64, silence time.Duration) bool {
+	return pt.lastArrivalSendTSSet && nowTS > pt.lastArrivalSendTS &&
+		nowTS-pt.lastArrivalSendTS > uint64(silence)
 }
 
 // refdataDirty reports whether the refdata verifiability window of one channel
@@ -1091,6 +1097,14 @@ func (e *Engine) Flush() {
 		for _, key := range e.instancesOn(port) {
 			pt := e.ports[key]
 			e.classifyDrained(pt.drainAll(), pt)
+		}
+	}
+	// Every buffer is empty now, so no held TOB.QUOTE.REFDATA_KNOWN verdict waits
+	// for a datagram any more. Each refdata datagram released the verdicts it
+	// could; this decides the ones whose refdata tracker is gone.
+	if e.refdata != nil {
+		for _, k := range e.refdata.keys() {
+			e.releaseUnknown(k, e.refdata.channels[k], 0)
 		}
 	}
 }
