@@ -204,6 +204,9 @@ type portTracker struct {
 	// in flight. A check that decides on the set the engine has read so far has to see
 	// them; see Engine.classifyDrained and refdataUnclassifiedWithin.
 	unclassified []*bufferItem
+	// incoming is the datagram that Process is entering a new era with, while the
+	// old era's buffer drains. It is not in buf yet. See refdataHeldThrough.
+	incoming *intakeTuple
 	// lastArrivalSendTS is the greatest SendTS this instance has delivered, counted on
 	// arrival rather than on classification, quarantined stragglers included. It tells a
 	// path that stopped sending from one that is behind: see refdataUnclassifiedWithin.

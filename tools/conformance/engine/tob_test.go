@@ -6,7 +6,9 @@ package engine
 //
 //   - Before refdata reaches ready(): status must be NA, never Violation.
 //   - After ready(), instrument absent from def set: Violation.
-//   - After ready(), instrument in def set: silent (no finding emitted).
+//   - After ready(), instrument in def set: Pass.
+//
+// tob_refdata_reorder_test.go covers the verdicts that wait for refdata.
 //
 // Uses the same Engine-level helpers as cadence_test.go.
 // ReorderWindow is set to 1 so each frame is classified on the next Process call,

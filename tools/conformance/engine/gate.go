@@ -1774,7 +1774,7 @@ func (e *Engine) checkInstanceResetSnapshotFollows(s *mboState) {
 //
 // Gate: if the snapshot port has a dirty window, downgrade to Unverifiable.
 // Conservative: only fires when refdata is ready and the instrument is in the
-// manifest (channelKnown).
+// manifest.
 //
 // Every manifest instrument is accounted for — covered, missing, or with the reason
 // this run could not say — because the two ways this rule stays quiet (a capture
