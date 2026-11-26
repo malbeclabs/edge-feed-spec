@@ -1253,7 +1253,5 @@ func (e *Engine) processRefdataFrame(f *wire.Frame, pt *portTracker) {
 			s.lastRefdataSendTSSet = true
 		}
 		e.decideNeverReachesReady(k, s, f.Header.Sequence, false, false)
-		// The held TOB.QUOTE.REFDATA_KNOWN verdicts that waited for this datagram.
-		e.releaseUnknown(k, s, 0)
 	}
 }

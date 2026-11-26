@@ -740,7 +740,14 @@ func (e *Engine) Process(src netip.Addr, f *wire.Frame, port core.Port, sf []wir
 	// Step 1: classify old-era drained items BEFORE advancing era. This ensures
 	// old-era gap/seq detection (transport loss for forward gaps, SEQ_RESET_GAP
 	// for backward motion) fires with the old tracker state still intact.
+	//
+	// The datagram that starts the new era is not queued yet, so it is visible
+	// as incoming while the old era drains; see refdataHeldThrough.
+	if res.advanceEra {
+		pt.incoming = &tuple
+	}
 	e.classifyDrained(res.preDrainItems, pt)
+	pt.incoming = nil
 
 	// Step 2: advance era and enqueue the new-era item (on a Reset Count change).
 	if res.advanceEra {
@@ -834,6 +841,13 @@ func (e *Engine) classify(item *bufferItem, pt *portTracker) {
 	// Whose datagram this is. Taken from the tracker rather than from a parameter
 	// because Flush drains buffers with no caller holding the address.
 	e.curSrc = pt.src
+
+	// Every refdata datagram that leaves the buffer can release held
+	// TOB.QUOTE.REFDATA_KNOWN verdicts, the discarded duplicates included. A
+	// deferred call also runs after the early returns below.
+	if port == core.PortRefData {
+		defer e.releaseAfterRefdata(pt, f.Header.ChannelID)
+	}
 
 	// Capture previous SendTS before observe() updates it.
 	var prevSendTS *uint64

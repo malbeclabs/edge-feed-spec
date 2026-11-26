@@ -5,7 +5,7 @@ package engine
 //
 // A publisher that adds an instrument sends the ManifestSummary with the new
 // Manifest Seq first, then the first quotes for the new Instrument ID. Each
-// (source, port, channel) series has its own reorder buffer, and the refdata port
+// channel instance has its own reorder buffer, and the refdata port
 // sends a few datagrams a second, so the engine classifies the summary seconds
 // after it arrives. The busy mktdata port classifies the quotes first. Judged at
 // once, they are judged against the previous set, which is still ready and does
@@ -168,7 +168,7 @@ func TestTOBRefdataKnownUnknownInstrumentStillViolates(t *testing.T) {
 // datagrams in its reorder buffer. A buffer is released only by later datagrams
 // of its path, or at Flush, so a held verdict would wait for the end of the run,
 // and a process that never exits would never report it. A quote for an unknown ID
-// sent long after the path stopped is Unverifiable, reason pending, at once.
+// sent long after the path stopped is Unverifiable, reason loss, at once.
 func TestTOBRefdataKnownStoppedRefdataIsUnverifiable(t *testing.T) {
 	const ch = uint8(41)
 	e, ac, _, _ := newReorderTOBEngine(t, ch)
@@ -186,8 +186,8 @@ func TestTOBRefdataKnownStoppedRefdataIsUnverifiable(t *testing.T) {
 		switch f.Status {
 		case core.Unverifiable:
 			unv++
-			if f.Reason != core.ReasonPending {
-				t.Errorf("TOB.QUOTE.REFDATA_KNOWN: reason %q, want %q", f.Reason, core.ReasonPending)
+			if f.Reason != core.ReasonLoss {
+				t.Errorf("TOB.QUOTE.REFDATA_KNOWN: reason %q, want %q", f.Reason, core.ReasonLoss)
 			}
 		case core.Violation:
 			t.Errorf("TOB.QUOTE.REFDATA_KNOWN: violation while datagrams sent before the quote are buffered: %s", f.Detail)
@@ -227,5 +227,115 @@ func TestTOBRefdataKnownEvictionReportsHeldVerdicts(t *testing.T) {
 	}
 	if truncated != 12 {
 		t.Errorf("TOB.QUOTE.REFDATA_KNOWN: %d unverifiable (truncated), want 12 (the held verdicts)", truncated)
+	}
+}
+
+// countReason counts one rule's Unverifiable findings with one reason.
+func countReason(ac *allCapture, ruleID, reason string) int {
+	n := 0
+	for _, f := range findingsFor(ac, ruleID) {
+		if f.Status == core.Unverifiable && f.Reason == reason {
+			n++
+		}
+	}
+	return n
+}
+
+// holdOneUnknown sends a quote for 999 at 10.6 s, then eight quotes for 500, so
+// that the engine classifies the first quote and holds its verdict.
+func holdOneUnknown(t *testing.T, e *Engine, ac *allCapture, ch uint8) {
+	t.Helper()
+	sendTOBQuote(e, ch, 1, 999, 10*nsPerSec+6*nsPerSec/10)
+	for i := uint64(2); i <= 9; i++ {
+		sendTOBQuote(e, ch, i, 500, 10*nsPerSec+6*nsPerSec/10+i)
+	}
+	if n := countStatus(ac, "TOB.QUOTE.REFDATA_KNOWN", core.Pass); n != 0 {
+		t.Fatalf("setup: %d pass before the quotes for 500 were classified", n)
+	}
+	s := e.refdata.channels[refdataKey{src: srcA, ch: ch}]
+	if s == nil || len(s.heldUnknown) != 1 {
+		t.Fatal("setup: the verdict for 999 is not held")
+	}
+}
+
+// TestTOBRefdataKnownResetBeforeTheQuoteIsNotJudgedOnTheOldSet: the refdata path
+// starts a new era at 10.5 s, before the quote at 10.6 s, and the reset datagram
+// arrives while the verdict is held. Process classifies the old era's buffer
+// before it queues the reset datagram. The verdict must wait for the reset, which
+// clears the set, and not be decided on the old set when the old buffer is empty.
+func TestTOBRefdataKnownResetBeforeTheQuoteIsNotJudgedOnTheOldSet(t *testing.T) {
+	const ch = uint8(41)
+	e, ac, _, _ := newReorderTOBEngine(t, ch)
+	clearFindings(ac)
+	holdOneUnknown(t, e, ac, ch)
+
+	reset := refdataPath{ch: ch, era: 1}
+	reset.sendManifest(e, 1, 1, 2, 10*nsPerSec+nsPerSec/2)
+	if n := countStatus(ac, "TOB.QUOTE.REFDATA_KNOWN", core.Violation); n != 0 {
+		t.Fatalf("TOB.QUOTE.REFDATA_KNOWN: %d violation(s) on the old set, with the reset sent before the quote", n)
+	}
+	reset.sendDef(e, 2, 500, 1, 11*nsPerSec)
+	seq := uint64(3)
+	for ts := uint64(12); ts <= 20; ts++ {
+		reset.sendManifest(e, seq, 1, 2, ts*nsPerSec)
+		seq++
+	}
+	e.Flush()
+	if n := countStatus(ac, "TOB.QUOTE.REFDATA_KNOWN", core.Violation); n != 0 {
+		t.Errorf("TOB.QUOTE.REFDATA_KNOWN: %d violation(s), want 0", n)
+	}
+	var na int
+	for _, f := range findingsFor(ac, "TOB.QUOTE.REFDATA_KNOWN") {
+		if f.Status == core.NA && f.InstrumentID == 999 {
+			na++
+		}
+	}
+	if na != 1 {
+		t.Errorf("TOB.QUOTE.REFDATA_KNOWN: %d NA for 999, want 1 (the reset cleared the set before the quote)", na)
+	}
+}
+
+// TestTOBRefdataKnownDuplicateReleasesTheVerdict: the last refdata datagram sent
+// before the held quote arrives twice, and the next datagram is a set change sent
+// after the quote. classify discards the duplicate. The verdict must still be
+// decided when the duplicate leaves the buffer, on the set at the quote, and not
+// after the set change: the quote is a Violation, not NA.
+func TestTOBRefdataKnownDuplicateReleasesTheVerdict(t *testing.T) {
+	const ch = uint8(41)
+	e, ac, path, seq := newReorderTOBEngine(t, ch)
+	clearFindings(ac)
+	holdOneUnknown(t, e, ac, ch)
+
+	path.sendManifest(e, seq-1, 1, 1, 10*nsPerSec) // a duplicate of the datagram at 10 s
+	path.sendManifest(e, seq, 2, 2, 10*nsPerSec+7*nsPerSec/10)
+	seq++
+	for ts := uint64(11); ts <= 20; ts++ {
+		path.sendManifest(e, seq, 2, 2, ts*nsPerSec)
+		seq++
+	}
+	if n := countStatus(ac, "TOB.QUOTE.REFDATA_KNOWN", core.Violation); n != 1 {
+		t.Errorf("TOB.QUOTE.REFDATA_KNOWN: %d violation(s) before Flush, want 1 (999 is not in the set the publisher had at the quote)", n)
+	}
+	if n := countStatus(ac, "TOB.QUOTE.REFDATA_KNOWN", core.NA); n != 0 {
+		t.Errorf("TOB.QUOTE.REFDATA_KNOWN: %d NA, want 0; the verdict was decided on the set change sent after the quote", n)
+	}
+}
+
+// TestTOBRefdataKnownHeartbeatsReleaseAStoppedPath: the refdata path stops while a
+// verdict is held, and mktdata then sends only Heartbeats. The stop check runs for
+// each mktdata datagram, so the verdict comes out before Flush.
+func TestTOBRefdataKnownHeartbeatsReleaseAStoppedPath(t *testing.T) {
+	const ch = uint8(41)
+	e, ac, _, _ := newReorderTOBEngine(t, ch)
+	clearFindings(ac)
+	holdOneUnknown(t, e, ac, ch)
+
+	for i := uint64(10); i <= 18; i++ {
+		f, sf := wire.Decode(buildHeartbeatFrame(wire.MagicTOB, 40*nsPerSec+i, ch), wire.MagicTOB)
+		f.Header.Sequence = i
+		e.Process(srcA, f, core.PortMktData, sf)
+	}
+	if n := countReason(ac, "TOB.QUOTE.REFDATA_KNOWN", core.ReasonLoss); n != 1 {
+		t.Errorf("TOB.QUOTE.REFDATA_KNOWN: %d unverifiable (loss) before Flush, want 1", n)
 	}
 }

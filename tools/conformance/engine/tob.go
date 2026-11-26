@@ -32,6 +32,7 @@ import (
 // checkTOB is called from the classify loop for mktdata-port frames on the TOB
 // feed.  It routes Quote and Trade messages to the refdata-consumer check.
 func (e *Engine) checkTOB(f *wire.Frame, port core.Port, ch uint8) {
+	e.releaseStoppedUnknown(ch, f.Header.SendTS)
 	for _, m := range f.Messages {
 		switch m.Type {
 		case wire.TypeQuote:
@@ -63,11 +64,6 @@ func (e *Engine) checkTOBRefdata(port core.Port, seq, sendTS uint64, ch uint8, i
 	}
 
 	k, s := e.refdata.forChannelKey(ch)
-	if s != nil && len(s.heldUnknown) > 0 && e.refdataStopped(k, sendTS) {
-		// The refdata path stopped, so no refdata datagram releases the held
-		// verdicts before Flush. Decide them now.
-		e.releaseUnknown(k, s, sendTS)
-	}
 	if s == nil || !channelReady(s) {
 		// Channel exists but has not reached ready(): NA — not conclusive.
 		e.Emit("TOB.QUOTE.REFDATA_KNOWN", core.NA, port, seq, ch, instrID,
@@ -118,8 +114,8 @@ const unknownSilence = 10 * time.Second
 // verdict until it can be decided.
 //
 // **The set the message is judged against is not yet the publisher's set at the
-// message.** Each (source, port, channel) series has its own reorder buffer, and
-// the refdata port sends a few datagrams a second. So the engine classifies a
+// message.** Each channel instance has its own reorder buffer, and the refdata
+// port sends a few datagrams a second. So the engine classifies a
 // refdata datagram several seconds after it arrives, and a mktdata datagram sent
 // after it is classified first. A publisher that adds an instrument sends the
 // ManifestSummary with the new Manifest Seq first, then the first quote for the
@@ -140,12 +136,13 @@ const unknownSilence = 10 * time.Second
 //
 // When the buffer holds no such datagram, the verdict is decided now. When the
 // refdata path stopped sending, its buffer is not released before Flush, so the
-// verdict is Unverifiable, reason pending.
+// verdict is Unverifiable, reason loss, as REFDATA.NEVER_REACHES_READY reports a
+// datagram stranded in the same buffer.
 func (e *Engine) holdUnknown(k refdataKey, s *channelRefdataState, h heldUnknown) {
-	pending, stranded := e.refdataUnclassifiedWithin(k, 0, h.sendTS, h.sendTS, e.unknownSilence())
+	pending, stranded := e.refdataHeldThrough(k, h.sendTS, h.sendTS)
 	switch {
 	case stranded:
-		e.unverified("TOB.QUOTE.REFDATA_KNOWN", core.ReasonPending, h.port, h.seq, h.ch, h.instrID,
+		e.unverified("TOB.QUOTE.REFDATA_KNOWN", core.ReasonLoss, h.port, h.seq, h.ch, h.instrID,
 			fmt.Sprintf("instrument %d not in refdata def set for channel %d, and the refdata path stopped with datagrams from before the message unclassified", h.instrID, h.ch))
 	case pending:
 		if len(s.heldUnknown) >= maxHeldUnknown {
@@ -174,11 +171,11 @@ func (e *Engine) releaseUnknown(k refdataKey, s *channelRefdataState, nowTS uint
 	held := s.heldUnknown
 	s.heldUnknown = nil
 	for _, h := range held {
-		pending, stranded := e.refdataUnclassifiedWithin(k, 0, h.sendTS, max(nowTS, h.sendTS), e.unknownSilence())
+		pending, stranded := e.refdataHeldThrough(k, h.sendTS, max(nowTS, h.sendTS))
 		switch {
 		case stranded:
 			e.emitHeld(h, func() {
-				e.unverified("TOB.QUOTE.REFDATA_KNOWN", core.ReasonPending, h.port, h.seq, h.ch, h.instrID,
+				e.unverified("TOB.QUOTE.REFDATA_KNOWN", core.ReasonLoss, h.port, h.seq, h.ch, h.instrID,
 					fmt.Sprintf("instrument %d not in refdata def set for channel %d, and the refdata path stopped with datagrams from before the message unclassified", h.instrID, h.ch))
 			})
 		case pending:
@@ -227,6 +224,48 @@ func (e *Engine) emitHeld(h heldUnknown, fn func()) {
 	e.curSrc, e.curUnknownSchema = h.src, h.unknownSchema
 	defer func() { e.curSrc, e.curUnknownSchema = src, unknown }()
 	fn()
+}
+
+// releaseStoppedUnknown decides the held verdicts of the refdata instance that
+// channel ch reads when its refdata path stopped. No refdata datagram releases
+// them before Flush then. It runs once for each mktdata datagram, Heartbeat
+// included, so the verdicts come out while mktdata still sends anything at all.
+func (e *Engine) releaseStoppedUnknown(ch uint8, nowTS uint64) {
+	if e.refdata == nil {
+		return
+	}
+	k, s := e.refdata.forChannelKey(ch)
+	if s != nil && len(s.heldUnknown) > 0 && e.refdataStopped(k, nowTS) {
+		e.releaseUnknown(k, s, nowTS)
+	}
+}
+
+// releaseAfterRefdata releases the held verdicts that waited for the refdata
+// datagram classify just handled. classify defers it for every refdata datagram,
+// a discarded duplicate included: a duplicate also leaves the buffer, and it can
+// be the last datagram from before a held message.
+func (e *Engine) releaseAfterRefdata(pt *portTracker, ch uint8) {
+	if e.refdata == nil {
+		return
+	}
+	k := refdataKey{src: pt.src, ch: ch}
+	if s, ok := e.refdata.channels[k]; ok {
+		e.releaseUnknown(k, s, 0)
+	}
+}
+
+// refdataHeldThrough is refdataUnclassifiedWithin for a held verdict: it reports
+// whether the refdata of instance k still holds a datagram sent at or before ts.
+// It also reads the datagram that Process is entering a new era with
+// (portTracker.incoming). Process classifies the old era's buffer before it queues
+// that datagram, and the datagram resets the set.
+func (e *Engine) refdataHeldThrough(k refdataKey, ts, nowTS uint64) (pending, stranded bool) {
+	pending, stranded = e.refdataUnclassifiedWithin(k, 0, ts, nowTS, e.unknownSilence())
+	if pt, ok := e.ports[instanceKey{src: k.src, port: core.PortRefData, ch: k.ch}]; ok &&
+		pt.incoming != nil && pt.incoming.frame.Header.SendTS <= ts {
+		pending = true
+	}
+	return pending, stranded
 }
 
 // refdataStopped reports whether the refdata path of one instance sent nothing
