@@ -207,3 +207,23 @@ func TestMBPBaselineBehindTheLastOneIsNotCompared(t *testing.T) {
 		t.Errorf("after the late group: pass=%d violation=%d, want 2 and 0", pass, viol)
 	}
 }
+
+// The hole after a baseline at the last uint32 Per-Instrument Seq has its top at
+// 2^32. A late group at K = 2^32 - 2 is adopted, so delta 2^32 - 1, which
+// deleted bid(99), is pruned from the journal. A uint32 top wrapped to 0, the
+// adoption closed the hole at once, and the next correct group at 2^32 - 1 was
+// a violation.
+func TestMBPHoleAtTheLastSeqDoesNotWrap(t *testing.T) {
+	const top = ^uint32(0)
+	tape := newTape().
+		group(1, 0, 1, top-2, 0, bid(100, 5), bid(99, 3)).
+		delta(top-1, mbpClearSideBid, mbpActionChange, 100, 6).
+		delta(top, mbpClearSideBid, mbpActionDelete, 99, 0).
+		group(1, 1, 2, top, 0, bid(100, 6)).
+		group(1, 1, 3, top-1, 0, bid(100, 6), bid(99, 3)).
+		group(1, 2, 4, top, 0, bid(100, 6))
+	pass, viol, unver, reorder := oracleOutcome(t, tape, core.ReasonReorder)
+	if pass != 1 || viol != 0 || unver != 3 || reorder != 2 {
+		t.Errorf("pass=%d violation=%d unverifiable=%d reorder=%d, want 1, 0, 3 and 2", pass, viol, unver, reorder)
+	}
+}

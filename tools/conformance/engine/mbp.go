@@ -69,8 +69,9 @@ type mbpInstr struct {
 	// has reached holeTop - 1. The deltas just below holeTop are not in the
 	// journal. A baseline at a K below holeTop - 1 therefore has a hole after it,
 	// and stateAsOf cannot see the hole. holeReason names the cause. See markHole
-	// and finishMBPSnapshot.
-	holeTop    uint32
+	// and finishMBPSnapshot. holeTop is a uint64 because the hole after a
+	// baseline at the last uint32 Per-Instrument Seq has its top at 2^32.
+	holeTop    uint64
 	holeOpen   bool
 	holeReason string
 	// ready is true once a snapshot group for this instrument has completed, which
@@ -149,7 +150,7 @@ func (in *mbpInstr) restart() {
 //
 // Only the highest hole is kept: a baseline that reaches it also reaches every
 // hole below it.
-func (in *mbpInstr) markHole(top uint32, reason string) {
+func (in *mbpInstr) markHole(top uint64, reason string) {
 	if in.holeOpen && top < in.holeTop {
 		return
 	}
@@ -533,7 +534,7 @@ func (e *Engine) checkMBPSeq(in *mbpInstr, k mbpInstrKey, got uint32, seq uint64
 		// deltas below it, so a baseline below got - 1 cannot be compared with this
 		// journal.
 		in.lastSeq, in.lastSeqSet = got, true
-		in.markHole(got, core.ReasonColdStart)
+		in.markHole(uint64(got), core.ReasonColdStart)
 		in.accept(e.curSrc, e.curCaptureEpoch, true)
 		return true
 	}
@@ -579,7 +580,7 @@ func (e *Engine) checkMBPSeq(in *mbpInstr, k mbpInstrKey, got uint32, seq uint64
 			fmt.Sprintf("Per-Instrument Seq jumped %d -> %d (expected %d)", in.lastSeq, got, in.lastSeq+1),
 			reason)
 		in.gapped = true
-		in.markHole(got, core.ReasonLoss)
+		in.markHole(uint64(got), core.ReasonLoss)
 		in.lastSeq = got
 		in.accept(e.curSrc, e.curCaptureEpoch, false)
 		return true
@@ -925,7 +926,7 @@ func (e *Engine) finishMBPSnapshot(m wire.Message, ch uint8, seq uint64) {
 		// Captured before our own baseline: nothing to replay it against.
 		e.unverified(oracle, core.ReasonReorder, core.PortSnapshot, seq, ch, open.key.instrID,
 			fmt.Sprintf("group's Last Instrument Seq %d precedes the adopted baseline's %d", open.lastK, in.baseK))
-	case in.holeOpen && uint64(in.baseK)+1 < uint64(in.holeTop):
+	case in.holeOpen && uint64(in.baseK)+1 < in.holeTop:
 		// **The journal does not continue from the baseline.** The deltas between
 		// the baseline and holeTop are not in the journal (see markHole), and
 		// stateAsOf cannot see that. The diff blamed the publisher for those
@@ -978,7 +979,7 @@ func (e *Engine) finishMBPSnapshot(m wire.Message, ch uint8, seq uint64) {
 	// A group behind the old baseline goes back past deltas that were pruned with
 	// the old baseline, so the journal has a hole after this one.
 	if in.baseSet && open.lastK < in.baseK {
-		in.markHole(in.baseK+1, core.ReasonReorder)
+		in.markHole(uint64(in.baseK)+1, core.ReasonReorder)
 	}
 	in.base = open.levels
 	in.baseK = open.lastK
@@ -996,7 +997,7 @@ func (e *Engine) finishMBPSnapshot(m wire.Message, ch uint8, seq uint64) {
 	in.journal = kept
 	// A baseline at or past holeTop - 1 continues into the journal from holeTop
 	// on, so the hole is behind it now.
-	if in.holeOpen && uint64(open.lastK)+1 >= uint64(in.holeTop) {
+	if in.holeOpen && uint64(open.lastK)+1 >= in.holeTop {
 		in.holeOpen = false
 	}
 	// Clearing this unconditionally replayed a journal with a hole in it and
